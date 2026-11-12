@@ -52,7 +52,7 @@ import {
   type SnapshotManifest,
   type WorkspaceSnapshotEntry,
 } from '@deepseek-ai/dsh-session-snapshot'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, resolveExampleMode, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import { resolvePwshPath } from '@deepseek-ai/dsh-pwsh-local'
 import { parseSessionLog, prepareSessionSnapshotFixtureForComparison } from '@deepseek-ai/dsh-llm-replay'
 
@@ -509,34 +509,10 @@ const workspaceSetups: Record<string, (cwd: string) => Promise<void>> = {
     await mkdir(directory)
     await chmod(directory, 0o555)
   },
-  async 'cua-script-guidance'(cwd) {
-    // Keep the real prompt's bridge URL under the fixture workspace on every host.
-    const source = join(repoRoot, 'packages/experimental/cua')
-    const target = join(cwd, 'cua-runtime')
-    const face = resolveExampleMode() === 'lib' ? 'lib' : 'src'
-    const extension = face === 'lib' ? 'js' : 'ts'
-    const guidanceDirectory = face === 'lib' ? 'lib/types' : 'src'
-    await cp(join(source, face), join(target, face), { recursive: true })
-    await copyFile(join(source, 'package.json'), join(target, 'package.json'))
-    await symlink(join(source, 'node_modules'), join(target, 'node_modules'), 'dir')
-    await copyFile(join(repoRoot, `packages/experimental/cua-macos/${guidanceDirectory}/guidance.${extension}`), join(target, `guidance.${extension}`))
-  },
   async 'windows-acl-skill'(cwd) {
     const target = join(cwd, '.dsh', 'skills', 'diagnose-windows-sandbox-acl', 'SKILL.md')
     await mkdir(dirname(target), { recursive: true })
     await copyFile(join(repoRoot, 'packages/sandbox/sandbox-windows-acl/assets/diagnose-windows-sandbox-acl/SKILL.md'), target)
-  },
-  async 'office-skills'(cwd) {
-    await cp(join(repoRoot, 'packages/skill/skill-office/assets'), join(cwd, 'office-skills'), { recursive: true })
-    // A copied macOS Node binary cannot find its adjacent libnode.dylib.
-    const nodePath = process.execPath.replaceAll("'", "'\\''")
-    await writeFile(join(cwd, 'office-node'), `#!/bin/sh\nexec '${nodePath}' "$@"\n`, { mode: 0o755 })
-    await copyFile(join(repoRoot, 'packages/skill/skill-office/node_modules/@deepseek-ai/libreoffice-kit/lib/cli.js'), join(cwd, 'office-cli.js'))
-  },
-  async 'office-retired-ptc'(cwd) {
-    await workspaceSetups['office-skills']!(cwd)
-    // Keep the removed-tool error without process-specific stack locations.
-    await writeFile(join(cwd, 'office-ptc-node'), '#!/bin/sh\nexec "$(dirname "$0")/office-node" --stack-trace-limit=0 "$@"\n', { mode: 0o755 })
   },
   async 'git-worktree'(cwd) {
     snapshotGit(cwd, ['init', '--initial-branch=main', '--object-format=sha1'])
@@ -753,44 +729,6 @@ function verifyTeamTaskInbox(logs: readonly SessionLog[]): void {
     .toEqual([{ type: 'text', text: '{"timedOut":true}' }])
   expect(results.find(result => result.toolCallId === 'wait-current-change')?.content)
     .toEqual([{ type: 'text', text: '{"timedOut":true}' }])
-}
-
-/** Preserve successful native, program, direct-child, and workflow execution in one flow. */
-function verifyAdvancedToolchain(logs: readonly SessionLog[]): void {
-  expect(logs).toHaveLength(3)
-  const events = parseSessionLog(logs[0]!.content)
-  const calls = events.flatMap(event => event.type === 'tool/call' ? [event.data.name] : [])
-  expect(calls).toEqual(['cordis_inspect_list', 'run_code', 'subagent', 'workflow', 'cordis_inspect_list'])
-  const results = events.flatMap(event => event.type === 'tool/result' ? [event.data.message] : [])
-  expect(results).toHaveLength(5)
-  expect(results.every(result => result.isError === false)).toBe(true)
-  const dispatches = events.flatMap(event => event.type === 'tool/ptc-dispatch' ? [event.data] : [])
-  expect(dispatches).toEqual([expect.objectContaining({ name: 'cordis_inspect_list', isError: false })])
-  const textOf = (index: number) => results[index]!.content
-    .flatMap(block => block.type === 'text' ? [block.text] : []).join('')
-  expect(JSON.parse(textOf(1))).toEqual(['Service', 'Event', 'Config', 'Tool'])
-  expect(textOf(2)).toBe('started subagent agent-1')
-  expect(events.filter(event => event.type === 'subagent/catalog').map(event => event.data))
-    .toContainEqual(expect.objectContaining({ childId: logs[1]!.header.id, name: 'agent-1' }))
-  const completions = events.flatMap(event => event.type === 'user/message'
-    && event.data.source.kind === 'subagent-settled' ? [{
-      sender: event.data.source.senderSessionId,
-      text: event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'),
-    }] : [])
-  expect(completions).toHaveLength(1)
-  expect(completions[0]?.sender).toBe(logs[1]!.header.id)
-  expect(completions[0]?.text).toContain('DIRECT_CHILD_OK')
-  expect(textOf(3)).toContain('WORKFLOW_CHILD_OK')
-  expect(finalTextFromSession(logs[1]!.content)).toBe('DIRECT_CHILD_OK')
-  expect(finalTextFromSession(logs[2]!.content)).toBe('WORKFLOW_CHILD_OK')
-  const headers = events.flatMap(event => event.type === 'request/header' ? [event.data.header] : [])
-  expect(headers).toHaveLength(3)
-  expect(headers[1]!.tools?.map(tool => tool.name)).toEqual(['run_code'])
-  for (const header of [headers[0]!, headers[2]!]) {
-    const names = header.tools?.map(tool => tool.name) ?? []
-    expect(names).toEqual(expect.arrayContaining(['cordis_inspect_list', 'subagent', 'workflow']))
-    expect(names).not.toContain('run_code')
-  }
 }
 
 /** Require real resource results and literal instructions before recording or replay succeeds. */
@@ -1517,14 +1455,6 @@ describe('headless recorded-session snapshots', () => {
               expect(original).toMatchObject({ objective: 'Find marker in both seed files.', maxGoalRounds: 4 })
               expect(changes[1]!.goal).toEqual({ ...original, revision: 2, phase: 'complete' })
             }
-            if (scenario.name.startsWith('office-progressive-')) {
-              const log = actualLogs[0]!.content
-              const results = parseSessionLog(log).flatMap(event => event.type === 'tool/result' ? [event.data.message] : [])
-              expect(results).toHaveLength(4)
-              expect(results.every(result => result.isError === false)).toBe(true)
-              expect(log).toContain('# Office task routing')
-            }
-            if (scenario.name === 'advanced-toolchain') verifyAdvancedToolchain(actualLogs)
             if (scenario.name === 'subagent-depth-two-rejection') {
               expect(actualLogs).toHaveLength(3)
               const leaf = actualLogs[2]!

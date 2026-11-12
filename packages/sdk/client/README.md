@@ -5,8 +5,6 @@ kind: "package-library"
 
 # @deepseek-ai/dsh-sdk-client
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-sdk-client` lets TypeScript programs drive a complete DeepSeek Harness runtime over stdio JSON-RPC. Use `run()` for ordinary text, supported slash commands, and image content blocks, and `onNotification` to observe its notifications. `HarnessClient` provides direct protocol access. Callers may provide `dshBin`; otherwise the client resolves the same-version `@deepseek-ai/dsh` executable. The client owns the subprocess, reports typed failures, and reaps it on `close()` or `await using`.
@@ -67,8 +65,8 @@ await using harness = new DeepSeekHarness({
   profile: 'sdk',
   dshHome: '/absolute/path/to/dsh-home',
   patches: ['./automation.cordis.yml'],
-  provider: 'deepseek-official',
-  model: 'deepseek-v4-flash',
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-5',
   reasoningEffort: ReasoningEffortId('max'),
   maxTokens: 49_152,
 })
@@ -160,7 +158,6 @@ Read these pages when the client contract is not enough. They move from the wire
 - [SDK wire protocol](../protocol/README.md) — the JSON-RPC methods and payload shapes this client speaks.
 - [JSON-RPC serving plugin](../server/README.md) — the runtime plugin that serves this client.
 - [Python SDK](../../../python/README.md) — the design twin that shares the same runtime peer and protocol.
-- [SDK subagent backend](../../subagent/subagent-dsh-sdk/README.md) — a harness-internal consumer of this client.
 - [SDK application bundle](../../bundle/sdk-app/README.md) — the `dsh --profile sdk` runtime application this client launches.
 
 -----

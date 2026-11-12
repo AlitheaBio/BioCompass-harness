@@ -40,13 +40,9 @@ const binScript = fileURLToPath(new URL('../../../../../../packages/test-support
 const dshBinScript = fileURLToPath(new URL('../../../../src/bin.ts', import.meta.url))
 const tsconfigPath = fileURLToPath(new URL('../../../../../../tsconfig.json', import.meta.url))
 const reasoningConfigPath = fileURLToPath(new URL('./fixtures/cli.patch.yml', import.meta.url))
-const deepseekDefaultsConfigPath = fileURLToPath(new URL('./fixtures/deepseek-defaults.patch.yml', import.meta.url))
 const piAiDefaultsConfigPath = fileURLToPath(new URL('./fixtures/pi-ai-defaults.patch.yml', import.meta.url))
 const piAiConversationUpdatesConfigPath = fileURLToPath(new URL('./fixtures/pi-ai-conversation-updates.patch.yml', import.meta.url))
 const headlessOverlayPath = fileURLToPath(new URL('./fixtures/headless-profile.patch.yml', import.meta.url))
-const autoReviewOverlayPath = fileURLToPath(new URL('./fixtures/auto-review.patch.yml', import.meta.url))
-const autoShutdownOverlayPath = fileURLToPath(new URL('./fixtures/auto-shutdown.patch.yml', import.meta.url))
-const autoIntegrationPath = fileURLToPath(new URL('../../../../../../packages/experimental/auto-review/cordis.patch.yml', import.meta.url))
 const headlessSessionExpected = join(goldensDir, 'headless-profile', 'session.expected.jsonl')
 const headlessReasoningExpected = join(goldensDir, 'headless-profile', 'reasoning.stderr.expected.txt')
 const headlessFailureExpected = join(goldensDir, 'headless-profile', 'stderr.expected.txt')
@@ -301,87 +297,6 @@ async function persistedLogs(cwd: string, root: string = join(cwd, '.sessions'))
 }
 
 describe('headless stream-json snapshots', () => {
-
-  it('preserves Auto through shutdown and requires its integration when reopening', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'headless-auto-shutdown-'))
-    const options = {
-      cwd,
-      binScript: dshBinScript,
-      configPath: autoShutdownOverlayPath,
-      tsconfigPath,
-      env: { DSH_TELEMETRY_DISABLED: '1' },
-    }
-    const args = ['headless', '--patch', autoShutdownOverlayPath]
-    let sessionId = ''
-    try {
-      for (const wake of [1, 2]) {
-        const result = await runLoaderSmoke({
-          ...options,
-          label: `Auto shutdown wake ${wake}`,
-          binArgs: [
-            ...args, '--patch', autoIntegrationPath, '--json',
-            ...wake === 1 ? ['--permission-mode', 'auto'] : ['--session-id', sessionId],
-            'Record this wake without calling tools.',
-          ],
-          inspect: async () => {
-            const logs = await persistedLogs(cwd, join(cwd, '.dsh', 'sessions'))
-            expect(logs).toHaveLength(1)
-            const log = logs[0]!
-            expect(typeof log.header.id).toBe('string')
-            sessionId = log.header.id as string
-            const events = parseJsonl(log.content)
-            expect(events.filter(event => event.type === 'permission/preset').at(-1)?.data)
-              .toEqual({ preset: 'auto' })
-            expect(events.filter(event => event.type === 'approval/policy').at(-1)?.data)
-              .toEqual({ policy: 'ask' })
-            expect(events.filter(event => event.type === 'turn/end')).toHaveLength(wake)
-          },
-        })
-        expect(parseJsonl(result.stdout).at(-1)).toMatchObject({
-          type: 'final', sessionId, reason: { kind: 'completed' }, text: 'AUTO_SHUTDOWN_OK',
-        })
-      }
-      const beforeRejectedRestore = (await persistedLogs(cwd, join(cwd, '.dsh', 'sessions')))[0]!.content
-      const unavailable = await runLoaderSmoke({
-        ...options,
-        label: 'Auto restore without its integration',
-        expectedExitCode: 1,
-        binArgs: [...args, '--json', '--session-id', sessionId, '--permission-mode', 'read-only', 'Continue.'],
-      })
-      expect(unavailable.stderr).toContain('cannot restore preset "auto" without its active integration')
-      expect(parseJsonl(unavailable.stdout).some(event => event.type === 'final')).toBe(false)
-      const afterRejectedRestore = (await persistedLogs(cwd, join(cwd, '.dsh', 'sessions')))[0]!.content
-      expect(afterRejectedRestore.startsWith(beforeRejectedRestore)).toBe(true)
-      // Restore records its seed boundary before live publication validates the saved permission.
-      const appended = parseJsonl(afterRejectedRestore.slice(beforeRejectedRestore.length))
-      expect(appended).toHaveLength(1)
-      const { time, ...marker } = appended[0]!
-      expect(typeof time).toBe('number')
-      expect(marker).toEqual({
-        type: 'session/end-seed',
-        seq: parseJsonl(beforeRejectedRestore).length - 1,
-        data: {},
-      })
-      await runLoaderSmoke({
-        ...options,
-        label: 'Change restored Auto to Read only with its integration',
-        binArgs: [
-          ...args, '--patch', autoIntegrationPath, '--json',
-          '--session-id', sessionId, '--permission-mode', 'read-only', 'Continue.',
-        ],
-        inspect: async () => {
-          const log = (await persistedLogs(cwd, join(cwd, '.dsh', 'sessions')))[0]!
-          const restored = parseJsonl(log.content)
-          expect(restored.filter(event => event.type === 'permission/preset').at(-1)?.data)
-            .toEqual({ preset: 'read-only' })
-          expect(restored.filter(event => event.type === 'turn/end')).toHaveLength(3)
-        },
-      })
-    } finally {
-      await rm(cwd, { recursive: true, force: true })
-    }
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS * 4)
-
   it.each(['src', 'lib'] as const)('runs one task through the product headless profile command (%s)', async (mode) => {
     const task = 'Prove the product headless profile path with one real tool round trip.'
     const result = await runLoaderSmoke({
@@ -544,97 +459,6 @@ describe('headless stream-json snapshots', () => {
     }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS * 2)
 
-  it.each(['allow', 'deny', 'malformed', 'failed'])('runs Auto review with noninteractive %s results', async (mode) => {
-    const result = await runLoaderSmoke({
-      label: `headless Auto review ${mode}`,
-      tempDirPrefix: 'headless-auto-',
-      binScript: dshBinScript,
-      configPath: autoReviewOverlayPath,
-      binArgs: [
-        '--profile', 'headless', '--patch', headlessOverlayPath, '--patch', autoReviewOverlayPath,
-        '--permission-mode', 'auto', '--approval-policy', 'never', '--json', 'Run the CLI probe.',
-      ],
-      tsconfigPath,
-      env: { DSH_AUTO_REVIEW_TEST_MODE: mode, DSH_TELEMETRY_DISABLED: '1' },
-      inspect: async (cwd) => {
-        const logs = await persistedLogs(cwd, join(cwd, '.dsh', 'sessions'))
-        expect(logs).toHaveLength(1)
-        const events = parseJsonl(logs[0]!.content)
-        expect(events.find(event => event.type === 'user/message')?.data).toMatchObject({
-          source: { kind: 'user' },
-        })
-        expect(events.some(event => event.type === 'approval/asked')).toBe(false)
-        expect(events.filter(event => event.type === 'approval/policy').at(-1)?.data).toEqual({ policy: 'never' })
-      },
-    })
-    const events = parseJsonl(result.stdout)
-    const tool = events.find(event => event.type === 'tool_result')
-    if (mode === 'allow') {
-      expect(tool?.status).toBe('completed')
-      expect(tool?.result).toContain('CLI_TOOL_ROUND_TRIP')
-      expect(tool).not.toHaveProperty('error')
-    } else {
-      expect(tool).toMatchObject({
-        status: 'error',
-        error: { code: mode === 'deny' ? 'AUTO_REVIEW_DENIED' : 'AUTO_REVIEW_FAILED' },
-      })
-      if (mode === 'deny') expect(tool?.error).toMatchObject({ reason: 'The caller did not authorize this target.' })
-      expect(tool?.result).toContain('body was not executed')
-      expect(tool?.result).not.toContain('CLI_TOOL_ROUND_TRIP')
-    }
-    expect(events.at(-1)).toMatchObject({ type: 'final', reason: { kind: 'completed' } })
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
-
-  it('rejects Auto selection without the experimental integration', async () => {
-    const result = await runLoaderSmoke({
-      label: 'headless absent Auto integration', tempDirPrefix: 'headless-auto-absent-',
-      binScript: dshBinScript, configPath: headlessOverlayPath,
-      binArgs: ['--profile', 'headless', '--patch', headlessOverlayPath, '--permission-mode', 'auto', '--json', 'Do it.'],
-      tsconfigPath, expectedExitCode: 1, env: { DSH_TELEMETRY_DISABLED: '1' },
-    })
-    const events = parseJsonl(result.stdout)
-    expect(events).toHaveLength(1)
-    expect(events[0]?.type).toBe('error')
-    expect(events[0]?.message).toContain('auto')
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
-
-  it('resumes an Auto denial with caller attribution and saved policy', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'headless-auto-resume-'))
-    const args = ['--profile', 'headless', '--patch', headlessOverlayPath, '--patch', autoReviewOverlayPath, '--json']
-    try {
-      const first = await runLoaderSmoke({
-        label: 'headless Auto denied wake', cwd, binScript: dshBinScript, configPath: autoReviewOverlayPath,
-        binArgs: [...args, '--permission-mode', 'auto', '--approval-policy', 'never', 'Run the CLI probe.'], tsconfigPath,
-        env: { DSH_AUTO_REVIEW_TEST_MODE: 'deny', DSH_TELEMETRY_DISABLED: '1' },
-      })
-      const sessionId = parseJsonl(first.stdout)[0]?.sessionId
-      if (typeof sessionId !== 'string') throw new Error('missing Auto Session identity')
-      expect(parseJsonl(first.stdout).find(event => event.type === 'tool_result')).toMatchObject({
-        error: { code: 'AUTO_REVIEW_DENIED' },
-      })
-      const second = await runLoaderSmoke({
-        label: 'headless Auto authorized wake', cwd, binScript: dshBinScript, configPath: autoReviewOverlayPath,
-        binArgs: [...args, '--session-id', sessionId, 'I authorize the exact CLI probe. Retry it.'], tsconfigPath,
-        env: { DSH_AUTO_REVIEW_TEST_MODE: 'allow', DSH_TELEMETRY_DISABLED: '1' },
-        inspect: async (directory) => {
-          const logs = await persistedLogs(directory, join(directory, '.dsh', 'sessions'))
-          expect(logs).toHaveLength(1)
-          const events = parseJsonl(logs[0]!.content)
-          const sources = events.filter(event => event.type === 'user/message')
-            .map(event => (event.data as { source: { kind: string } }).source)
-            .filter(source => source.kind === 'user')
-          expect(sources).toEqual([{ kind: 'user' }, { kind: 'user' }])
-          expect(events.filter(event => event.type === 'permission/preset').at(-1)?.data).toEqual({ preset: 'auto' })
-          expect(events.some(event => event.type === 'approval/asked')).toBe(false)
-        },
-      })
-      expect(parseJsonl(second.stdout).at(-1)).toMatchObject({
-        type: 'final', sessionId, reason: { kind: 'completed' },
-        text: 'CLI tool round trip complete: CLI_TOOL_ROUND_TRIP',
-      })
-    } finally { await rm(cwd, { recursive: true, force: true }) }
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS * 2)
-
   it('prints a terminal model failure through the product headless profile command', async () => {
     const result = await runLoaderSmoke({
       label: 'product headless profile model failure snapshot',
@@ -733,8 +557,8 @@ describe('headless stream-json snapshots', () => {
       tsconfigPath,
       env: {
         // First-run posture: no key in the environment, none under ./.dsh.
-        DEEPSEEK_API_KEY: '',
-        DEEPSEEK_BASE_URL: '',
+        ANTHROPIC_API_KEY: '',
+        ANTHROPIC_BASE_URL: '',
         NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
       },
       prepare: (cwd) => { runCwd = cwd },
@@ -752,9 +576,8 @@ describe('headless stream-json snapshots', () => {
     // environment, and stops there: configuration carries the reference, so
     // there is no literal-key escape hatch left to offer.
     expect(normalized).toContain(
-      'store DEEPSEEK_API_KEY through the credentials service (the web Models page writes it),',
+      'store ANTHROPIC_API_KEY through the credentials service (the web Models page writes it) or export it',
     )
-    expect(normalized).toContain('or export DEEPSEEK_API_KEY in the launching environment')
     expect(normalized).not.toContain('as a last resort')
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
@@ -773,8 +596,8 @@ describe('headless stream-json snapshots', () => {
         // A key that exists but no HTTP header can carry — the paste the
         // credential guard exists for: without it, `fetch` refuses to build
         // the header and the turn ends on a retried ByteString TypeError.
-        DEEPSEEK_API_KEY: 'sk-\u{1F600}pasted-from-a-chat-window',
-        DEEPSEEK_BASE_URL: '',
+        ANTHROPIC_API_KEY: 'sk-\u{1F600}pasted-from-a-chat-window',
+        ANTHROPIC_BASE_URL: '',
         NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
       },
       prepare: (cwd) => { runCwd = cwd },
@@ -787,7 +610,7 @@ describe('headless stream-json snapshots', () => {
     // The durable failure names the reference to correct and the writer that
     // usually owns it, and stays true in a composition that mounts no Models
     // page at all.
-    expect(normalized).toContain('the API key resolved from DEEPSEEK_API_KEY contains characters')
+    expect(normalized).toContain('the API key resolved from ANTHROPIC_API_KEY contains characters')
     expect(normalized).toContain('the web Models page writes it')
     // Neither the key nor its transport-level symptom (the ByteString error)
     // may reach the user: the code point of one character is still the key.
@@ -834,63 +657,6 @@ describe('headless stream-json snapshots', () => {
         },
       ]
     `)
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
-
-  it('keeps provider comments alive and sends DeepSeek defaults through the one-shot app', async () => {
-    const server = await deepseekDefaultsServer()
-    try {
-      const result = await runLoaderSmoke({
-        label: 'DeepSeek adapter defaults headless stream-json snapshot',
-        tempDirPrefix: 'headless-snapshot-deepseek-defaults-',
-        binScript,
-        libBinScript: binScript,
-        configPath: deepseekDefaultsConfigPath,
-        binArgs: [
-          deepseekDefaultsConfigPath,
-          'return the deterministic response',
-        ],
-        tsconfigPath,
-        env: {
-          // Configuration carries only the reference; the key rides the
-          // launching environment, which is the whole credential plane here.
-          DEEPSEEK_API_KEY: 'snapshot-key',
-          DSH_SNAPSHOT_BASE_URL: server.url,
-          NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
-        },
-      })
-
-      expect(result.stderr).toBe('')
-      expect(server.requests).toHaveLength(2)
-      expect(server.paths).toEqual(['/v1/messages', '/v1/messages'])
-      const agentRequest = server.requests.find(request => request.max_tokens === 256_000)
-      const titleRequest = server.requests.find(isTitleRequest)
-      expect(titleRequest?.max_tokens).toBe(TITLE_MAX_TOKENS)
-      expect(agentRequest?.output_config).toEqual({ effort: 'low' })
-      expect(titleRequest).toBeDefined()
-      const header = (parseJsonl(result.stdout)
-        .map(record => record.event)
-        .find((event): event is JsonObject => (
-          event !== null
-          && typeof event === 'object'
-          && !Array.isArray(event)
-          && 'type' in event
-          && event.type === 'request/header'
-        ))?.data as JsonObject | undefined)?.header as JsonObject | undefined
-      expect(header?.config).toMatchInlineSnapshot(`
-        {
-          "maxTokens": 256000,
-          "model": "deepseek-v4-flash",
-          "provider": "deepseek-official",
-          "reasoningEffort": "low",
-        }
-      `)
-      expect(header?.adapterDefaults).toEqual({
-        maxTokens: true,
-        reasoningEffort: true,
-      })
-    } finally {
-      await server.close()
-    }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('keeps the compatibility stream open until the title request arrives', async () => {

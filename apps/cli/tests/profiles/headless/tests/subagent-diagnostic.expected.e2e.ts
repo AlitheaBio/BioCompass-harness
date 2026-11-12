@@ -128,7 +128,9 @@ describe('parent-owned cold child catalog snapshot', () => {
         const sessionsDir = join(runCwd, '.sessions')
         const files = (await readdir(sessionsDir, { recursive: true })).filter(file => file.endsWith('.jsonl'))
         const logs = await Promise.all(files.map(async file => readFile(join(sessionsDir, file), 'utf8')))
-        const parent = logs.find(content => content.includes('"subagent-diagnostic-parent"'))
+        const headerOf = (content: string): Record<string, unknown> =>
+          JSON.parse(content.split('\n')[0] ?? '{}') as Record<string, unknown>
+        const parent = logs.find(content => headerOf(content).id === parentId)
         if (parent === undefined) throw new Error('missing persisted parent log')
 
         // Discovery reads child catalogs without requiring activation descriptors.

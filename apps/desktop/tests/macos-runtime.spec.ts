@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { signMacOSRuntime } from '../scripts/macos-runtime.ts'
-import { signMacOSRuntimeCode, verifyMacOSNotarizedApplication, verifyMacOSRuntimeCode } from '../scripts/verify-macos-signature.mjs'
+import { signMacOSRuntimeCode, verifyMacOSRuntimeCode } from '../scripts/verify-macos-signature.mjs'
 
 vi.mock('../scripts/verify-macos-signature.mjs', () => ({
-  signMacOSRuntimeCode: vi.fn(), verifyMacOSNotarizedApplication: vi.fn(), verifyMacOSRuntimeCode: vi.fn(),
+  signMacOSRuntimeCode: vi.fn(), verifyMacOSRuntimeCode: vi.fn(),
 }))
 const roots: string[] = []
 function root(): string {
@@ -26,34 +26,6 @@ it('signs Mach-O files in their final locations and verifies each signature', as
   await expect(signMacOSRuntime(path, 'com.example.app', identity, 'arm64')).resolves.toBe(1)
   expect(signMacOSRuntimeCode).toHaveBeenCalledWith(join(path, 'addon.node'), expect.stringMatching(/^com\.example\.app\.runtime\.[a-f0-9]{64}$/u), identity, undefined)
   expect(verifyMacOSRuntimeCode).toHaveBeenCalledWith(join(path, 'addon.node'), identity)
-})
-
-const helperBundle = 'node_modules/@deepseek-ai/dsh-experimental-cua-macos/native/bin/darwin-arm64/generation/DSH Computer Use.app'
-function machO(path: string): void {
-  mkdirSync(join(path, '..'), { recursive: true })
-  writeFileSync(path, Buffer.from('cffaedfe00000000', 'hex'))
-}
-
-it('verifies the notarized Computer Use helper as a bundle and signs other bundles per file', async () => {
-  const path = root()
-  machO(join(path, helperBundle, 'Contents/MacOS/dsh-cua-native'))
-  writeFileSync(join(path, helperBundle, 'Contents/Info.plist'), '<plist/>')
-  // LibreOffice ships an unsigned application bundle whose executables are signed in place.
-  const office = join(path, 'node_modules/@deepseek-ai/libreoffice-kit-darwin-arm64/program/LibreOfficeDev.app/Contents/MacOS/soffice')
-  machO(office)
-  machO(join(path, 'addon.node'))
-  await expect(signMacOSRuntime(path, 'com.example.app', identity, 'arm64')).resolves.toBe(2)
-  expect(verifyMacOSNotarizedApplication).toHaveBeenCalledExactlyOnceWith(join(path, helperBundle), identity)
-  expect(vi.mocked(signMacOSRuntimeCode).mock.calls.map(([file]) => file).sort()).toEqual([join(path, 'addon.node'), office].sort())
-})
-
-it('rejects a helper bundle that fails notarized-application verification before signing any file', async () => {
-  const path = root()
-  machO(join(path, helperBundle, 'Contents/MacOS/dsh-cua-native'))
-  machO(join(path, 'addon.node'))
-  vi.mocked(verifyMacOSNotarizedApplication).mockImplementationOnce(() => { throw new Error('stapler validate exited with 65') })
-  await expect(signMacOSRuntime(path, 'com.example.app', identity, 'arm64')).rejects.toThrow('stapler validate')
-  expect(signMacOSRuntimeCode).not.toHaveBeenCalled()
 })
 
 // File symlinks in these macOS fixtures require privileges unavailable to ordinary Windows processes.
@@ -112,23 +84,17 @@ it('awaits other signers before rejecting and permitting output cleanup', async 
   expect(verifyMacOSRuntimeCode).toHaveBeenCalledWith(join(path, 'b.node'), identity)
 })
 
-it.each(['arm64', 'x64'] as const)('selects %s Node entitlements and keeps helpers JIT-only', async (arch) => {
+it.each(['arm64', 'x64'] as const)('selects %s Node entitlements and leaves native addons without entitlements', async (arch) => {
   const path = root()
   mkdirSync(join(path, 'dependencies/node/bin'), { recursive: true })
   const node = join(path, 'dependencies/node/bin/node')
   const addon = join(path, 'addon.node')
-  const helpers = ['arm64', 'x64'].map(helperArch => join(path, 'node_modules/@deepseek-ai', `libreoffice-kit-darwin-${helperArch}`, 'bin/libreoffice-kit'))
-  for (const helper of helpers) mkdirSync(join(helper, '..'), { recursive: true })
-  for (const file of [node, addon, ...helpers]) writeFileSync(file, Buffer.from('cffaedfe00000000', 'hex'))
+  for (const file of [node, addon]) writeFileSync(file, Buffer.from('cffaedfe00000000', 'hex'))
   await signMacOSRuntime(path, 'com.example.app', identity, arch)
   const nodePlist = join(import.meta.dirname, '../scripts', arch === 'x64' ? 'node-x64-entitlements.plist' : 'jit-entitlements.plist')
   expect(signMacOSRuntimeCode).toHaveBeenCalledWith(node, expect.any(String), identity, nodePlist)
   const xml = readFileSync(nodePlist, 'utf8')
   expect(xml).toMatch(/<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\s*\/>/u)
   expect(/<key>com\.apple\.security\.cs\.allow-unsigned-executable-memory<\/key>\s*<true\s*\/>/u.test(xml)).toBe(arch === 'x64')
-  for (const file of helpers) {
-    expect(signMacOSRuntimeCode).toHaveBeenCalledWith(file, expect.any(String), identity,
-      join(import.meta.dirname, '../scripts/jit-entitlements.plist'))
-  }
   expect(signMacOSRuntimeCode).toHaveBeenCalledWith(addon, expect.any(String), identity, undefined)
 })

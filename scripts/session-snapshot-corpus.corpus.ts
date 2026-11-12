@@ -21,14 +21,12 @@ import { assertSnapshotCorpusPolicy } from './session-snapshot-corpus-policy.ts'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const corpusRoot = join(repoRoot, 'snapshots')
-const profiles = ['acp', 'sdk', 'session', 'web'] as const
+const profiles = ['sdk', 'session', 'web'] as const
 const snapshotAdapters = [
   'apps/web/tests/code-language.snapshot.ts',
-  'apps/web/tests/message-feedback-protocol.snapshot.ts',
   'apps/web/tests/minimal-preset.snapshot.ts',
   'apps/web/tests/preset-migration.snapshot.ts',
   'apps/web/tests/subagent-fork-schedule.snapshot.ts',
-  'snapshots/acp/acp.snapshot.ts',
   'snapshots/sdk/sdk.snapshot.ts',
   'snapshots/session/headless.snapshot.ts',
 ] as const
@@ -97,7 +95,7 @@ async function snapshotNamedTests(): Promise<string[]> {
       }
     }
   }
-  for (const root of ['apps', 'native', 'packages', 'python', 'scripts', 'snapshots', 'website']) {
+  for (const root of ['apps', 'native', 'packages', 'python', 'scripts', 'snapshots']) {
     await visit(join(repoRoot, root), root)
   }
   return files.sort()
@@ -151,11 +149,8 @@ it('keeps every recorded session owned, pinned, redacted, and header-scrubbed', 
       expect(existsSync(join(expectedRoot, EMPTY_WORKSPACE_MARKER)), `${key}: empty workspace marker`)
         .toBe(expectedWorkspace.length === 0)
     }
-    expect(existsSync(join(dir, 'input.json')), `${key}: executable input metadata is ACP-only`)
-      .toBe(scenario.profile === 'acp')
-    if (scenario.profile !== 'acp') {
-      expect(existsSync(join(dir, 'stdout.expected.jsonl')), `${key}: ACP transcript outside ACP`).toBe(false)
-    }
+    expect(existsSync(join(dir, 'input.json')), `${key}: executable input metadata`).toBe(false)
+    expect(existsSync(join(dir, 'stdout.expected.jsonl')), `${key}: stdout transcript`).toBe(false)
 
     if (manifest.header.pin === true) {
       const promptSource = byKey.get(referencedScenario(scenario, manifest.header.systemPromptSource ?? scenario.name))
@@ -210,7 +205,7 @@ it('keeps V3 replay input plus bounded declared historical migration coverage', 
   const summary = assertSnapshotCorpusPolicy(inventory)
   expect(summary.baselineRoles).toBeGreaterThan(0)
   expect(summary).toMatchObject({
-    retainedRoles: 13,
-    retainedScenarios: 10,
+    retainedRoles: 10,
+    retainedScenarios: 7,
   })
 })

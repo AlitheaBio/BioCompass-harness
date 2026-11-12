@@ -145,14 +145,10 @@ def test_stage_runtime_copies_platform_payload(
         spawn_helper.write_bytes(b"helper")
         spawn_helper.chmod(0o755)
         expected[spawn_helper.name] = b"helper"
-    office = executable.parent / f"{executable.name.removesuffix('.exe')}-office"
-    office_asset = office / "node_modules" / "@deepseek-ai" / "libreoffice-kit-wasm" / "assets" / "soffice.data"
-    office_asset.parent.mkdir(parents=True)
-    office_asset.write_bytes(b"office data")
     resources = executable.with_name(executable.name.removeprefix("deepseek-harness-sdk-runtime-").removesuffix(".exe"))
-    resource = resources / "office-skills/office-docx/SKILL.md"
+    resource = resources / "downloads.json"
     resource.parent.mkdir(parents=True)
-    resource.write_text("# Word documents\n")
+    resource.write_text("{}\n")
     destination = tmp_path / "staging"
 
     build_python_release.stage_runtime(destination, "1.2.3", executable, executable.name)
@@ -163,8 +159,7 @@ def test_stage_runtime_copies_platform_payload(
         for path in runtime_dir.glob("deepseek-harness-sdk-runtime-*")
         if path.is_file()
     } == expected
-    assert not (runtime_dir / office.name).exists()
-    assert (runtime_dir / resources.name / resource.relative_to(resources)).read_text() == "# Word documents\n"
+    assert (runtime_dir / resources.name / resource.relative_to(resources)).read_text() == "{}\n"
     pyproject = (destination / "pyproject.toml").read_text()
     assert 'license = "MIT"' in pyproject
     assert 'license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]' in pyproject

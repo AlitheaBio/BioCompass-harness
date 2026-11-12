@@ -293,7 +293,7 @@ describe('web e2e: agent-preset selection', () => {
     // Every shipped preset, each with the sentence saying what it composes —
     // the id alone never said what a preset does.
     expect(snapshot).toContain('Minimal mode')
-    expect(snapshot).toContain('Creator mode')
+    expect(snapshot).toContain('PTC mode')
     await page.keyboard.press('Escape')
   })
 
@@ -377,7 +377,7 @@ describe('web e2e: agent-preset selection', () => {
     await page.getByRole('button', { name: 'Minimal mode', exact: true }).click()
     await page.getByRole('menu').waitFor()
     expect(await page.getByRole('menuitem', { name: /^PTC mode|^Minimal mode/ }).count()).toBe(0)
-    expect(await page.getByRole('menuitem', { name: /^Standard mode|^Creator mode/ }).count()).toBe(2)
+    expect(await page.getByRole('menuitem', { name: /^Standard mode/ }).count()).toBe(1)
     await page.keyboard.press('Escape')
     await expect.poll(async () => (await scaffold.ctx.agentPresets.remoteExportList()).presets.find(preset => preset.isDefault)?.id).toBe('standard')
 
@@ -439,92 +439,4 @@ describe('web e2e: agent-preset selection', () => {
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
   })
-})
-
-it.each([false, true])('starts Creator from Plugins with Coding Tools=%s without changing drafts or defaults', async (developerTools) => {
-  const scaffold = await launchWebScaffold({ developerTools, agentPresets: { default: 'standard' } })
-  let browser: Browser | undefined
-  try {
-    browser = await chromium.launch()
-    const page = await newEnglishPage(browser)
-    const tripwire = watchConsole(page)
-    onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-creator'))
-    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
-    await connectFreshWorkspace(page, scaffold.workspaceCwd)
-    const standard = scaffold.ctx.agents.list()[0]
-    if (standard === undefined) throw new Error('Connecting the workspace did not create a Session')
-    expect(scaffold.ctx.agentPresets.composedPreset(standard.ctx)).toBe('standard')
-    await page.getByRole('button', { name: 'Standard mode', exact: true }).waitFor()
-    const composerOf = (sessionId: SessionId) =>
-      page.locator(`[data-conversation-session="${sessionId}"] [data-composer-input][contenteditable="true"]`)
-    const draft = 'Keep this unsent plugin idea.'
-    await writeComposerDraft(page, composerOf(standard.id), draft)
-
-    await page.getByRole('navigation', { name: 'Global panels' }).getByRole('button', { name: 'Plugins', exact: true }).click()
-    await page.getByRole('button', { name: 'Choose how to add a plugin', exact: true }).click()
-    // The draft's blank lists Standard, so the Creator entry names no blank and the Host creates a separate Creator Session.
-    const [creation] = await Promise.all([
-      page.waitForResponse('**/api/session/create'),
-      page.getByRole('menuitem', { name: /^Let the agent create a plugin/ }).click(),
-    ])
-    expect(creation.request().postDataJSON()).toHaveProperty('payload.args.request.agentPreset', 'cordis')
-    expect(creation.request().postDataJSON()).not.toHaveProperty('payload.args.request.sessionId')
-    const creationBody = await creation.json() as { result: { ok: boolean; value: { sessionId: SessionId; agentPreset: string } } }
-    expect(creationBody).toMatchObject({ result: { ok: true, value: { agentPreset: 'cordis' } } })
-    const creator = scaffold.ctx.agents.get(creationBody.result.value.sessionId)
-    if (creator === undefined) throw new Error('The Creator entry did not publish its Session')
-    expect(creator.id).not.toBe(standard.id)
-    const picker = page.getByTitle('Choose the agent preset for your new task', { exact: true }).filter({ hasText: 'Creator mode' })
-    await picker.waitFor()
-    const creatorComposer = composerOf(creator.id)
-    await creatorComposer.waitFor()
-    expect((await creatorComposer.innerText()).trim()).toBe('')
-    expect(await picker.getAttribute('aria-haspopup')).toBe('menu')
-    expect(await page.getByRole('dialog', { name: 'Add plugin', exact: true }).count()).toBe(0)
-    expect(creator.session.header.agentPreset).toBe('cordis')
-    expect(scaffold.ctx.sessionProjections.checkpoint(creator.session).agentPreset?.val).toBe('cordis')
-    expect(scaffold.ctx.agentPresets.composedPreset(creator.ctx)).toBe('cordis')
-    expect(scaffold.ctx.tools.schemas(creator).map(tool => tool.name))
-      .toEqual(expect.arrayContaining(['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']))
-    // The Session starts under Creator; a chip selection after the list updates records no switch.
-    expect(creator.session.snapshotEvents().filter(event => event.type === 'agent-preset/selected')).toEqual([])
-    expect(creator.session.snapshotEvents().some(event => event.type === 'user/message' || event.type === 'turn/start')).toBe(false)
-    // The draft's blank keeps its preset and starts no turn.
-    expect(scaffold.ctx.sessionProjections.checkpoint(standard.session).agentPreset?.val).toBe('standard')
-    expect(scaffold.ctx.agentPresets.composedPreset(standard.ctx)).toBe('standard')
-    expect(standard.session.snapshotEvents().some(event => event.type === 'agent-preset/selected'
-      || event.type === 'user/message' || event.type === 'turn/start')).toBe(false)
-    expect(scaffold.ctx.settings.describe().find(row => row.ns === 'ui-settings')?.value).toMatchObject({ enabled: developerTools })
-    expect(scaffold.ctx.agentPresets.defaultId).toBe('standard')
-
-    // Close a fixture turn on the real Creator Session without requesting a model.
-    creator.session.append('turn/start', { turn: 1 })
-    creator.session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text: 'Creator fixture completed without a model call.' }], source: { kind: 'user' },
-    }), { surfaceOp: 'append' })
-    creator.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-    await scaffold.ctx.sessions.flush(creator.session)
-    await page.getByText('Creator fixture completed without a model call.', { exact: true }).waitFor()
-    // New Session returns to the Standard blank and its unsent draft.
-    const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
-    const [reopening] = await Promise.all([page.waitForResponse('**/api/session/create'), newSession.click()])
-    expect(reopening.request().postDataJSON()).toHaveProperty('payload.args.request.sessionId', standard.id)
-    expect(await reopening.json()).toMatchObject({ result: { ok: true, value: { sessionId: standard.id, agentPreset: 'standard' } } })
-    await composerOf(standard.id).filter({ hasText: draft }).waitFor()
-    expect(await composerOf(standard.id).innerText()).toBe(draft)
-    const reopened = scaffold.ctx.agents.get(standard.id)
-    if (reopened === undefined) throw new Error('New Session did not keep the Standard blank live')
-    expect(reopened.session.header.agentPreset).toBe('standard')
-    expect(scaffold.ctx.sessionProjections.checkpoint(reopened.session).agentPreset?.val).toBe('standard')
-    expect(scaffold.ctx.agentPresets.composedPreset(reopened.ctx)).toBe('standard')
-    expect(scaffold.ctx.sessionProjections.checkpoint(creator.session).agentPreset?.val).toBe('cordis')
-    await page.getByRole('button', { name: 'Standard mode', exact: true }).waitFor()
-    expect(scaffold.ctx.settings.describe().find(row => row.ns === 'ui-settings')?.value).toMatchObject({ enabled: developerTools })
-    expect(scaffold.ctx.agentPresets.defaultId).toBe('standard')
-    expect(tripwire.pageErrors).toEqual([])
-    expect(tripwire.warnings).toEqual([])
-  } finally {
-    await browser?.close()
-    await scaffold.close()
-  }
 })

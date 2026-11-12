@@ -49,6 +49,7 @@ export function desktopLatestInstallerFilename(target) {
 /**
  * Resolve the production website installer URL shared by approval, upload and purge.
  * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target Supported Desktop target.
+ * @param {NodeJS.ProcessEnv} [env] Packaging or upload environment.
  * @returns {string} Fixed production download URL.
  */
 export function desktopWebsiteInstallerUrl(target, env = process.env) {

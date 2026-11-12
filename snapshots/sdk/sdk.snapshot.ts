@@ -90,14 +90,6 @@ const RUNTIME_WORKSPACE_ENTRIES = [
   '.replay-fixtures',
   '.snapshot-patches',
 ] as const
-const dshSdkDiagnosticChildPatch = fileURLToPath(new URL(
-  './subagent-dsh-sdk-diagnostic/child.cordis.yml',
-  import.meta.url,
-))
-const dshSdkChildConfig = fileURLToPath(new URL(
-  '../../packages/subagent/subagent-dsh-sdk/tests/fixtures/loader/child.patch.yml',
-  import.meta.url,
-))
 
 function dirOf(url: string): string {
   return fileURLToPath(new URL('.', url))
@@ -207,7 +199,6 @@ const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
     expectedFinalResponse: 'MINIMAL_IMAGE_OK',
     expectedTools: { bash: ['command'], read_image: ['file_path'], working_directory: [] },
   },
-  'session-title-stability': { waitForProviderTitle: true },
   'dynamic-tool-updates': {
     expectedFinalResponse: 'DONE',
   },
@@ -241,10 +232,6 @@ const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
   'subagent-continuable': {
     environment: { DSH_SNAPSHOT_HUMAN_STEER: '1' },
   },
-  'subagent-dsh-sdk-diagnostic': {
-    expectedFinalResponse: 'PARENT_OBSERVED_DSH_SDK_DIAGNOSTIC',
-    environment: { DSH_TEST_CHILD_PATCH: dshSdkDiagnosticChildPatch },
-  },
   'persistent-tools': {
     environment: { DSH_SYSTEM_PROMPT: MINIMAL_SYSTEM_PROMPT },
     expectedTools: { bash: ['command'], str_replace_editor: ['command', 'path'], working_directory: [] },
@@ -253,18 +240,6 @@ const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
     runtimeContext: {
       includes: ['Current working directory:', 'Current DSH file policy: danger-full-access', 'Approval prompts are disabled in this session'],
       excludes: ['workspace-write'],
-    },
-  },
-  'subagent-dsh-sdk-dynamic-route': {
-    environment: { DSH_TEST_PARENT_PROVIDER: 'deepseek-official' },
-    dshSdkChild: {
-      config: dshSdkChildConfig,
-      agentConfig: {
-        provider: 'mock',
-        model: 'mock-routed',
-        reasoningEffort: 'max',
-        maxTokens: 777,
-      },
     },
   },
 }
@@ -707,16 +682,11 @@ const legacySdkCompositions = new Set([
   'dynamic-tool-updates',
   'image',
   'ptc',
-  'sdk-account-provider-signout',
   'sdk-default',
-  'sdk-dsh-sdk-diagnostic',
-  'sdk-dsh-sdk-dynamic-route',
   'sdk-minimal',
   'sdk-serial-created',
   'sdk-team-session-mode',
-  'sdk-upload',
   'session-title',
-  'session-title-stability',
   'subagent-activation-limit',
   'subagent-continuable-inheritance',
   'subagent-durability-failure',
@@ -1006,12 +976,6 @@ async function runScenario(scenario: CorpusScenario): Promise<{
           expect(parentMessages.at(-1)).toMatchObject({
             data: { turn: 2, message: { content: [{ type: 'text', text: 'SUBAGENT_SETTLED_NOTED' }] } },
           })
-        }
-        if (scenario.manifest.environment?.DSH_SNAPSHOT_FEEDBACK === '1') {
-          const feedback = result.events.filter(event => event.type.startsWith('feedback/'))
-          expect(feedback.map(event => event.type)).toEqual([
-            'feedback/record', 'feedback/record', 'feedback/message-put', 'feedback/message-put', 'feedback/message-delete',
-          ])
         }
         await waitForRootEvent(
           subscription,
@@ -1501,26 +1465,6 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
           .toBeGreaterThan(events.findIndex(event => event.type === 'compaction/summary'))
       }
       expect(logs.some(log => log.content.includes('llm-replay: script exhausted')), `${scenario.name}: replay script covers every model request`).toBe(false)
-      if (scenario.name === 'subagent-dsh-sdk-diagnostic' || scenario.name === 'subagent-dsh-sdk-dynamic-route') {
-        const parentEvents = records(ordered[0]!.content)
-        const notices = parentEvents.filter(event => event.type === 'user/message'
-          && (event.data as JsonObject | undefined)?.source !== undefined
-          && ((event.data as JsonObject).source as JsonObject).kind === 'subagent-settled')
-        const expectedCount = scenario.name === 'subagent-dsh-sdk-diagnostic' ? 2 : 1
-        expect(notices).toHaveLength(expectedCount)
-        const catalog = parentEvents.filter(event => event.type === 'subagent/catalog')
-        expect(catalog).toHaveLength(expectedCount)
-        expect(catalog.every(event => (event.data as JsonObject).mode === 'external')).toBe(true)
-        const expectedContent = scenario.name === 'subagent-dsh-sdk-diagnostic'
-          ? 'partial child loader answer'
-          : 'child route: mock/mock-routed/max/777; cwd:'
-        for (const notice of notices) expect(JSON.stringify(notice)).toContain(expectedContent)
-        const finalAssistant = parentEvents.findLastIndex(event => event.type === 'assistant/message')
-        for (const notice of notices) expect(parentEvents.indexOf(notice)).toBeLessThan(finalAssistant)
-        expect(parentEvents.filter(event => event.type === 'turn/end')).toEqual([
-          expect.objectContaining({ data: { turn: 1, reason: { kind: 'completed' } } }),
-        ])
-      }
       if (scenario.name === 'dynamic-tool-updates') {
         const selectedTypes = new Set(['request/header', 'request/context', 'developer/message', 'tool/call', 'tool/result'])
         const events = results.flatMap(result => result.events).filter(event => selectedTypes.has(event.type))

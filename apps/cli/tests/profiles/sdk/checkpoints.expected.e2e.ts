@@ -47,14 +47,13 @@ describe.skipIf(!existsSync(dshBin))('sdk-minimal durability checkpoints', () =>
     if (address === null || typeof address === 'string') throw new Error('model server has no TCP address')
     const patch = join(root, 'checkpoint.patch.yml')
     await writeFile(patch, JSON.stringify([
-      { id: 'session-log-deepseek', config: { enabled: false } },
       { insert: [{ id: 'checkpoint-failure', name: fixture }] },
       ...disabled ? [{ id: 'session-checkpoint-policy', disabled: true }] : [],
     ]))
     const harness = new DeepSeekHarness({
       dshBin, profile: 'sdk-minimal', dshHome: join(root, 'home'),
       cwd: root, processCwd: root, patches: [patch],
-      env: { ...process.env, DEEPSEEK_API_KEY: 'keyless-checkpoint-test', DEEPSEEK_BASE_URL: `http://127.0.0.1:${address.port}` },
+      env: { ...process.env, ANTHROPIC_API_KEY: 'keyless-checkpoint-test', ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}` },
     })
     onTestFinished(async () => { await harness.close() })
     const result = await harness.run('Reply OK without calling tools.')

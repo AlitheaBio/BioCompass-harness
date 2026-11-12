@@ -86,7 +86,6 @@ LEGACY_CUSTOM_DISABLED_ROWS = (
     "present",
     "skill",
     "skill-filesystem",
-    "skill-office",
     "workspace-dependencies",
     "time-context",
     "tool-ask-user",
@@ -250,7 +249,6 @@ def write_profile_patch(
             "id": "session-persistence-jsonl",
             "config": {"root": str(sessions), "compression": "none"},
         },
-        {"id": "session-telemetry-otel", "disabled": True},
         *patches,
     ], indent=2))
     return path
@@ -269,7 +267,6 @@ def write_advanced_profile_patch(
                 "persona": "You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.",
             },
         },
-        {"id": "session-log-deepseek", "config": {"enabled": True}},
         *({"id": row_id, "disabled": True} for row_id in LEGACY_CUSTOM_DISABLED_ROWS),
         {"id": "tool-bash", "disabled": True},
         {"id": "tool-pwsh", "disabled": True},
@@ -314,7 +311,7 @@ class MockModelHandler(BaseHTTPRequestHandler):
     direct_child_finished = threading.Event()
 
     def do_POST(self) -> None:
-        if self.path != "/v1/messages":
+        if self.path.split("?", 1)[0] != "/v1/messages":
             self.send_error(404)
             return
         content_length = int(self.headers.get("content-length", "0"))
@@ -852,7 +849,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenario",
-        choices=("all", "sdk-default", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-dynamic-tools", "sdk-fs-search", "sdk-spawn-node", "sdk-mcp", "sdk-snapshot", "sdk-recovery", "sdk-restart", "sdk-profile-plugin", "sdk-plugin-manager", "sdk-office", "sdk-authoring", "sdk-live", "runner", "direct"),
+        choices=("all", "sdk-default", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-dynamic-tools", "sdk-fs-search", "sdk-spawn-node", "sdk-mcp", "sdk-snapshot", "sdk-recovery", "sdk-restart", "sdk-profile-plugin", "sdk-plugin-manager", "sdk-authoring", "sdk-live", "runner", "direct"),
         default="all",
     )
     parser.add_argument("--exe", type=Path)
@@ -871,19 +868,12 @@ def main() -> None:
         parser.error("--scenario sdk-profile-plugin requires --installed-wheel")
     if args.installed_wheel:
         args.exe = assert_installed_wheel_environment()
-    if args.scenario in {"all", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-dynamic-tools", "sdk-fs-search", "sdk-spawn-node", "sdk-snapshot", "sdk-recovery", "sdk-restart", "sdk-office", "sdk-authoring", "sdk-plugin-manager", "runner", "direct"} and args.exe is None:
-        parser.error("--exe is required for custom, minimal, dynamic-tools, fs-search, spawn-node, snapshot, recovery, restart, office, runner, and direct scenarios")
+    if args.scenario in {"all", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-dynamic-tools", "sdk-fs-search", "sdk-spawn-node", "sdk-snapshot", "sdk-recovery", "sdk-restart", "sdk-authoring", "sdk-plugin-manager", "runner", "direct"} and args.exe is None:
+        parser.error("--exe is required for custom, minimal, dynamic-tools, fs-search, spawn-node, snapshot, recovery, restart, runner, and direct scenarios")
     if args.update_snapshots and args.scenario not in {"all", "sdk-minimal", "sdk-minimal-in-history", "sdk-dynamic-tools", "sdk-snapshot", "sdk-recovery", "sdk-restart", "sdk-authoring"}:
         parser.error("--update-snapshots requires --scenario sdk-minimal, sdk-minimal-in-history, sdk-dynamic-tools, sdk-snapshot, sdk-recovery, sdk-restart, sdk-authoring, or all")
     if args.exe is not None and not args.exe.is_file():
         parser.error(f"runtime executable does not exist: {args.exe}")
-
-    if args.scenario in {"all", "sdk-office"}:
-        assert args.exe is not None
-        smoke_sdk_office(args.exe.resolve())
-    if args.scenario == "sdk-office":
-        print("smoke-python-runtime: sdk-office passed")
-        return
 
     if args.scenario in {"all", "runner"}:
         assert args.exe is not None
@@ -962,14 +952,14 @@ def _smoke_sdk_authoring_cached(base_url: str, executable: Path, update_snapshot
     primary = Path(json.loads(subprocess.check_output([str(executable)], encoding="utf-8", env=cache_environment)))
     resources = primary.parent
     manifest = json.loads((primary / "runtime.json").read_text())
-    for mode in ("default", "replacement", "disabled"):
+    for mode in ("default", "replacement"):
         with tempfile.TemporaryDirectory(prefix="dsh-sdk-authoring-") as temporary:
             root = Path(temporary).resolve()
             home = root / "home"
             if mode == "replacement":
-                skill = home / "skills/office-docx/SKILL.md"
+                skill = home / "skills/custom-doc/SKILL.md"
                 skill.parent.mkdir(parents=True)
-                skill.write_text("---\nname: office-docx\ndescription: CUSTOM_OFFICE_DOCX\n---\nUse the bundled Python for custom document work.\n")
+                skill.write_text("---\nname: custom-doc\ndescription: CUSTOM_DOC_SKILL\n---\nUse the bundled Python for custom document work.\n")
             patch = root / "skills.patch.yml"
             # Fix the model-visible clock in this child only; native timers stay live.
             patch_rows = [
@@ -978,15 +968,13 @@ def _smoke_sdk_authoring_cached(base_url: str, executable: Path, update_snapshot
                 ).as_uri()}]},
                 {"id": "time-context", "config": {"timeZone": "UTC"}},
             ]
-            if mode == "disabled":
-                patch_rows.append({"id": "skill-office", "disabled": True})
             patch.write_text(json.dumps(patch_rows))
             first = len(MockModelHandler.requests)
             with DeepSeekHarness(
-                provider="deepseek-official", model="smoke-model", cwd=str(root),
+                provider="anthropic", model="claude-sonnet-4-5", cwd=str(root),
                 dsh_bin=str(executable), dsh_home=str(home), patches=(str(patch),),
                 api_key="sk-keyless-smoke", base_url=base_url,
-                env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1", "DSH_RESOURCE_CACHE": str(cache)},
+                env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_RESOURCE_CACHE": str(cache)},
                 request_timeout_seconds=60,
             ) as harness:
                 result = harness.run(AUTHORING_PROMPT, session_id="authoring")
@@ -994,11 +982,7 @@ def _smoke_sdk_authoring_cached(base_url: str, executable: Path, update_snapshot
             requests = MockModelHandler.requests[first:]
             assert len(requests) == 2, requests
             prompt = json.dumps(requests[0], ensure_ascii=False)
-            assert ("- `office`:" in prompt) == (mode != "disabled"), mode
-            for name in ("office-docx", "office-pptx", "office-xlsx", "office-render", "office-recalculate", "office-export-pdf"):
-                assert (name in prompt) == (mode != "disabled"), (mode, name)
-            assert "render --input" not in prompt and "libreofficeKit" not in prompt, mode
-            assert ("CUSTOM_OFFICE_DOCX" in prompt) == (mode == "replacement"), mode
+            assert ("CUSTOM_DOC_SKILL" in prompt) == (mode == "replacement"), mode
             tool_result = next(block for message in requests[1]["messages"]
                                for block in message.get("content", [])
                                if isinstance(block, dict) and block.get("tool_use_id") == "authoring-runtime")
@@ -1057,8 +1041,8 @@ def smoke_sdk_plugin_manager(base_url: str, executable: Path, cache: Path) -> No
         }]))
         home = root / "home"
         environment = {"PATH": "", "DSH_RESOURCE_CACHE": str(cache),
-                       "DSH_PERMISSION_MODE": "workspace-write", "DSH_TELEMETRY_DISABLED": "1"}
-        config = dict(provider="deepseek-official", model="smoke-model", cwd=str(root),
+                       "DSH_PERMISSION_MODE": "workspace-write"}
+        config = dict(provider="anthropic", model="claude-sonnet-4-5", cwd=str(root),
                       dsh_bin=str(executable), dsh_home=str(home), env=environment,
                       api_key="sk-keyless-smoke", base_url=base_url, request_timeout_seconds=60)
         with ThreadPoolExecutor(max_workers=2) as worker:
@@ -1091,8 +1075,8 @@ def smoke_sdk_plugin_manager(base_url: str, executable: Path, cache: Path) -> No
             assert result.final_response == PROFILE_PLUGIN_TEXT, result.final_response
         example = Path(__file__).resolve().parent.parent / "python/sdk/examples/manage_plugins.py"
         example_home = root / "example-home"
-        example_environment = {**os.environ, **environment, "DEEPSEEK_BASE_URL": base_url,
-                               "DEEPSEEK_API_KEY": "sk-keyless-smoke"}
+        example_environment = {**os.environ, **environment, "ANTHROPIC_BASE_URL": base_url,
+                               "ANTHROPIC_API_KEY": "sk-keyless-smoke"}
         example_args = [sys.executable, str(example), "--dsh-home", str(example_home),
                         "--workspace", str(root), "--dsh-bin", str(executable)]
         for decision, expected in (("n", "plugin installation rejected"), ("y", "plugin installation saved")):
@@ -1101,112 +1085,6 @@ def smoke_sdk_plugin_manager(base_url: str, executable: Path, cache: Path) -> No
             assert run.returncode == 0, run.stderr
             assert expected in run.stdout, run.stdout
         assert "dsh-sdk-managed-fixture" in json.loads((example_home / "profiles/sdk/package.json").read_text())["dependencies"]
-
-
-def smoke_sdk_office(executable: Path) -> None:
-    """Exercise the relocated profile's bundled Office API and shell commands."""
-    from deepseek_harness import DeepSeekHarness
-
-    checks_path = Path(__file__).resolve().parent / "fixtures/office-render.py"
-    checks = runpy.run_path(checks_path)
-    artifacts = os.environ.get("DSH_OFFICE_TEST_ARTIFACTS")
-    with checks["workspace"](None if artifacts is None else Path(artifacts), prefix="dsh-sdk-office-") as root:
-        relocated = root / executable.name
-        stem = executable.name.removesuffix(".exe")
-        resources = executable.with_name(stem.removeprefix("deepseek-harness-sdk-runtime-"))
-        for source in [*executable.parent.glob(f"{stem}*"), resources]:
-            destination = root / source.name
-            if source.is_dir():
-                shutil.copytree(source, destination)
-            else:
-                shutil.copy2(source, destination)
-        cache_environment = {**os.environ, "DSH_RESOURCE_CACHE": str(root / "cache")}
-        office = Path(json.loads(subprocess.check_output([str(relocated)], encoding="utf-8", env={**cache_environment, "DSH_RUNTIME_DOWNLOAD": "office"})))
-        assert not (office.parent / "primary").exists(), "Office download unexpectedly prepared the authoring environment"
-        adapter = office / "node_modules/@deepseek-ai/libreoffice-kit/package.json"
-        native = stem.removeprefix("deepseek-harness-sdk-runtime-").replace("win-", "win32-").replace("macos-", "darwin-")
-        declared = json.loads(adapter.read_text(encoding="utf-8")).get("optionalDependencies", {})
-        selected = native if f"@deepseek-ai/libreoffice-kit-{native}" in declared else "wasm"
-        expected_backend = "wasm" if selected == "wasm" else "native"
-        engines = [
-            json.loads(manifest.read_text())["engine"]["kind"]
-            for manifest in (office / "node_modules/@deepseek-ai").glob("libreoffice-kit-*/prebuilds.json")
-        ]
-        if engines != [expected_backend]:
-            raise AssertionError(f"Office sidecar must contain only {expected_backend}: {engines}")
-        plugin = root / "office.mjs"
-        shutil.copy2(Path(__file__).resolve().parent / "fixtures/python-sdk-office.mjs", plugin)
-        documents = checks["copy_documents"](root)
-        document = documents["docx"]
-
-        environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith("DSH_") and not any(part in key.upper() for part in ("KEY", "SECRET", "TOKEN", "PASSWORD"))}
-        environment.update(PATH="")
-        node = office / "node/bin" / ("node.exe" if native.startswith("win32-") else "node")
-        cli = adapter.parent / "lib/cli.js"
-        checks["render_cli"](
-            [str(node), str(cli)], documents, root, expected_backend, environment,
-            check_content=False,
-        )
-
-        mode = expected_backend
-        output = root / f"{mode}.pdf"
-        result_path = root / f"{mode}.json"
-        patch = root / f"{mode}.patch.yml"
-        patch.write_text(json.dumps([{"insert": [{
-            "id": "python-sdk-office-smoke",
-            "inject": ["skills"],
-            "name": plugin.as_uri(),
-            "config": {"input": str(document), "output": str(output), "result": str(result_path),
-                       "imageInput": str(documents["pptx"]), "imageOutput": str(root / "node-pptx")},
-        }]}]))
-        with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
-            cwd=str(root),
-            dsh_bin=str(relocated),
-            dsh_home=str(root / f"home-{mode}"),
-            patches=(str(patch),),
-            api_key="sk-keyless-smoke",
-            base_url="http://127.0.0.1:9",
-            env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1", "DSH_RESOURCE_CACHE": str(root / "cache")},
-            # Startup performs three serial Office operations with 120-second engine deadlines.
-            initialize_timeout_seconds=480,
-            request_timeout_seconds=480,
-        ):
-            pass
-        result = json.loads(result_path.read_text())
-        if result["backend"] != expected_backend:
-            raise AssertionError(f"Office conversion did not use {expected_backend}: {result}")
-        if not result["moduleUrl"].startswith(office.as_uri() + "/"):
-            raise AssertionError(f"Office module was not loaded from the downloaded sidecar: {result}")
-        checks["check_render_manifest"](result["images"], expected_backend)
-        pdf = output.read_bytes()
-        if len(pdf) < 100 or not pdf.startswith(b"%PDF-"):
-            raise AssertionError(f"Office conversion produced an invalid PDF at {output}")
-        workbook = root / "input.xlsx"
-        with zipfile.ZipFile(workbook, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
-            archive.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-            archive.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>')
-            archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
-            archive.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>1+2</f><v>0</v></c></row></sheetData></worksheet>')
-        subprocess.run([sys.executable, "-c", """
-import sys, zipfile
-from pathlib import Path
-from xml.etree import ElementTree
-from deepseek_harness.office import convert, render_images, recalculate
-root = Path(sys.argv[1])
-assert convert(root / 'color-blocks.docx', root / 'python.pdf').backend == sys.argv[2]
-rendered = render_images(root / 'python.pdf', root / 'images', pages=[1])
-assert rendered.images and rendered.images[0].path.read_bytes().startswith(b'\\x89PNG')
-recalculate(root / 'input.xlsx', root / 'calculated.xlsx')
-with zipfile.ZipFile(root / 'calculated.xlsx') as archive:
-    sheet = ElementTree.fromstring(archive.read('xl/worksheets/sheet1.xml'))
-    assert sheet.find('.//{*}c[@r="A1"]/{*}v').text == '3'
-""", str(root), expected_backend], env={name: value for name, value in cache_environment.items() if name != "DSH_OFFICE_SIDECAR"}, check=True, timeout=180)
-        assert not (office.parent / "primary").exists(), "Python Office API unexpectedly downloaded authoring resources"
-        print(f"smoke-python-runtime: relocated Office {result['backend']} DOCX produced {len(pdf)} PDF bytes")
 
 
 def assert_installed_wheel_environment() -> Path:
@@ -1265,12 +1143,10 @@ def smoke_sdk_live() -> None:
     """Run a real-model, tool-using two-turn task through installed wheels."""
     from deepseek_harness import DeepSeekHarness
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    base_url = os.environ.get("DEEPSEEK_BASE_URL")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if not api_key:
-        raise AssertionError("sdk-live requires DEEPSEEK_API_KEY")
-    if not base_url:
-        raise AssertionError("sdk-live requires an explicit DEEPSEEK_BASE_URL")
+        raise AssertionError("sdk-live requires ANTHROPIC_API_KEY")
 
     with tempfile.TemporaryDirectory(prefix="dsh-sdk-live-") as temporary:
         root = Path(temporary).resolve()
@@ -1285,13 +1161,12 @@ def smoke_sdk_live() -> None:
             f"Then reply with exactly {LIVE_API_SENTINEL}.\n{marker}"
         )
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="deepseek-v4-flash",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_home=str(dsh_home),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key=api_key,
             base_url=base_url,
@@ -1382,13 +1257,12 @@ def smoke_sdk_default(base_url: str) -> None:
         dsh_home = root / "home"
         sessions = dsh_home / "sessions"
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_home=str(dsh_home),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1404,8 +1278,8 @@ def smoke_sdk_default(base_url: str) -> None:
         # The installed runtime starts with an empty PATH; no checkout or global pnpm can satisfy the tool.
         before = (dsh_home / "profiles/sdk/package.json").read_bytes()
         with DeepSeekHarness(
-            provider="deepseek-official", model="smoke-model", cwd=str(root), dsh_home=str(dsh_home),
-            env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1", "PATH": "",
+            provider="anthropic", model="claude-sonnet-4-5", cwd=str(root), dsh_home=str(dsh_home),
+            env={"DSH_PERMISSION_MODE": "danger-full-access", "PATH": "",
                  "DSH_PRIMARY_RUNTIME": "", "DSH_RESOURCE_CACHE": str(root / "empty-resource-cache")},
             api_key="sk-keyless-smoke", base_url=base_url, request_timeout_seconds=60,
         ) as harness:
@@ -1428,15 +1302,14 @@ def smoke_sdk_custom(base_url: str, executable: Path) -> None:
             sessions = dsh_home / "sessions"
             patch = write_advanced_profile_patch(root, "custom.patch.yml", sessions, mode)
             with DeepSeekHarness(
-                provider="deepseek-official",
-                model="smoke-model",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
                 cwd=str(root),
                 dsh_bin=str(executable),
                 dsh_home=str(dsh_home),
                 patches=(str(patch),),
                 env={
                     "DSH_PERMISSION_MODE": "danger-full-access",
-                    "DSH_TELEMETRY_DISABLED": "1",
                 },
                 api_key="sk-keyless-smoke",
                 base_url=base_url,
@@ -1464,9 +1337,6 @@ def smoke_sdk_minimal(
         if in_history:
             patch = root / "in-history.patch.yml"
             patch.write_text(json.dumps([
-                {"id": "llm-deepseek", "config": {"models": [
-                    {"id": "smoke-model", "systemPromptUpdate": "in-history"},
-                ]}},
                 {"insert": [{
                     "id": "in-history-prompt",
                     "name": (Path(__file__).resolve().parent / "fixtures/python-sdk-in-history-prompt.mjs").as_uri(),
@@ -1474,8 +1344,8 @@ def smoke_sdk_minimal(
             ]))
             patches = (str(patch),)
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_bin=str(executable),
             dsh_home=str(dsh_home),
@@ -1523,21 +1393,16 @@ def smoke_sdk_dynamic_tools(base_url: str, executable: Path, update_snapshots: b
         task.write_text("Call snapshot_ping once.\n", encoding="utf-8")
         patch = write_profile_patch(root, "dynamic-tools.patch.yml", sessions, [
             {"id": "tool-fs", "config": {"applyPatch": True}},
-            {"id": "llm-deepseek", "config": {"models": [
-                {"id": "smoke-model", "toolUpdate": "addition-only"},
-            ]}},
             {"id": "tool-bash", "disabled": True},
             {"id": "tool-pwsh", "disabled": True},
             {"id": "session-title-llm", "disabled": True},
-            # Export acknowledgements can change the request header sequence numbers.
-            {"id": "session-log-deepseek", "config": {"enabled": False}},
             {"insert": [{
                 "id": "dynamic-tools",
                 "name": (Path(__file__).resolve().parent / "fixtures/python-sdk-dynamic-tools.mjs").as_uri(),
             }]},
         ])
         with DeepSeekHarness(
-            provider="deepseek-official", model="smoke-model", cwd=str(root),
+            provider="anthropic", model="claude-sonnet-4-5", cwd=str(root),
             dsh_bin=str(executable), dsh_home=str(dsh_home), patches=(str(patch),),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1",
@@ -1575,15 +1440,14 @@ def smoke_sdk_fs_search(base_url: str, executable: Path) -> None:
             {"id": "tool-fs-search", "config": {"sampleOverCapGlobResults": False}},
         ])
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_bin=str(executable),
             dsh_home=str(dsh_home),
             patches=(str(patch),),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1605,15 +1469,14 @@ def smoke_sdk_spawn_node(base_url: str, executable: Path) -> None:
         sessions = dsh_home / "sessions"
         patch = write_profile_patch(root, "spawn-node.patch.yml", sessions, [])
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_bin=str(executable),
             dsh_home=str(dsh_home),
             patches=(str(patch),),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1638,15 +1501,14 @@ def smoke_sdk_mcp(base_url: str, executable: Path | None) -> None:
         patch = write_mcp_patch(root, sessions, server_script)
         discovery_log = server_script.with_suffix(".log")
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_bin=None if executable is None else str(executable),
             dsh_home=str(dsh_home),
             patches=(str(patch),),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1723,13 +1585,12 @@ def smoke_sdk_profile_plugin(base_url: str) -> None:
             raise AssertionError(f"dsh plugin did not activate the external bundle: {manifest}")
 
         harness = DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_home=str(dsh_home),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1777,11 +1638,6 @@ def smoke_sdk_snapshot_mode(
                 "parentSessionId": SNAPSHOT_SESSION_ID, "prompt": SNAPSHOT_WORKFLOW_CHILD_PROMPT,
                 "direct": {"prompt": SNAPSHOT_DIRECT_CHILD_PROMPT, "callId": "advanced-direct-child"},
             }},
-            {"id": "snapshot-message-feedback", "name": "@deepseek-ai/dsh-message-feedback",
-             "config": {"maxNoteBytes": 1024}},
-            {"id": "snapshot-feedback-producer", "name": (
-                Path(__file__).resolve().parent.parent / "snapshots/sdk/text-turn/feedback-producer.mjs"
-            ).as_uri()},
         ]}])
         creation_patch = write_profile_patch(root, "creation.patch.yml", sessions, [
             {"insert": [{
@@ -1790,15 +1646,14 @@ def smoke_sdk_snapshot_mode(
             }]},
         ])
         with DeepSeekHarness(
-            provider="deepseek-official",
-            model="smoke-model",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
             cwd=str(root),
             dsh_bin=str(executable),
             dsh_home=str(dsh_home),
             patches=(str(patch), str(feedback_patch), str(creation_patch)),
             env={
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
             },
             api_key="sk-keyless-smoke",
             base_url=base_url,
@@ -1835,10 +1690,6 @@ def smoke_sdk_snapshot_mode(
         targets = offloads[0]["data"]["targets"]
         if len(targets) != 1 or targets[0]["imageIndexes"] != [0]:
             raise AssertionError(f"advanced snapshot selected unexpected image occurrences: {targets}")
-        feedback_types = [event.get("type") for event in result.events
-                          if str(event.get("type")).startswith("feedback/")]
-        if feedback_types != ["feedback/record", "feedback/record", "feedback/message-put", "feedback/message-put", "feedback/message-delete"]:
-            raise AssertionError(f"advanced snapshot did not exercise all feedback mutations: {feedback_types}")
         methods = [notification.method for notification in result.notifications]
         expected_children = 2 if mode == "native" else 0
         if methods.count("subagent.started") != expected_children or methods.count("subagent.finished") != expected_children:
@@ -1899,9 +1750,9 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
         patch = write_advanced_profile_patch(root, "restart.patch.yml", sessions)
         first_request = len(MockModelHandler.requests)
 
-        def connect(model: str = "smoke-model") -> DeepSeekHarness:
+        def connect(model: str = "claude-sonnet-4-5") -> DeepSeekHarness:
             return DeepSeekHarness(
-                provider="deepseek-official",
+                provider="anthropic",
                 model=model,
                 cwd=str(root),
                 dsh_bin=str(executable),
@@ -1909,7 +1760,6 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
                 patches=(str(patch),),
                 env={
                     "DSH_PERMISSION_MODE": "danger-full-access",
-                    "DSH_TELEMETRY_DISABLED": "1",
                 },
                 api_key="sk-keyless-smoke",
                 base_url=base_url,
@@ -1951,7 +1801,7 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
             sessions,
         )
         before_resume = logs[RESTART_FIRST_SESSION_ID]
-        with connect("resumed-smoke-model") as harness:
+        with connect("claude-sonnet-4-20250514") as harness:
             session = harness.resume_session(RESTART_FIRST_SESSION_ID)
             if session.id != RESTART_FIRST_SESSION_ID:
                 raise AssertionError(f"resume changed the saved identity: {session.id}")
@@ -1995,10 +1845,10 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
             if record.get("type") == "model/selection"
         ]
         if selection_events != [{"type": "model/selection", "data": {
-            "provider": "deepseek-official", "model": "resumed-smoke-model",
+            "provider": "anthropic", "model": "claude-sonnet-4-20250514",
         }}]:
             raise AssertionError(f"resume did not persist the initialized model: {selection_events}")
-        if requests[0].get("model") != "resumed-smoke-model":
+        if requests[0].get("model") != "claude-sonnet-4-20250514":
             raise AssertionError(f"resumed request ignored the initialized model: {requests[0]}")
         files["resume.json"] = json.dumps({
             "model": requests[0].get("model"),
@@ -2025,7 +1875,6 @@ def smoke_sdk_scheduler_recovery(base_url: str, executable: Path, update_snapsho
         patch = write_profile_patch(root, "recovery.patch.yml", sessions, [
             {"id": "tool-todo", "disabled": False},
             {"id": "session-title-llm", "disabled": True},
-            {"id": "session-log-deepseek", "config": {"enabled": False}},
             {"insert": [{
                 "id": "scheduler-failure-fixture",
                 "name": (
@@ -2037,10 +1886,10 @@ def smoke_sdk_scheduler_recovery(base_url: str, executable: Path, update_snapsho
 
         def connect() -> DeepSeekHarness:
             return DeepSeekHarness(
-                provider="deepseek-official", model="smoke-model", cwd=str(root),
+                provider="anthropic", model="claude-sonnet-4-5", cwd=str(root),
                 dsh_bin=str(executable), dsh_home=str(dsh_home),
                 patches=(str(base_patch), str(patch)),
-                env={"DSH_PERMISSION_MODE": "danger-full-access", "DSH_TELEMETRY_DISABLED": "1"},
+                env={"DSH_PERMISSION_MODE": "danger-full-access"},
                 api_key="sk-keyless-smoke", base_url=base_url, request_timeout_seconds=60,
             )
 
@@ -2113,9 +1962,8 @@ def smoke_direct(base_url: str, executable: Path) -> None:
             **os.environ,
             "DSH_HOME": str(dsh_home),
             "DSH_PERMISSION_MODE": "danger-full-access",
-            "DSH_TELEMETRY_DISABLED": "1",
-            "DEEPSEEK_API_KEY": "sk-keyless-smoke",
-            "DEEPSEEK_BASE_URL": base_url,
+            "ANTHROPIC_API_KEY": "sk-keyless-smoke",
+            "ANTHROPIC_BASE_URL": base_url,
         }
         peer = RuntimePeer(
             [str(executable), "--profile", "sdk", "--patch", str(patch)],
@@ -2123,7 +1971,7 @@ def smoke_direct(base_url: str, executable: Path) -> None:
             environment,
         )
         try:
-            peer.send({"jsonrpc": "2.0", "id": "initialize", "method": "initialize", "params": {"cwd": str(root), "provider": "deepseek-official", "model": "smoke-model"}})
+            peer.send({"jsonrpc": "2.0", "id": "initialize", "method": "initialize", "params": {"cwd": str(root), "provider": "anthropic", "model": "claude-sonnet-4-5"}})
             peer.read_until(lambda message: message.get("id") == "initialize")
             peer.send({
                 "jsonrpc": "2.0",

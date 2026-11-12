@@ -1,11 +1,7 @@
 # Replay patch shared by the ordinary headless snapshot composition. The model
 # script comes from the scenario's committed session JSONL.
 
-- id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
-  disabled: true
-
-- id: plugin-package-inventory-deepseek
+- id: llm-pi-ai
   disabled: true
 
 - id: session-title-llm
@@ -67,6 +63,7 @@
               sampleOverCapGlobResults: false
           - name: '@deepseek-ai/dsh-tool-web'
             config:
+              search: false
               fetch: true
               searchTimeoutMs: 60000
     - id: preset-child

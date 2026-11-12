@@ -101,6 +101,20 @@ export type {
   PiAiThinkingFormat,
 } from './catalog.ts'
 
+const AMBIENT_BASE_URL_ENV: Readonly<Record<string, string>> = {
+  anthropic: 'ANTHROPIC_BASE_URL',
+  openai: 'OPENAI_BASE_URL',
+  google: 'GEMINI_BASE_URL',
+  deepseek: 'DEEPSEEK_BASE_URL',
+  openrouter: 'OPENROUTER_BASE_URL',
+}
+
+function ambientBaseUrl(provider: string): string | undefined {
+  const envName = AMBIENT_BASE_URL_ENV[provider]
+  const raw = envName === undefined ? undefined : process.env[envName]?.trim()
+  return raw !== undefined && raw.length > 0 ? raw : undefined
+}
+
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
@@ -498,6 +512,7 @@ export function resolveProfiles(
     // always shown route keys, and a catalog route must not silently rename
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
+    const effectiveBaseURL = source.baseURL ?? ambientBaseUrl(provider)
     let catalog: RouteCatalog | undefined
     let piProvider: Provider | undefined
     let catalogError: string | undefined
@@ -505,7 +520,7 @@ export function resolveProfiles(
       catalog = resolveRouteModels({
         provider,
         ...source.api === undefined ? {} : { api: source.api },
-        ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
+        ...effectiveBaseURL === undefined ? {} : { baseURL: effectiveBaseURL },
         ...source.models === undefined ? {} : { models: source.models },
         ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
         ...source.compat === undefined ? {} : { compat: source.compat },
@@ -518,7 +533,7 @@ export function resolveProfiles(
         provider,
         displayName,
         ...source.api === undefined ? {} : { api: source.api },
-        ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
+        ...effectiveBaseURL === undefined ? {} : { baseURL: effectiveBaseURL },
         models: catalog.models,
         namesCredential: source.apiKeyEnv !== undefined,
       })

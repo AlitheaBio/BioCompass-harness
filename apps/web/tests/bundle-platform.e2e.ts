@@ -41,22 +41,10 @@ it('disables unsupported bundles, shows the Host restriction, and refuses direct
   const beforeRuntime = runtimeId()
   expect(beforeRuntime).toBeTypeOf('number')
   expect(scaffold.ctx.ptcRuntime.programFormat).toBe('function-body')
-  const names = [name]
-  await page.locator('[data-plugin-panel]').getByRole('button', { name: '更多', exact: true }).click()
-  const cua = page.locator('[data-plugin-package="@deepseek-ai/dsh-cua-bundle"]')
-  expect(await cua.count()).toBe(process.platform === 'darwin' ? 1 : 0)
-  if (process.platform !== 'darwin') {
-    expect((await scaffold.ctx.pluginManager.listBundles()).find(bundle => bundle.name === '@deepseek-ai/dsh-cua-bundle'))
-      .toMatchObject({ listedByDefault: false, enabled: false, error: { code: 'unsupported-platform' } })
-    names.push('@deepseek-ai/dsh-cua-bundle')
-  }
-  for (const bundle of names) {
-    expect(await scaffold.ctx.pluginManager.setBundleEnabled(bundle, true)).toMatchObject({
-      changed: false, application: 'failed', error: { code: 'unsupported-platform' },
-    })
-  }
+  expect(await scaffold.ctx.pluginManager.setBundleEnabled(name, true)).toMatchObject({
+    changed: false, application: 'failed', error: { code: 'unsupported-platform' },
+  })
   expect(await readFile(manifest, 'utf8')).toBe(before)
   expect(runtimeId()).toBe(beforeRuntime)
   expect(scaffold.ctx.ptcRuntime.programFormat).toBe('function-body')
-  expect(scaffold.ctx.get('computerUse')).toBeUndefined()
 })

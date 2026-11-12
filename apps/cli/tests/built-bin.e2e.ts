@@ -2,15 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { Readable, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import {
-  client as createAcpClientApp,
-  methods,
-  ndJsonStream,
-  PROTOCOL_VERSION,
-  type SessionNotification,
-} from '@agentclientprotocol/sdk'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
@@ -192,8 +184,8 @@ function createEnvironmentProbeProfile(home: string, project: string): void {
     '  void ctx.loader.await().then(async () => {',
     "    let text = ''",
     '    for await (const chunk of ctx.llm.stream({',
-    "      provider: 'deepseek-official',",
-    "      model: 'deepseek-v4-flash',",
+    "      provider: 'anthropic',",
+    "      model: 'claude-sonnet-4-5',",
     '      messages: [],',
     '      maxTokens: 32,',
     '    })) {',
@@ -413,14 +405,6 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(sdkHelp.stderr).toBe('')
       expect(sdkHelp.stdout).toContain('Usage: dsh --profile sdk')
 
-      const acpHelp = await runBuiltBin(['acp', '--help'], {
-        DSH_HOME: home,
-        DSH_TELEMETRY_DISABLED: '1',
-      })
-      expect(acpHelp.code).toBe(0)
-      expect(acpHelp.stderr).toBe('')
-      expect(acpHelp.stdout).toContain('Usage: dsh --profile acp')
-
       const missingTask = await runBuiltBin(['--profile', 'headless'], {
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
@@ -445,7 +429,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       const result = await runBuiltBin(['--profile', 'sdk', '--patch', patch], {
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
-        DEEPSEEK_API_KEY: 'built-sdk-startup-failure-no-call',
+        ANTHROPIC_API_KEY: 'built-sdk-startup-failure-no-call',
       }, home)
       expect(result.code).toBe(0)
       expect(result.stdout).toBe('')
@@ -481,8 +465,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         ...process.env,
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
-        DEEPSEEK_API_KEY: 'built-sdk-profile-no-call',
-        DEEPSEEK_BASE_URL: server.baseURL,
+        ANTHROPIC_API_KEY: 'built-sdk-profile-no-call',
+        ANTHROPIC_BASE_URL: server.baseURL,
       },
       extendEnv: false,
     })
@@ -507,7 +491,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         jsonrpc: '2.0',
         id: 1,
         method: 'initialize',
-        params: { cwd: home, provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        params: { cwd: home, provider: 'anthropic', model: 'claude-sonnet-4-5' },
       })}\n`)
       const initialized = await response(1)
       expect(initialized, `${JSON.stringify(initialized)}\n${stderr}`).toMatchObject({
@@ -532,90 +516,6 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     }
   }, SPAWN_TIMEOUT_MS + 30_000)
 
-  it('runs a mock-backed ACP turn through the acp profile and exits on disconnect', async () => {
-    const apiKey = 'built-acp-profile-key'
-    const server = await startMockLlmServer({
-      sequence: ['success'],
-      apiKey,
-      successText: 'ACP BUILT PROFILE OK',
-    })
-    const home = mkdtempSync(join(tmpdir(), 'dsh-built-acp-'))
-    const child = execa(process.execPath, [dshBin, '--profile', 'acp'], {
-      cwd: home,
-      reject: false,
-      timeout: SPAWN_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      env: {
-        ...process.env,
-        DSH_HOME: home,
-        DSH_TELEMETRY_DISABLED: '1',
-        DEEPSEEK_API_KEY: apiKey,
-        DEEPSEEK_BASE_URL: server.baseURL,
-        DSH_PERMISSION_MODE: 'danger-full-access',
-      },
-      extendEnv: false,
-    })
-    const rawOut: string[] = []
-    const passthrough = new Readable({ read() {} })
-    child.stdout.on('data', (chunk: Buffer) => {
-      rawOut.push(chunk.toString('utf8'))
-      passthrough.push(chunk)
-    })
-    child.stdout.on('end', () => { passthrough.push(null) })
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(passthrough) as ReadableStream<Uint8Array>,
-    )
-    const updates: SessionNotification['update'][] = []
-    const clientApp = createAcpClientApp({ name: 'dsh-built-acp-profile' })
-      .onNotification(methods.client.session.update, ({ params }) => {
-        updates.push(params.update)
-        return Promise.resolve()
-      })
-      .onRequest(methods.client.session.requestPermission, () => {
-        return Promise.resolve({ outcome: { outcome: 'cancelled' } })
-      })
-    const client = clientApp.connect(stream).agent
-    try {
-      const initialized = await client.request(methods.agent.initialize, {
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
-      })
-      expect(initialized.agentInfo).toMatchObject({ name: 'deepseek-harness-acp' })
-      expect(initialized.agentCapabilities).toEqual({
-        mcpCapabilities: { http: true },
-        promptCapabilities: { image: false, audio: false, embeddedContext: false },
-        sessionCapabilities: { close: {}, list: {}, resume: {} },
-      })
-      expect('_meta' in initialized).toBe(false)
-      const session = await client.request(methods.agent.session.new, { cwd: home, mcpServers: [] })
-      expect(session.sessionId).toBeTruthy()
-      expect(await client.request(methods.agent.session.prompt, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'reply from the built ACP profile' }],
-      })).toEqual({ stopReason: 'end_turn' })
-      expect(updates).toContainEqual(expect.objectContaining({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'ACP BUILT PROFILE OK' },
-      }))
-      const message = updates.find(update => update.sessionUpdate === 'agent_message_chunk')
-      expect(message !== undefined && 'messageId' in message && typeof message.messageId === 'string').toBe(true)
-      expect(server.requests).toHaveLength(1)
-      child.stdin.end()
-      const result = await child
-      expect(result.exitCode, `signal=${String(result.signal)}; stderr=${result.stderr}`).toBe(0)
-      expect(result.stderr).toBe('')
-      for (const line of rawOut.join('').split('\n').filter(value => value.trim() !== '')) {
-        expect(() => JSON.parse(line) as unknown).not.toThrow()
-      }
-    } finally {
-      child.kill('SIGKILL')
-      await child
-      await server.close()
-      rmSync(home, { recursive: true, force: true })
-    }
-  }, SPAWN_TIMEOUT_MS + 30_000)
-
   it('runs the headless profile through its app-owned task positional', async () => {
     const apiKey = 'built-dsh-headless-key'
     const server = await startMockLlmServer({
@@ -629,8 +529,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       const result = await runBuiltBin(['--profile', 'headless', 'answer', 'from', 'the', 'published', 'entry'], {
         DSH_HOME: home,
         DSH_TELEMETRY_DISABLED: '1',
-        DEEPSEEK_API_KEY: apiKey,
-        DEEPSEEK_BASE_URL: server.baseURL,
+        ANTHROPIC_API_KEY: apiKey,
+        ANTHROPIC_BASE_URL: server.baseURL,
       })
       expect(result.code, result.stderr).toBe(0)
       expect(result.stdout).toBe('published headless profile reached the mock')
@@ -762,7 +662,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     })
     const home = mkdtempSync(join(tmpdir(), 'dsh-home-environment-'))
     const project = mkdtempSync(join(tmpdir(), 'dsh-home-project-'))
-    writeFileSync(join(home, '.credentials.yaml'), `version: 1\nrefs:\n  DEEPSEEK_API_KEY: ${apiKey}\n`, { mode: 0o600 })
+    writeFileSync(join(home, '.credentials.yaml'), `version: 1\nrefs:\n  ANTHROPIC_API_KEY: ${apiKey}\n`, { mode: 0o600 })
     createEnvironmentProbeProfile(home, project)
     try {
       const result = await runBuiltBin(
@@ -770,8 +670,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         {
           DSH_HOME: home,
           DSH_TELEMETRY_DISABLED: '1',
-          DEEPSEEK_API_KEY: undefined,
-          DEEPSEEK_BASE_URL: server.baseURL,
+          ANTHROPIC_API_KEY: undefined,
+          ANTHROPIC_BASE_URL: server.baseURL,
         },
         project,
       )
@@ -1263,10 +1163,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(rows.map(row => [row.id, row.name])).toEqual([
         ['sdk-app-startup', '@deepseek-ai/dsh-sdk-app'],
         ['sdk-jsonrpc-server', '@deepseek-ai/dsh-sdk-jsonrpc-server'],
-        ['deepseek-llm-api-extensions', '@deepseek-ai/dsh-deepseek-llm-api-extensions'],
-        ['session-log-deepseek', '@deepseek-ai/dsh-session-log-deepseek'],
-        ['plugin-package-inventory-deepseek', '@deepseek-ai/dsh-plugin-package-inventory-deepseek'],
-        ['llm-deepseek', '@deepseek-ai/dsh-llm-deepseek-api-key'],
+        ['llm-pi-ai', '@deepseek-ai/dsh-llm-pi-ai'],
         ['sandbox', '@deepseek-ai/dsh-sandbox-local'],
         ['filesystem', '@deepseek-ai/dsh-fs-local'],
         ['attachment-local', '@deepseek-ai/dsh-attachment-local'],

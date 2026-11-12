@@ -7,6 +7,7 @@ export function profileEnvironment(root: string, baseUrl: string): NodeJS.Proces
   Object.assign(env, {
     DSH_PERMISSION_MODE: 'danger-full-access', DSH_TELEMETRY_DISABLED: '1',
     DSH_AGENTS_HOME: join(root, 'agents'), DSH_PRIMARY_RUNTIME: '',
+    ANTHROPIC_API_KEY: 'keyless-profile-test', ANTHROPIC_BASE_URL: baseUrl,
     DEEPSEEK_API_KEY: 'keyless-profile-test', DEEPSEEK_BASE_URL: baseUrl,
     NODE_OPTIONS: '', NODE_PATH: '',
   })

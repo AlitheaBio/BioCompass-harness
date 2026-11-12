@@ -10,19 +10,36 @@ from .errors import SdkProtocolError
 from .models import CommandExecution, JsonObject, Notification
 
 
+_PROVIDER_API_KEY_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+_PROVIDER_BASE_URL_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openai": "OPENAI_BASE_URL",
+    "google": "GEMINI_BASE_URL",
+    "deepseek": "DEEPSEEK_BASE_URL",
+    "openrouter": "OPENROUTER_BASE_URL",
+}
+
+
 @dataclass(slots=True)
 class DeepSeekHarnessConfig:
     """Configuration for launching the local DeepSeek Harness SDK runtime.
 
     The runtime inherits the caller's environment by default, so existing
-    DEEPSEEK_API_KEY and DEEPSEEK_BASE_URL settings keep working. Use ``env`` to
+    provider API key and base URL settings keep working. Use ``env`` to
     intentionally override or inject variables for a subprocess.
     These values are startup input, not a live Session state mirror; Session
     commands do not rewrite this object.
     """
 
-    provider: str = "deepseek-official"
-    model: str = "deepseek-v4-flash"
+    provider: str = "anthropic"
+    model: str = "claude-sonnet-4-5"
     reasoning_effort: str | None = None
     max_tokens: int | None = None
     cwd: str | None = None
@@ -122,9 +139,9 @@ class DeepSeekHarness:
         self._cwd = cwd
         env = dict(self.config.env)
         if self.config.base_url is not None:
-            env["DEEPSEEK_BASE_URL"] = self.config.base_url
+            env[_PROVIDER_BASE_URL_ENV.get(self.config.provider, "ANTHROPIC_BASE_URL")] = self.config.base_url
         if self.config.api_key is not None:
-            env["DEEPSEEK_API_KEY"] = self.config.api_key
+            env[_PROVIDER_API_KEY_ENV.get(self.config.provider, "ANTHROPIC_API_KEY")] = self.config.api_key
 
         self._client = HarnessClient(
             HarnessConfig(

@@ -62,7 +62,7 @@ def run_smoke(repo_root: Path, keep_sessions: bool) -> None:
 
     try:
         with DeepSeekHarness(
-            model="sdk-smoke-model",
+            model="claude-sonnet-4-5",
             cwd=str(repo_root / "python/sdk"),
             runtime_cwd=str(repo_root),
             _launch_args=(
@@ -76,9 +76,8 @@ def run_smoke(repo_root: Path, keep_sessions: bool) -> None:
             env={
                 "DSH_HOME": str(dsh_home),
                 "DSH_PERMISSION_MODE": "danger-full-access",
-                "DSH_TELEMETRY_DISABLED": "1",
-                "DEEPSEEK_BASE_URL": base_url,
-                "DEEPSEEK_API_KEY": "sdk-smoke-key",
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_API_KEY": "sdk-smoke-key",
             },
             request_timeout_seconds=20,
             shutdown_timeout_seconds=2,
@@ -92,9 +91,9 @@ def run_smoke(repo_root: Path, keep_sessions: bool) -> None:
         assert len(MockCompletionHandler.requests) == 1
         request = MockCompletionHandler.requests[0]
         print(json.dumps(request, ensure_ascii=False, indent=2)[:4000])
-        assert request["path"] == "/v1/messages"
+        assert request["path"].split("?", 1)[0] == "/v1/messages"
         assert request["api_key"] == "sdk-smoke-key"
-        assert request["body"]["model"] == "sdk-smoke-model"
+        assert request["body"]["model"] == "claude-sonnet-4-5"
 
         jsonl_files = sorted(session_root.rglob("*.jsonl.zstd"))
         assert jsonl_files, f"no Zstandard JSONL sessions were written under {session_root}"

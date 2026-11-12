@@ -206,7 +206,7 @@ export class HarnessSdkJsonRpcServer {
   }
 
   /**
-   * Validate and configure the SDK route, mounting the DeepSeek fallback only when unowned.
+   * Validate and configure the SDK route against registered model adapters.
    * @param params - SDK handshake parameters.
    * @returns server identity for the handshake.
    */
@@ -231,7 +231,6 @@ export class HarnessSdkJsonRpcServer {
     if (!this.hasAdapterFor(provider)) {
       throw new Error(`no adapter registered for provider "${provider}"`)
     }
-    // Adapter presence was read from this service above; a successful fallback mount also requires it.
     const llm = this.ctx.get('llm') as LlmRuntime
     await llm.resolveCallConfig({
       provider,

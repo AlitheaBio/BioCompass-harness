@@ -30,9 +30,10 @@ it.for(['standard', 'ptc'] as const)('keeps %s plugin changes pending until the 
         requests.push(current)
         if (requests.length === 1) args = { action: 'list_plugins', limit: 100 }
         else if (phase === 'list') {
-          const messages = current.messages as { content: { type: string; content?: { text: string }[] }[] }[]
-          const result = messages.flatMap(message => message.content).findLast(block => block.type === 'tool_result')
-          const page = listPage.parse(JSON.parse(result!.content![0]!.text))
+          const messages = current.messages as { content: string | { type: string; content?: string | { text: string }[] }[] }[]
+          const result = messages.flatMap(message => Array.isArray(message.content) ? message.content : []).findLast(block => block.type === 'tool_result')
+          const resultText = typeof result!.content === 'string' ? result!.content : result!.content![0]!.text
+          const page = listPage.parse(JSON.parse(resultText))
           const row = page.entries.find(entry => entry.moduleName === '@deepseek-ai/dsh-tool-web')
           if (row !== undefined) {
             args = { action: 'set_plugin', target: row.entryId, enabled: false }
@@ -68,7 +69,7 @@ it.for(['standard', 'ptc'] as const)('keeps %s plugin changes pending until the 
   if (address === null || typeof address === 'string') throw new Error('model fixture has no TCP address')
   const env = profileEnvironment(root, `http://127.0.0.1:${address.port}`)
   const options = {
-    cwd: root, processCwd: root, dshHome: join(root, 'home'), env, model: 'deepseek-v4-pro',
+    cwd: root, processCwd: root, dshHome: join(root, 'home'), env, model: 'claude-sonnet-4-5',
     patches: mode === 'ptc' ? [fileURLToPath(new URL('../../../config/examples/ptc.yml', import.meta.url))] : [],
   }
   async function run(restarted: boolean): Promise<void> {
@@ -117,7 +118,7 @@ it.for(['unavailable', 'approved', 'missing-pnpm'] as const)('reports the %s plu
       try { requests.push(JSON.parse(body) as Record<string, unknown>) }
       catch (error) { fixtureError = error }
       const args = scenario === 'missing-pnpm'
-        ? { action: 'install_bundle', target: '@deepseek-ai/dsh-subagent-codex' }
+        ? { action: 'install_bundle', target: '@deepseek-ai/dsh-example-bundle' }
         : { action: 'list_plugins', limit: 1 }
       const call = { type: 'tool_use', id: 'prerequisite', name: 'plugin_manager', input: args }
       response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -139,7 +140,7 @@ it.for(['unavailable', 'approved', 'missing-pnpm'] as const)('reports the %s plu
     env.PATH = root
   }
   const harness = new DeepSeekHarness({ cwd: root, processCwd: root, dshHome: join(root, 'home'),
-    env, model: 'deepseek-v4-pro', approvalRequests: scenario === 'approved' })
+    env, model: 'claude-sonnet-4-5', approvalRequests: scenario === 'approved' })
   let approvals = 0
   const abort = (): void => { void harness.close() }
   test.signal.addEventListener('abort', abort, { once: true })
@@ -155,13 +156,14 @@ it.for(['unavailable', 'approved', 'missing-pnpm'] as const)('reports the %s plu
     const result = JSON.stringify(requests.at(-1)?.messages)
     if (scenario === 'unavailable') expect(result).toContain('unavailable')
     else if (scenario === 'missing-pnpm') {
-      const messages = requests.at(-1)!.messages as { content: { type: string; content?: { text: string }[] }[] }[]
-      const toolResult = messages.flatMap(message => message.content).findLast(block => block.type === 'tool_result')
+      const messages = requests.at(-1)!.messages as { content: string | { type: string; content?: string | { text: string }[] }[] }[]
+      const toolResult = messages.flatMap(message => Array.isArray(message.content) ? message.content : []).findLast(block => block.type === 'tool_result')
+      const resultText = typeof toolResult!.content === 'string' ? toolResult!.content : toolResult!.content![0]!.text
       const failure = z.object({
         changed: z.literal(false), application: z.literal('failed'),
         packageResult: z.object({ exitCode: z.number(), output: z.string().min(1) }),
         error: z.object({ code: z.literal('operation-error'), diagnostic: z.string().min(1) }),
-      }).parse(JSON.parse(toolResult!.content![0]!.text))
+      }).parse(JSON.parse(resultText))
       // cmd.exe reports 1 for a missing command; POSIX spawn reports 127.
       expect(failure.packageResult.exitCode).toBe(process.platform === 'win32' ? 1 : 127)
       expect(failure.error.diagnostic).toContain('pnpm')

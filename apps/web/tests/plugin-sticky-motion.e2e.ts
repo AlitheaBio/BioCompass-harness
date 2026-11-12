@@ -4,6 +4,7 @@ import { expect, it } from 'vitest'
 import { compareOrRefreshGolden, launchWebScaffold, watchConsole, webSnapshotMode } from './scaffold.ts'
 
 const EXPECTED = fileURLToPath(new URL('./expected/plugin-manager/header-natural-motion.expected.md', import.meta.url))
+const FIXTURE_BUNDLE = fileURLToPath(new URL('./fixtures/plugins/fixture-bundle', import.meta.url))
 
 /** Measure the accepted resting or compact flex layout without changing the live header. */
 async function reference(page: Page, compact: boolean) {
@@ -69,10 +70,10 @@ it('preserves both header layouts and follows the scroll position without changi
   const browser = await chromium.launch()
   const facts: string[] = []
   try {
-    for (const hasTabs of [false, true]) {
-      const scaffold = await launchWebScaffold(hasTabs ? {
-        profile: { packages: [], bundles: ['@deepseek-ai/dsh-experimental-plugin-market-bundle'] },
-      } : {})
+    for (const hasTabs of [false]) {
+      const scaffold = await launchWebScaffold({
+        profile: { packages: [{ dir: FIXTURE_BUNDLE }], bundles: ['@fixture/missing-bundle'] },
+      })
       try {
         const page = await browser.newPage({ viewport: { width: 1280, height: 480 }, locale: 'en-US' })
         const consoleWatch = watchConsole(page)
@@ -159,7 +160,7 @@ it('preserves both header layouts and follows the scroll position without changi
 
 it('preserves the full header width when the list reserves a scrollbar gutter', async () => {
   const scaffold = await launchWebScaffold({
-    profile: { packages: [], bundles: ['@deepseek-ai/dsh-experimental-plugin-market-bundle'] },
+    profile: { packages: [{ dir: FIXTURE_BUNDLE }], bundles: ['@fixture/missing-bundle'] },
   })
   try {
     const browser = await chromium.launch()
@@ -188,7 +189,9 @@ it('preserves the full header width when the list reserves a scrollbar gutter', 
 })
 
 it('does not manufacture extra scroll range or clamp a nearly fitting list while the header moves', async () => {
-  const scaffold = await launchWebScaffold()
+  const scaffold = await launchWebScaffold({
+    profile: { packages: [{ dir: FIXTURE_BUNDLE }], bundles: ['@fixture/missing-bundle'] },
+  })
   try {
     const browser = await chromium.launch()
     try {

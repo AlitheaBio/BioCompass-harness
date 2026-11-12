@@ -1,7 +1,5 @@
 # Python SDK example
 
-English | [中文](README.zh.md)
-
 Runnable Python SDK examples over the sole application launcher, `dsh`. The Python client owns JSON-RPC stdio; the selected profile owns the agent composition, persistence, execution policy, and plugins.
 
 ## Run the minimal agent
@@ -9,7 +7,7 @@ Runnable Python SDK examples over the sole application launcher, `dsh`. The Pyth
 Install `deepseek-harness-sdk`, export a model credential, then supply an isolated Harness home and workspace:
 
 ```sh
-export DEEPSEEK_API_KEY=sk-your-key-here
+export ANTHROPIC_API_KEY=sk-ant-your-key-here
 python python/sdk/examples/minimal.py \
   --dsh-home /absolute/path/to/example-dsh-home \
   --workspace /absolute/path/to/disposable-workspace \
@@ -17,7 +15,7 @@ python python/sdk/examples/minimal.py \
   "Inspect the repository and fix the failing tests."
 ```
 
-Set `DEEPSEEK_BASE_URL` for a compatible proxy, `DSH_MODEL` for the script's default model, or `DSH_SYSTEM_PROMPT` for the deployment persona. `--model` is the single runtime model selection; no matching environment variable is required. `--profile` can select another SDK-serving profile. The selected home stores the generated `sdk-minimal` profile and uncompressed JSONL session logs under `sessions/`; the script never reads `~/.dsh` implicitly.
+Set `ANTHROPIC_BASE_URL` for a compatible proxy, `DSH_MODEL` for the script's default model, or `DSH_SYSTEM_PROMPT` for the deployment persona. `--model` is the single runtime model selection; no matching environment variable is required. `--profile` can select another SDK-serving profile. The selected home stores the generated `sdk-minimal` profile and uncompressed JSONL session logs under `sessions/`; the script never reads `~/.dsh` implicitly.
 
 The shipped [`@deepseek-ai/dsh-sdk-minimal` bundle](../../../packages/bundle/sdk-minimal/README.md) is the complete explicit Cordis tree for this mode. It exposes exactly:
 
@@ -25,7 +23,7 @@ The shipped [`@deepseek-ai/dsh-sdk-minimal` bundle](../../../packages/bundle/sdk
 - `read_image` for PNG/JPEG/WebP/GIF files, with an image-capable model
 - `working_directory` to inspect or change the Session directory
 
-The bundle does not include `dsh-base`, so every additional row is an explicit profile change. Runtime context, text file tools, local instruction discovery, settings, managed credentials, telemetry, Web tools, subagents, and the full default tool roster are absent. The tree retains SDK startup and JSON-RPC serving, one environment-configured DeepSeek adapter, local execution, and JSONL persistence. [Automatic context compaction](../../../packages/bundle/sdk-minimal/README.md#model-experience) summarizes older history through an additional model request while preserving the complete log. This minimal composition leaves unsupported slash input on the ordinary prompt path.
+The bundle does not include `dsh-base`, so every additional row is an explicit profile change. Runtime context, text file tools, local instruction discovery, settings, managed credentials, Web tools, subagents, and the full default tool roster are absent. The tree retains SDK startup and JSON-RPC serving, environment-configured `llm-pi-ai` routes, local execution, and JSONL persistence. [Automatic context compaction](../../../packages/bundle/sdk-minimal/README.md#model-experience) summarizes older history through an additional model request while preserving the complete log. This minimal composition leaves unsupported slash input on the ordinary prompt path.
 
 The persistent PTY can modify any path available to the runtime process, so use a disposable checkout or container.
 
@@ -88,7 +86,7 @@ python python/sdk/examples/goal.py \
 
 ## Manage full-profile plugins with approvals
 
-[`manage_plugins.py`](manage_plugins.py) explicitly downloads the optional authoring runtime, then starts the full `sdk` profile with `workspace-write` permissions and stdio approvals. It displays each requested operation and requires `y` to grant it once; any other answer rejects it. The prepared Node/pnpm runs package operations even without system pnpm. Downloading this payload also prepares its Python libraries and Office skills.
+[`manage_plugins.py`](manage_plugins.py) explicitly downloads the optional authoring runtime, then starts the full `sdk` profile with `workspace-write` permissions and stdio approvals. It displays each requested operation and requires `y` to grant it once; any other answer rejects it. The prepared Node/pnpm runs package operations even without system pnpm. Downloading this payload also prepares its Python libraries.
 
 ```sh
 python python/sdk/examples/manage_plugins.py \

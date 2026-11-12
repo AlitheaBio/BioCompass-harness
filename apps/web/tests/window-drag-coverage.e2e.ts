@@ -314,44 +314,37 @@ describe('web e2e: macOS window drag coverage', () => {
     } finally { await page.close() }
   })
 
-  it.each([
-    ['darwin', false], ['darwin', true], ['win32', false], ['win32', true],
-  ] as const)('%s scopes compact spacing with tabs=%s to the collapsed macOS header at every width', async (platform, hasTabs) => {
-    const host = hasTabs ? await launchWebScaffold({
-      profile: { packages: [], bundles: ['@deepseek-ai/dsh-experimental-plugin-market-bundle'] },
-    }) : scaffold
+  it.each(['darwin', 'win32'] as const)('%s scopes compact spacing to the collapsed macOS header at every width', async (platform) => {
+    const { page, tripwire } = await desktopPage(platform, scaffold)
     try {
-      const { page, tripwire } = await desktopPage(platform, host)
-      try {
-        await page.setViewportSize({ width: 1280, height: 480 })
-        await page.getByRole('button', { name: 'Plugins', exact: true }).click()
-        await page.locator('[data-plugin-package]').first().waitFor()
-        const bar = page.locator('[data-plugin-bar]')
-        const body = page.locator('[data-plugin-body]')
-        const control = bar.locator(hasTabs ? '[role="tablist"]' : '[data-plugin-toolbar]')
-        const top = async () => (await control.boundingBox())!.y - (await bar.boundingBox())!.y
-        await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
-        for (const width of [1280, 801, 520, 1280]) {
-          await page.setViewportSize({ width, height: 480 })
-          await settled(page)
-          await body.evaluate((element) => { element.scrollTop = 0 })
-          await page.waitForFunction(() => !document.querySelector('[data-plugin-bar]')?.hasAttribute('data-compact'))
-          expect(await bar.locator('h1').evaluate(element => element.getBoundingClientRect().top)
-            - (await bar.boundingBox())!.y).toBe(platform === 'darwin' ? 76 : 28)
-          await body.evaluate((element) => { element.scrollTop = 500 })
-          await page.waitForFunction(() => document.querySelector('[data-plugin-bar]')?.hasAttribute('data-compact'))
-          const inset = platform === 'darwin' ? 56 : 16
-          expect(await top()).toBe(inset)
-          expect(await bar.evaluate(element => Number.parseFloat(getComputedStyle(element, '::before').height)))
-            .toBe(inset + (hasTabs ? 34 : 32) + 16)
-        }
-        await page.getByRole('button', { name: 'Open sidebar', exact: true }).last().click()
+      await page.setViewportSize({ width: 1280, height: 480 })
+      await page.getByRole('button', { name: 'Plugins', exact: true }).click()
+      await page.locator('[data-plugin-package]').first().waitFor()
+      const bar = page.locator('[data-plugin-bar]')
+      const body = page.locator('[data-plugin-body]')
+      const control = bar.locator('[data-plugin-toolbar]')
+      const top = async () => (await control.boundingBox())!.y - (await bar.boundingBox())!.y
+      await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
+      for (const width of [1280, 801, 520, 1280]) {
+        await page.setViewportSize({ width, height: 480 })
         await settled(page)
+        await body.evaluate((element) => { element.scrollTop = 0 })
+        await page.waitForFunction(() => !document.querySelector('[data-plugin-bar]')?.hasAttribute('data-compact'))
+        expect(await bar.locator('h1').evaluate(element => element.getBoundingClientRect().top)
+          - (await bar.boundingBox())!.y).toBe(platform === 'darwin' ? 76 : 28)
         await body.evaluate((element) => { element.scrollTop = 500 })
-        await expect.poll(top).toBe(16)
-        expect(tripwire.pageErrors).toEqual([])
-      } finally { await page.close() }
-    } finally { if (host !== scaffold) await host.close() }
+        await page.waitForFunction(() => document.querySelector('[data-plugin-bar]')?.hasAttribute('data-compact'))
+        const inset = platform === 'darwin' ? 56 : 16
+        expect(await top()).toBe(inset)
+        expect(await bar.evaluate(element => Number.parseFloat(getComputedStyle(element, '::before').height)))
+          .toBe(inset + 32 + 16)
+      }
+      await page.getByRole('button', { name: 'Open sidebar', exact: true }).last().click()
+      await settled(page)
+      await body.evaluate((element) => { element.scrollTop = 500 })
+      await expect.poll(top).toBe(16)
+      expect(tripwire.pageErrors).toEqual([])
+    } finally { await page.close() }
   })
 
   it('leaves no interactive box inside the drag surface, and keeps the panel strip row draggable', async () => {
@@ -635,8 +628,7 @@ describe('web e2e: macOS window drag coverage', () => {
   it('keeps a covering overlay out of the drag surface', async () => {
     const { page, tripwire } = await desktopPage()
     try {
-      await page.getByRole('button', { name: 'Account menu', exact: true }).click()
-      await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
+      await page.getByRole('button', { name: 'Settings', exact: true }).click()
       const dialog = page.locator('[role="dialog"]').first()
       await dialog.waitFor({ timeout: 15_000 })
       await settled(page)

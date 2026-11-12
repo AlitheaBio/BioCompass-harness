@@ -1,5 +1,5 @@
 // Shared plumbing for the web smoke tests (dist location, free port, failure shots).
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
@@ -11,17 +11,6 @@ import { expect, vi, type MockInstance } from 'vitest'
 export const DIST_INDEX = fileURLToPath(new URL('../dist/index.html', import.meta.url))
 
 export const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
-
-/**
- * Read the `meta.description` an experimental bundle's plugin page shows for one locale.
- * @param bundle - Package directory under `packages/experimental`.
- * @param locale - Locale resource name, such as `en` or `zh`.
- * @returns The description text from `locale/<locale>.json`.
- */
-export function experimentalBundleDescription(bundle: string, locale: string): string {
-  const resource = JSON.parse(readFileSync(join(REPO_ROOT, 'packages/experimental', bundle, 'locale', `${locale}.json`), 'utf8')) as { meta: { description: string } }
-  return resource.meta.description
-}
 
 const installationRequire = createRequire(join(REPO_ROOT, 'apps/cli/package.json'))
 
@@ -389,14 +378,14 @@ export function conversationContextKey(kind: string, id: string): string {
   return `${kind.length}:${kind}${id}`
 }
 
-/** Open Settings through the sidebar account menu.
+/** Open Settings through the sidebar settings button.
  * @param page - browser page with the mounted sidebar.
  * @param locale - current UI language.
  */
 export async function openSettings(page: Page, locale: 'en' | 'zh' | 'ja'): Promise<void> {
-  const labels = { en: ['Account menu', 'Settings'], zh: ['账号菜单', '设置'], ja: ['アカウントメニュー', '設定'] } as const
+  const labels = { en: 'Settings', zh: '设置', ja: '設定' } as const
   const trigger = page.getByRole('button', {
-    name: labels[locale][0], exact: true, includeHidden: true,
+    name: labels[locale], exact: true, includeHidden: true,
   })
   await trigger.waitFor({ state: 'attached' })
   await revealNavigationDrawer(page, locale)
@@ -404,5 +393,4 @@ export async function openSettings(page: Page, locale: 'en' | 'zh' | 'ja'): Prom
     await page.getByRole('button', { name: { en: 'Open sidebar', zh: '打开侧边栏', ja: 'サイドバーを開く' }[locale], exact: true }).click()
   }
   await trigger.click()
-  await page.getByRole('menuitem', { name: labels[locale][1], exact: true }).click()
 }

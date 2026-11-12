@@ -30,7 +30,7 @@ from deepseek_harness.client import UserQuestionHandler
 
 _WAIT_SECONDS = 30
 _SESSION_ID = "commands-runtime"
-_MODEL = "deepseek-v4-flash"
+_MODEL = "claude-sonnet-4-5"
 _HISTORY_MARKER = "DSH_COMMANDS_OLD_USER_INPUT"
 _FIRST_REPLY = "SDK_COMPACT_READY"
 _CHECKPOINT = "## Primary Request and Intent\n- DSH_COMMANDS_CHECKPOINT: retain the earlier task."
@@ -92,11 +92,12 @@ class _ModelServer:
 
             def do_POST(self) -> None:
                 payload = self.rfile.read(int(self.headers["Content-Length"]))
-                if self.path == "/v1/files":
+                path = self.path.split("?", 1)[0]
+                if path == "/v1/files":
                     # The model fixture accepts inline images through the provider's Files fallback.
                     self.send_error(404, "Images are accepted inline")
                     return
-                assert self.path == "/v1/messages", f"unexpected model endpoint: {self.path}"
+                assert path == "/v1/messages", f"unexpected model endpoint: {self.path}"
                 body = json.loads(payload)
                 assert isinstance(body, dict) and isinstance(body.get("model"), str)
                 with owner.lock:
@@ -435,7 +436,7 @@ def run_compaction_scenario(tmp_path: Path, *, capture_patch: Path | None = None
         summary = summaries[0]
         assert summary["seq"] == execution.result.source_event_seq
         assert summary["data"]["llmStreamCall"] is True
-        assert summary["data"]["provider"] == "deepseek-official"
+        assert summary["data"]["provider"] == "anthropic"
         assert summary["data"]["model"] == _MODEL
         for event in [starts[0], summary, ends[0]]:
             assert event["data"]["sourceCommandId"] == execution.command_id

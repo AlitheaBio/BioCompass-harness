@@ -225,12 +225,12 @@ describe('More menu registrations', () => {
     ['zh', 'sidebar.panellist.actions', '创建一个带左侧栏入口的 DSH 插件。'],
     ['zh', 'conversation.session.header.views.actions', '创建一个 DSH 会话视图插件。'],
     ['zh', 'sidebar.right.tab.guide.actions', '创建一个带右侧栏入口的 DSH 插件。'],
-  ] as const)('starts an unsent %s Creator draft from %s', async (language, seat, prompt) => {
+  ] as const)('starts an unsent %s Standard draft from %s', async (language, seat, prompt) => {
     const b = await bench(language)
     fireEvent.click(within(b.view.getByRole('menu', { name: seat }))
       .getByRole('menuitem', { name: language === 'zh' ? '创建你的插件' : 'Create your plugin' }))
     expect(b.startSession).toHaveBeenCalledExactlyOnceWith(undefined, {
-      agentPreset: 'cordis', prompt, whenDraftExists: 'append',
+      agentPreset: 'standard', prompt, whenDraftExists: 'append',
     })
   })
 

@@ -20,7 +20,7 @@ from test_goal_runtime import _command, _until
 from test_plan_runtime import _GUIDANCE, _effective_system
 
 
-_IMAGE_MODEL = "deepseek-flash"
+_IMAGE_MODEL = "claude-sonnet-4-5"
 _RED = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 _BLUE = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="
 
@@ -30,8 +30,11 @@ def _image(name: str = "reference.png", data: str = _RED) -> dict:
 
 
 def _request_images(request: dict) -> list[dict]:
-    return [block for message in request["messages"] for block in message["content"]
-            if block["type"] == "image"]
+    return [{k: v for k, v in block.items() if k != "cache_control"}
+            for message in request["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"]
+            if isinstance(block, dict) and block.get("type") == "image"]
 
 
 def _assert_request_images(request: dict, *images: dict) -> None:

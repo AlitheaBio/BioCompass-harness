@@ -166,7 +166,7 @@ for line in sys.stdin:
 
     with DeepSeekHarness(
         approval_requests=True,
-        model="deepseek-v4-flash",
+        model="claude-sonnet-4-5",
         reasoning_effort="max",
         max_tokens=4096,
         cwd=str(tmp_path),
@@ -214,8 +214,8 @@ for line in sys.stdin:
     assert json.loads(init_dump.read_text()) == {
         "approvalRequests": True,
         "cwd": str(tmp_path),
-        "provider": "deepseek-official",
-        "model": "deepseek-v4-flash",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
         "reasoningEffort": "max",
         "maxTokens": 4096,
     }

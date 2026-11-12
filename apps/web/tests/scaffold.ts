@@ -396,40 +396,11 @@ export interface LaunchOptions {
   welcomeNoticePending?: boolean
   /** Leave first-use Workspace initialization eligible; ordinary scenarios start after the default was removed. */
   firstUse?: boolean
-  /** Pin the legacy Messages search endpoint and credential reference. */
-  deepSeekSearch?: {
-    /** Anthropic-compatible base URL; `/messages` is appended. */
-    baseURL?: string
-    /** Credential reference read for each search. */
-    apiKeyEnv: string
-  }
-  /**
-   * Give both sections of the shipped DeepSeek Search and Fetch API row their
-   * own credential reference and, when given, endpoint, so neither follows the
-   * conversation's DeepSeek credential. Browser search scenarios keep the real
-   * providers and credentials seam while avoiding external search traffic and
-   * ambient keys.
-   */
-  deepSeekWebApi?: {
-    /** Base URL of both sections; omitted uses the official base. The providers append `/search` or `/fetch`. */
-    baseURL?: string
-    /** Credential reference of both sections. */
-    apiKeyEnv: string
-  }
   /** Preset selection default and additional declarative definitions for this scenario. */
   agentPresets?: {
     default: string
     definitions?: import('@deepseek-ai/dsh-agent-preset-registry').PresetDefinition[]
   }
-  /**
-   * Patch the telemetry exporter URL while preserving the shipped enabled
-   * setting. A scenario-owned loopback collector contains all fixture uploads.
-   */
-  telemetryUrl?: string
-  /** Mode when telemetryUrl is supplied; defaults to FEEDBACK_ONLY without enabling a disabled row. */
-  telemetryMode?: 'FEEDBACK_ONLY'
-  /** SDK batch cadence for a scenario-owned collector; omitted to retain the SDK default. */
-  telemetryScheduledDelayMillis?: number
   /**
    * Browse through a trusted non-loopback hostname that the browser resolves
    * to loopback (for example `*.localhost`). The test server stays bound to
@@ -502,15 +473,16 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   // ran with a real key. Other runs keep the launching environment, as their goldens do.
   const pinDeepSeekCredential = mode !== 'record' && !maskDeepSeekCredential
     && options.replayFixture !== undefined && options.replayProvidersOnly !== true
-  const originalDeepSeekCredential = process.env.DEEPSEEK_API_KEY
+  const maskedCredentialKeys = ['DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY'] as const
+  const originalCredentials = Object.fromEntries(maskedCredentialKeys.map(key => [key, process.env[key]]))
   let credentialEnvironmentRestored = false
   const restoreCredentialEnvironment = (): void => {
     if (credentialEnvironmentRestored || (!maskDeepSeekCredential && !pinDeepSeekCredential)) return
     credentialEnvironmentRestored = true
-    if (originalDeepSeekCredential === undefined) {
-      Reflect.deleteProperty(process.env, 'DEEPSEEK_API_KEY')
-    } else {
-      process.env.DEEPSEEK_API_KEY = originalDeepSeekCredential
+    for (const key of maskedCredentialKeys) {
+      const original = originalCredentials[key]
+      if (original === undefined) Reflect.deleteProperty(process.env, key)
+      else process.env[key] = original
     }
   }
   const workspaceParent = await realpath(tmpdir())
@@ -564,7 +536,9 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     if (failures.length > 1) throw new AggregateError(failures, 'web scaffold temp-root setup failed')
     throw error
   }
-  if (maskDeepSeekCredential) Reflect.deleteProperty(process.env, 'DEEPSEEK_API_KEY')
+  if (maskDeepSeekCredential) {
+    for (const key of maskedCredentialKeys) Reflect.deleteProperty(process.env, key)
+  }
   if (pinDeepSeekCredential) Object.assign(process.env, REPLAY_CREDENTIAL_ENV)
 
   // The include patch set — the same layer stack the profile boot composes
@@ -586,7 +560,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   const overlayPatches: PatchOptions[] = [
     // Without HMR the profile applies configuration changes at its next start.
     ...options.profile?.hmr === false ? [{ id: 'hmr', disabled: true }] : [],
-    { id: 'session-log-deepseek', config: { enabled: false } },
     { id: 'ui-plugin-manager', config: { registryProbeEnabled: false } },
     ...mode === 'record' || options.deepSeekMissingCredential === true
       ? []
@@ -623,23 +596,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     // workspace, keeping the composition untouched.
     { id: 'agent-instructions', disabled: true },
     { id: 'session-title-llm', disabled: true },
-    // Fixture sessions must never leave the process: the shipped row defaults
-    // to the production OTLP endpoint (or whatever DSH_TELEMETRY_OTLP_URL
-    // names in the ambient environment). A scenario with a local collector
-    // preserves the shipped disabled setting instead of overriding it.
-    options.telemetryUrl === undefined
-      ? { id: 'session-telemetry-otel', disabled: true }
-      : {
-        id: 'session-telemetry-otel',
-        config: {
-          mode: options.telemetryMode ?? 'FEEDBACK_ONLY',
-          exporter: { url: options.telemetryUrl },
-          ...(options.telemetryScheduledDelayMillis === undefined ? {} : {
-            processor: { scheduledDelayMillis: options.telemetryScheduledDelayMillis },
-          }),
-          shutdownTimeoutMillis: 1_000,
-        },
-      },
     // Use an ephemeral port while preserving the shipped compression policy;
     // a patch replaces the row's complete config.
     {
@@ -686,26 +642,6 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
       { id: 'agent-preset-registry', config: { default: options.agentPresets.default } },
       { insert: (options.agentPresets.definitions ?? []).map(config => ({ id: `preset-${config.id}`, name: '@deepseek-ai/dsh-agent-preset', config })) },
     ],
-    ...options.deepSeekWebApi === undefined ? [] : [
-      {
-        id: 'web-deepseek-api',
-        config: {
-          searchApiKeyEnv: options.deepSeekWebApi.apiKeyEnv,
-          fetchApiKeyEnv: options.deepSeekWebApi.apiKeyEnv,
-          ...options.deepSeekWebApi.baseURL === undefined ? {} : {
-            searchBaseURL: options.deepSeekWebApi.baseURL, fetchBaseURL: options.deepSeekWebApi.baseURL,
-          },
-        },
-      },
-    ],
-    ...options.deepSeekSearch === undefined ? [] : [{
-      id: 'web-search-deepseek',
-      config: {
-        apiKeyEnv: options.deepSeekSearch.apiKeyEnv,
-        ...options.deepSeekSearch.baseURL === undefined ? {} : { baseURL: options.deepSeekSearch.baseURL },
-      },
-    }],
-    { id: 'llm-deepseek', disabled: mode !== 'record' && !maskDeepSeekCredential },
   ]
 
   // Recorded standard sessions pin the optional patch tool in their request headers.
@@ -723,9 +659,9 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   }
 
   // Live fields use a shared deployment layer; process-specific ports and roots stay in CLI overlays.
-  const formEntries = new Set(['agent-default-model', 'agent-preset-registry', 'llm-deepseek', 'llm-pi-ai',
-    'web', 'web-search-deepseek', 'web-deepseek-api', 'agent-loop', 'subagent', 'bash-sandbox', 'pwsh-sandbox',
-    'session-log-deepseek', 'ui-theme', 'locale', 'ui-chat', 'ui-conversation', 'ui-settings', 'ui-settings-general', 'permission'])
+  const formEntries = new Set(['agent-default-model', 'agent-preset-registry', 'llm-pi-ai',
+    'web', 'agent-loop', 'subagent', 'bash-sandbox', 'pwsh-sandbox',
+    'ui-theme', 'locale', 'ui-chat', 'ui-conversation', 'ui-settings', 'ui-settings-general', 'permission'])
   const formDefaults: PatchOptions[] = []
   const processOverlays = overlayPatches.map((patch) => {
     if (patch.id === undefined || !formEntries.has(patch.id) || patch.config === undefined) return patch

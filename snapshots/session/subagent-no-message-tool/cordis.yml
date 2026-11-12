@@ -29,6 +29,7 @@
               sampleOverCapGlobResults: false
           - name: '@deepseek-ai/dsh-tool-web'
             config:
+              search: false
               fetch: true
               searchTimeoutMs: 60000
           - name: '@deepseek-ai/dsh-tool-subagent-control'

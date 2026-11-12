@@ -1,7 +1,5 @@
-import { once } from 'node:events'
-import type { IncomingMessage } from 'node:http'
-import { WebSocketServer } from 'ws'
 import { expect, it, onTestFinished, vi } from 'vitest'
+import type { SignInAttemptId } from '@deepseek-ai/dsh-deepseek-account/types'
 import { accountView, desktopAccountBackend } from '../src/account-backend.ts'
 
 it('projects only safe account fields and refuses non-browser authorization schemes', () => {
@@ -24,19 +22,16 @@ it('accepts a no-response login failure without discarding the account projectio
   expect(accountView(state)).toEqual(state)
 })
 
-it('uses account Remote commands without returning additional wire fields', async () => {
-  const requests: unknown[] = []
-  const backend = desktopAccountBackend('http://127.0.0.1:1234', (request) => {
-    requests.push(request)
-    return Promise.resolve({ links: { usageUrl: 'http://localhost/usage', topUpUrl: 'http://localhost/top_up' }, status: 'signed-out', attempt: null, token: 'private' })
-  }, '')
+it('returns an inert local signed-out snapshot without invoking Remote commands', async () => {
+  const invoke = vi.fn()
+  const backend = desktopAccountBackend('http://127.0.0.1:1234', invoke, '')
   const client = { version: '1.2.3', locale: 'en', timezoneOffsetSeconds: 28_800 }
-  expect(await backend.start(client)).toEqual({ links: { usageUrl: 'http://localhost/usage', topUpUrl: 'http://localhost/top_up' }, status: 'signed-out', attempt: null })
-  expect(await backend.signOut(client)).toMatchObject({ status: 'signed-out' })
-  expect(requests).toEqual([
-    { namespace: 'account', method: 'startSignIn', args: { client, callbackOrigin: 'http://127.0.0.1:1234', loginSource: 'desktop' } },
-    { namespace: 'account', method: 'signOut', args: { client } },
-  ])
+  const expected = { links: { usageUrl: 'https://localhost', topUpUrl: 'https://localhost' }, status: 'signed-out', attempt: null }
+  expect(await backend.state()).toEqual(expected)
+  expect(await backend.start(client)).toEqual(expected)
+  expect(await backend.cancel('attempt-1' as SignInAttemptId)).toEqual(expected)
+  expect(await backend.signOut(client)).toEqual(expected)
+  expect(invoke).not.toHaveBeenCalled()
 })
 
 it('does not replay an expiry reason from an account snapshot', () => {
@@ -45,51 +40,21 @@ it('does not replay an expiry reason from an account snapshot', () => {
   expect(accountView({ ...state, signOutReason: 'expired' })).toEqual(state)
 })
 
-it('receives live expiry separately from account snapshots', async () => {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
-  await once(server, 'listening')
-  onTestFinished(async () => {
-    for (const client of server.clients) client.terminate()
-    await new Promise<void>((resolve, reject) => { server.close((error) => { if (error) reject(error); else resolve() }) })
-  })
-  const address = server.address()
-  if (typeof address === 'string' || address === null) throw new Error('missing server address')
-  const connected = once(server, 'connection')
+it('publishes local signed-out state and disabled analytics policy without opening a socket', async () => {
+  const listener = vi.fn()
+  const failed = vi.fn()
   const expired = vi.fn()
   const onAnalyticsEnabledChanged = vi.fn()
-  const snapshot = { status: 'signed-out', attempt: null,
-    links: { usageUrl: 'https://platform.deepseek.com/usage', topUpUrl: 'https://platform.deepseek.com/top_up' } }
-  const received = Promise.withResolvers<undefined>()
-  const backend = desktopAccountBackend(`http://127.0.0.1:${address.port}`, () => Promise.resolve(snapshot), 'dsh-auth-fixture=signed')
-  const stop = backend.watch(
-    (value) => { expect(value).toEqual(snapshot); received.resolve(undefined) }, vi.fn(), expired, onAnalyticsEnabledChanged,
-  )
+  const backend = desktopAccountBackend('http://127.0.0.1:1234', vi.fn(), 'dsh-auth-fixture=signed')
+  const stop = backend.watch(listener, failed, expired, onAnalyticsEnabledChanged)
   onTestFinished(stop)
-  const [, upgrade] = await connected as [unknown, IncomingMessage]
-  expect(upgrade.headers.cookie).toBe('dsh-auth-fixture=signed')
-  // Logical streams share the socket; observe their opening frames before sending data.
-  const streams = new Map<string, string>()
-  const opened = Promise.withResolvers<undefined>()
-  const socket = [...server.clients][0]!
-  socket.on('message', (data) => {
-    if (!Buffer.isBuffer(data)) throw new Error('expected a Buffer WebSocket frame')
-    const frame = JSON.parse(data.toString('utf8')) as { endpoint: string; streamId: string }
-    streams.set(frame.endpoint, frame.streamId)
-    if (streams.size === 3) opened.resolve(undefined)
+  await vi.waitFor(() => { expect(listener).toHaveBeenCalledOnce() })
+  expect(listener).toHaveBeenCalledWith({
+    status: 'signed-out', attempt: null, links: { usageUrl: 'https://localhost', topUpUrl: 'https://localhost' },
   })
-  await opened.promise
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('account/watch'), value: snapshot }))
-  await received.promise
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('productAnalytics/watchPolicy'), value: true }))
-  await vi.waitFor(() => { expect(onAnalyticsEnabledChanged).toHaveBeenLastCalledWith(true) })
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('productAnalytics/watchPolicy'), value: false }))
-  await vi.waitFor(() => { expect(onAnalyticsEnabledChanged).toHaveBeenLastCalledWith(false) })
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('productAnalytics/watchPolicy'), value: true }))
-  await vi.waitFor(() => { expect(onAnalyticsEnabledChanged).toHaveBeenLastCalledWith(true) })
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('productAnalytics/watchPolicy'), value: 'invalid policy' }))
-  await vi.waitFor(() => { expect(onAnalyticsEnabledChanged).toHaveBeenLastCalledWith(false) })
+  expect(onAnalyticsEnabledChanged).toHaveBeenCalledWith(false)
+  expect(failed).not.toHaveBeenCalled()
   expect(expired).not.toHaveBeenCalled()
-  socket.send(JSON.stringify({ type: 'item', streamId: streams.get('account/watchExpiry'), value: 'session-expired' }))
-  await vi.waitFor(() => { expect(expired).toHaveBeenCalledOnce() })
   stop()
+  expect(onAnalyticsEnabledChanged).toHaveBeenLastCalledWith(false)
 })

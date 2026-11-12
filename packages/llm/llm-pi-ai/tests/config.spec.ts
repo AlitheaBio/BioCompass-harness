@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { assertServiceable, Config, resolveProfiles, type Options } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
@@ -105,5 +105,20 @@ describe('request image policy bounds', () => {
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
+  })
+
+  it('applies ambient *_BASE_URL overrides only when route baseURL is omitted', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', '  https://proxy.anthropic.example  ')
+    vi.stubEnv('OPENAI_BASE_URL', '   ')
+    try {
+      const profiles = resolveProfiles({
+        anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' },
+        openai: { apiKeyEnv: 'OPENAI_API_KEY' },
+      }, 'strict')
+      expect(profiles.get('anthropic')?.piProvider?.baseUrl).toBe('https://proxy.anthropic.example')
+      expect(profiles.get('openai')?.piProvider?.baseUrl).toBe('https://api.openai.com/v1')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

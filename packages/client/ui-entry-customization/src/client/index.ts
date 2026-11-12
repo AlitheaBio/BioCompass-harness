@@ -47,7 +47,7 @@ export function apply(ctx: Context): void {
     createPlugin: () => {
       ctx.get('productAnalytics')?.track('more_menu_item_click', { region, action: 'create_plugin' })
       ctx.uiWorkspace.startSession(undefined, {
-        agentPreset: 'cordis', prompt: t(`createPrompt.${region}`), whenDraftExists: 'append',
+        agentPreset: 'standard', prompt: t(`createPrompt.${region}`), whenDraftExists: 'append',
       })
     },
   })
