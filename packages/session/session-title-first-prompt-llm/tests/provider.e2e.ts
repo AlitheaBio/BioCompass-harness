@@ -3,7 +3,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionTitleService from '@deepseek-ai/dsh-session-title'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -20,7 +20,17 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('first-prompt title provider with
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(LlmDeepSeek, { thinking: 'disabled' })
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'openai-completions',
+          baseURL: 'https://api.deepseek.com/v1',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek Flash', contextWindow: 128_000, maxTokens: 8_192 }],
+        },
+      },
+    })
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)

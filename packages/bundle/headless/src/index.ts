@@ -87,7 +87,6 @@ function summarize(session: Session, firstSeq: SessionLogOffset): RunOutcome {
   let reason: SessionEvent<'turn/end'>['data']['reason'] | undefined
   const length = session.seq
   for (let seq = firstSeq; seq < length; seq++) {
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const event = session.eventAt(SessionSeq(seq))
     if (event === undefined) {
       throw new Error(`headless summary cannot read seq ${String(seq)} below captured length ${String(length)}`)
@@ -187,7 +186,6 @@ interface AdoptableHeader {
 function* liveEvents(session: Session): Generator<SessionEvent> {
   const length = session.seq
   for (let seq = 0; seq < length; seq++) {
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const event = session.eventAt(SessionSeq(seq))
     if (event === undefined) {
       throw new Error(`headless adoption cannot read seq ${String(seq)} below captured length ${String(length)}`)

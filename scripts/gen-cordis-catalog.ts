@@ -39,7 +39,6 @@ import { rewriteTranslationLinkLocales } from './translation-links.ts'
 const root = resolve(import.meta.dirname, '..')
 const SUBSYSTEMS_DIR = 'docs/subsystems'
 const OUT_INHERITED = 'docs/cordis-api/inherited.md'
-const OUT_RUNTIME_API = 'packages/extensions/tool-cordis/src/api-catalog.ts'
 
 export { REGION_BEGIN, REGION_END }
 
@@ -51,18 +50,9 @@ export { REGION_BEGIN, REGION_END }
  */
 export const SERVICE_PAGE: Record<string, string> = {
   headlessStartup: 'boot.md',
-  translator: 'translation.md',
-  cotTranslation: 'translation.md',
-  speechToText: 'voice-input.md',
-  speechController: 'voice-input.md',
-  otel: 'otel.md',
-  productTelemetry: 'product-telemetry.md',
   productAnalytics: 'product-telemetry.md',
   connection: 'web-server.md',
   pluginManager: 'boot.md',
-  actionCards: 'boot.md',
-  pluginRecommendations: 'boot.md',
-  pluginMarket: 'boot.md',
   pluginRegistryProbe: 'boot.md',
   configEditor: 'boot.md',
   profileContext: 'boot.md',
@@ -74,38 +64,27 @@ export const SERVICE_PAGE: Record<string, string> = {
   agentPresets: 'core.md',
   agents: 'core.md',
   approval: 'approval.md',
-  officeToPdf: 'office-to-pdf.md',
   attachments: 'attachment.md',
   shell: 'shell.md',
   shellEnv: 'shell.md',
   clientModules: 'client-modules.md',
   ptcRuntime: 'ptc-runtime.md',
-  browserUse: 'browser-use.md',
-  computerUse: 'computer-use.md',
-  cuaAccess: 'computer-use.md',
   commands: 'commands.md',
   compaction: 'compaction.md',
-  cordisInspect: 'extensions.md',
   authorization: 'credentials.md',
   deepseekAccount: 'credentials.md',
   credentials: 'credentials.md',
   credentialsController: 'credentials.md',
   settingsController: 'settings.md',
   directoryPicker: 'workspace.md',
-  deepseekLlmApiExtensions: 'llm-streaming.md',
-  dynamicCordisRunner: 'extensions.md',
   fileUploads: 'attachment.md',
   fileReferences: 'session-reference.md',
   fs: 'filesystem.md',
   goals: 'goal.md',
   schedule: 'schedule.md',
-  inspector: 'extensions.md',
   webServer: 'web-server.md',
   webApp: 'web-server.md',
   llm: 'llm-streaming.md',
-  lsp: 'lsp.md',
-  messageFeedback: 'feedback.md',
-  sessionFeedback: 'feedback.md',
   permissionPresets: 'permission-presets.md',
   planMode: 'plan.md',
   terminals: 'terminal.md',
@@ -119,14 +98,9 @@ export const SERVICE_PAGE: Record<string, string> = {
   sessionProjectionCache: 'session-projection.md',
   sessionProjections: 'session-projection.md',
   workingDirectory: 'working-directory.md',
-  worktrees: 'worktrees.md',
-  forge: 'forge.md',
-  forgePanel: 'forge.md',
-  forgeSession: 'forge.md',
   sessionController: 'session.md',
   sessionSkillCatalog: 'skills.md',
   sessions: 'session.md',
-  sessionLogDeepSeek: 'session.md',
   settings: 'settings.md',
   sessionTitle: 'session-title.md',
   skills: 'skills.md',
@@ -139,10 +113,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   systemPrompt: 'system-prompt.md',
   jobs: 'jobs.md',
   jobController: 'jobs.md',
-  sessionTelemetry: 'session-telemetry.md',
-  liveshareShares: 'liveshare.md',
   agentTeams: 'agent-team.md',
-  claudeCodeMods: 'claude-code-mods.md',
   tokenMeter: 'token-meter.md',
   toolResultPruner: 'compaction.md',
   tools: 'tools.md',
@@ -152,7 +123,6 @@ export const SERVICE_PAGE: Record<string, string> = {
   userQuestions: 'user-questions.md',
   web: 'web.md',
   workflowEngine: 'workflow.md',
-  webhookRuntime: 'webhook.md',
   workspaceRegistry: 'workspace.md',
   workspaceController: 'workspace.md',
   workspaceFiles: 'workspace.md',
@@ -204,7 +174,6 @@ export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   userQuestionPanels: 'client-side slot-contract accessor (UserQuestionPanels) — packages/client/ui-tool/README.md owns the API',
   commandUi: 'client-side interface-typed browser service — packages/client/ui-commands/README.md owns the API',
   fileDrag: 'client-side file preparation and transfer service — packages/client/ui-file-drag/README.md owns the API',
-  feedbackUi: 'client-side feedback dialog service — packages/client/ui-message-feedback/README.md owns the API',
   conversation: 'client-side interface-typed browser service — packages/client/ui-conversation/README.md owns the API',
   layout: 'client-side interface-typed browser service — packages/client/ui-layout/README.md owns the API',
   pluginNavigation: 'client-side bundle navigation — packages/client/ui-plugin-manager/README.md owns the API',
@@ -235,7 +204,6 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'app-boot': 'boot.md',
   hmr: 'boot.md',
   'plugin-manager': 'boot.md',
-  'plugin-market': 'boot.md',
   'agent': 'core.md',
   'agent-loop': 'core.md',
   'agent-preset': 'core.md',
@@ -244,12 +212,10 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'commands': 'commands.md',
   'connection': 'web-server.md',
   'compaction': 'compaction.md',
-  'cordis': 'extensions.md',
   'authorization': 'credentials.md',
   'credentials': 'credentials.md',
   'deepseek-account': 'credentials.md',
   'domain': 'storage.md',
-  'forge': 'forge.md',
   'fs': 'filesystem.md',
   'goal': 'goal.md',
   'schedule': 'schedule.md',
@@ -262,8 +228,6 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'skills': 'skills.md',
   'subagent': 'subagent.md',
   'system-prompt': 'system-prompt.md',
-  'session-telemetry': 'session-telemetry.md',
-  'feedback': 'feedback.md',
   'tools': 'tools.md',
   'user-questions': 'user-questions.md',
   'web': 'web.md',
@@ -1325,7 +1289,7 @@ export function walkPartitionProblems(input: WalkPartitionInput, maps: WalkParti
  * @returns `[repo-relative path, exact content]` for every generated artifact.
  */
 export function computeOutputs(): [string, string][] {
-  const { projector, model } = projectCordisCatalog(root, CORDIS_CATALOG_POLICY)
+  const { model } = projectCordisCatalog(root, CORDIS_CATALOG_POLICY)
   const services = [...model.services]
   const events = [...model.events]
 
@@ -1356,7 +1320,6 @@ export function computeOutputs(): [string, string][] {
   const pages = [...new Set([...Object.values(SERVICE_PAGE), ...Object.values(EVENT_SCOPE_PAGE)])].sort()
   const outputs: [string, string][] = [
     [OUT_INHERITED, renderInheritedPage(CORDIS_CATALOG_POLICY)],
-    [OUT_RUNTIME_API, projector.renderRuntimeApi(model)],
   ]
   for (const page of pages) {
     const region = renderPageRegion(
@@ -1365,7 +1328,7 @@ export function computeOutputs(): [string, string][] {
       events.filter(e => EVENT_SCOPE_PAGE[e.scope] === page),
       CORDIS_CATALOG_POLICY,
     )
-    for (const side of [page, page.replace(/\.md$/, '.zh.md')]) {
+    for (const side of [page]) {
       const rel = `${SUBSYSTEMS_DIR}/${side}`
       const localizedRegion = localizePageRegion(region, rel)
       let current: string

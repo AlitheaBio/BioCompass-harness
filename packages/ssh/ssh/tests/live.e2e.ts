@@ -8,8 +8,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { NodePtcRuntime } from '@deepseek-ai/dsh-ptc-runtime-node'
-import Lsp from '@deepseek-ai/dsh-lsp'
-import * as LspStdio from '@deepseek-ai/dsh-lsp-stdio'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
 import { SshFileSystem } from '@deepseek-ai/dsh-fs-ssh'
@@ -22,7 +20,6 @@ import { doneSchema, preparedSchema } from '../src/schemas.ts'
 
 const configPath = process.env.DSH_SSH_TEST_CONFIG
 const bootstrap = process.env.DSH_SSH_TEST_BOOTSTRAP
-const languageServer = process.env.DSH_SSH_TEST_LSP
 const enabled = configPath !== undefined && process.platform !== 'win32'
 
 async function setup() {
@@ -271,28 +268,6 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
       const timed = await runtime.run(runtime.resolve({ program: 'while(true){}', bindings, cwd: test.root, sandboxPolicy: policy, timeoutMs: 1500 }))
       expect(timed.error?.kind).toBe('timeout')
     } finally { await fiber.dispose(); await removeOwned(test) }
-  }, 60_000)
-
-  it.skipIf(languageServer === undefined)('queries a remote TypeScript language server through the shared filesystem and subprocess providers', async () => {
-    const test = await setup()
-    const lsp = test.ctx.plugin(Lsp)
-    let stdio: ReturnType<Context['plugin']> | undefined
-    try {
-      await lsp
-      await test.ctx.fs.writeText(await test.ctx.fs.resolve(`${test.root}/tsconfig.json`), '{"compilerOptions":{"strict":true}}')
-      await test.ctx.fs.writeText(await test.ctx.fs.resolve(`${test.root}/source.ts`), 'export const answer: number = 42\nexport const doubled = answer * 2\n')
-      stdio = test.ctx.plugin(LspStdio, { servers: { remoteTypescript: {
-        command: test.hello.executable, args: [languageServer as string, '--stdio'], extensionToLanguage: { '.ts': 'typescript' },
-      } } })
-      await stdio
-      const request = { filePath: 'source.ts', workspaceRoot: test.root, position: { line: 1, character: 24 } }
-      const definition = await test.ctx.lsp.query({ ...request, operation: 'goToDefinition' })
-      expect(definition).toMatchObject({ kind: 'locations', resolvedWorkspaceUri: `file://${test.root}` })
-      if (definition.kind === 'locations') expect(definition.locations).toContainEqual(expect.objectContaining({ uri: `file://${test.root}/source.ts` }))
-      const hover = await test.ctx.lsp.query({ ...request, operation: 'hover' })
-      expect(hover.kind).toBe('hover')
-      if (hover.kind === 'hover') expect(hover.hover?.contents).toContain('number')
-    } finally { await stdio?.dispose(); await lsp.dispose(); await removeOwned(test) }
   }, 60_000)
 
   it('rejects a mismatched helper artifact before exposing remote operations', async () => {

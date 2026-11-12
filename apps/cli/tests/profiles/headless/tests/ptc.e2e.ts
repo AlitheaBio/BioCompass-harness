@@ -18,7 +18,7 @@ import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import NodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import Sandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
@@ -27,9 +27,6 @@ import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import * as AgentInstructions from '@deepseek-ai/dsh-agent-instructions'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
-import CordisHostRunner from '@deepseek-ai/dsh-cordis-host-runner'
-import * as ToolCordis from '@deepseek-ai/dsh-tool-cordis'
-import * as CordisInspectProviders from '@deepseek-ai/dsh-tool-cordis/host'
 
 /**
  * With-key PTC mode proof: a real model receives only `run_code`, composes two
@@ -62,7 +59,10 @@ async function ptcModeHarness(cwd: string): Promise<Context> {
     tools: { mode: 'ptc' },
   })
   await harness.plugin(AgentLoop, { agents: [] })
-  await harness.plugin(LlmDeepSeek)
+  await harness.plugin(LlmPiAi, { providers: { 'deepseek-official': {
+    displayName: 'DeepSeek', api: 'openai-completions', baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY',
+    models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek Flash', contextWindow: 128_000, maxTokens: 8_192 }],
+  } } })
   if (harness.get('subprocess') === undefined) await harness.plugin(LocalSubprocessRuntime)
   await harness.plugin(BashEnvPlugin)
   await harness.plugin(LocalBashExecutor, { cwd, timeoutMs: 30_000 })
@@ -82,7 +82,10 @@ async function workspacePtcModeHarness(): Promise<Context> {
   await harness.plugin(ToolFs)
   await harness.plugin(AgentInstructions, { maxBytes: 65536 })
   await harness.plugin(AgentLoop, { agents: [] })
-  await harness.plugin(LlmDeepSeek, { models: [{ id: 'deepseek-v4-flash' }] })
+  await harness.plugin(LlmPiAi, { providers: { 'deepseek-official': {
+    displayName: 'DeepSeek', api: 'openai-completions', baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY',
+    models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek Flash', contextWindow: 128_000, maxTokens: 8_192 }],
+  } } })
   await mountRuntime(harness)
   return harness
 }
@@ -288,29 +291,6 @@ describe('PTC mode typed values: keyless real-process contracts', () => {
     expect(Date.now() - startedAt).toBeLessThan(5_000)
     expect(ctx.jobs.list()).toEqual([])
   }, 15_000)
-
-  it('uses runtime inspection results directly through PTC', async () => {
-    ctx = await typedPtcModeHarness()
-    await ctx.plugin(CordisHostRunner)
-    await ctx.plugin(CordisInspectProviders)
-    await ctx.plugin(ToolCordis)
-    const agent = {
-      ctx,
-      id: SessionId('ptc-cordis'),
-      session: ctx.sessions.create(SessionId('ptc-cordis'), { meta: { cwd: process.cwd() } }),
-    } as Agent
-
-    const value = completion(await runCode(ctx, `
-      const listed = await tools.cordis_inspect_list({});
-      const provider = listed.providers.find(item => item.id === 'Tool');
-      const inspected = await tools.cordis_inspect_query({
-        platform: provider.platform, provider: provider.id, method: provider.methods[0].name,
-      });
-      return { provider: provider.id, names: inspected.data.tools.map(tool => tool.name) };
-    `, testToolSignal, agent))
-
-    expect(value).toEqual({ provider: 'Tool', names: ['cordis_inspect_list', 'cordis_inspect_query'] })
-  })
 })
 
 function waitForIdle(harness: Context, agent: Agent): Promise<void> {

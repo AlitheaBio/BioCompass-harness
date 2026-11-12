@@ -3,12 +3,13 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { cp } from 'node:fs/promises'
+import { cp, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import extractZip from 'extract-zip'
+import { load as parseYaml } from 'js-yaml'
 import { x as extractTar } from 'tar'
 import { copyPrimaryRuntime, parsePrimaryRuntime, workspaceDependencyPaths, type PrimaryRuntimeManifest } from '@deepseek-ai/dsh-tool-workspace-dependencies'
 import { acceptsNpmPlatform } from '../npm-platform.ts'
@@ -173,14 +174,19 @@ export function prunePnpmForeignNativePackages(pnpm: string, platform: NodeJS.Pl
 }
 
 /**
- * Copy the skill package's complete asset tree to ordinary filesystem resources.
- * @param source - The package's assets directory.
- * @param destination - External Office skill resource directory.
- * @returns Resolves after replacing the external assets with the complete package tree.
+ * Resolve one installed npm version against its reviewed workspace lock integrity.
+ * @param name - Published package name.
+ * @param version - Exact installed version.
+ * @param lockfile - Workspace lock recording the exact published archive.
+ * @returns Locked npm tarball identity; rejects versions without SHA-512 integrity.
  */
-export async function prepareOfficeSkillAssets(source: string, destination: string): Promise<void> {
-  rmSync(destination, { recursive: true, force: true })
-  await cp(source, destination, { recursive: true, dereference: true })
+export async function runtimeNpmArchive(name: string, version: string, lockfile = join(import.meta.dirname, '../../pnpm-lock.yaml')): Promise<RuntimeNpmArchive> {
+  const parsed = parseYaml(await readFile(lockfile, 'utf8')) as { packages?: Record<string, { resolution?: { integrity?: string } }> }
+  const integrity = parsed.packages?.[`${name}@${version}`]?.resolution?.integrity
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(integrity)) {
+    throw new Error(`runtime npm lock: missing SHA-512 integrity for ${name}@${version}`)
+  }
+  return { name, version, url: `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`, integrity }
 }
 
 /** A locked interpreter and wheel target. */
@@ -190,7 +196,7 @@ export type PrimaryRuntimeTarget = keyof typeof lock.targets
 export interface PreparePrimaryRuntimeOptions {
   /** Target whose archives and wheels are downloaded. */
   readonly target: PrimaryRuntimeTarget
-  /** Resource directory receiving primary-runtime/ and office-skills/. */
+  /** Resource directory receiving primary-runtime/. */
   readonly output: string
   /** SHA-256-addressed archive cache. */
   readonly cache: string
@@ -198,16 +204,14 @@ export interface PreparePrimaryRuntimeOptions {
   readonly version: string
   /** Locked npm pnpm tarball for installed carriers; build hosts otherwise copy their installed pnpm. */
   readonly pnpmArchive?: RuntimeNpmArchive
-  /** Ordinary filesystem Office assets; build hosts otherwise resolve the workspace package. */
-  readonly skillSource?: string
   /** Omit Node.js and pnpm for carriers providing only Python. */
   readonly pythonOnly?: boolean
 }
 
 /**
- * Materialize locked interpreters, libraries and Office resources without executing target code.
+ * Materialize locked interpreters and libraries without executing target code.
  * @param options - Explicit target and carrier-owned output locations.
- * @returns Resolves after the complete payload and skills have been copied to the output directory.
+ * @returns Resolves after the complete payload has been copied to the output directory.
  */
 export async function preparePrimaryRuntime(options: PreparePrimaryRuntimeOptions): Promise<void> {
   const { target } = options
@@ -259,9 +263,6 @@ export async function preparePrimaryRuntime(options: PreparePrimaryRuntimeOption
   } finally {
     rmSync(staging, { recursive: true, force: true })
   }
-  const assets = options.skillSource ?? join(dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-skill-office/package.json')), 'assets')
-  await prepareOfficeSkillAssets(assets,
-    join(paths.runtime, 'office-skills'))
 }
 
 /**

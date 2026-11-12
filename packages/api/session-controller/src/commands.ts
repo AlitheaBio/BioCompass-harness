@@ -394,7 +394,6 @@ export class SessionCommandController {
       this.promptReceipts.set(session, receipts)
     }
     if (receipts.offset !== session.seq) {
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing prompt retry history read, retained for acceptance recovery.
       for (const event of session.snapshotEvents(receipts.offset)) {
         if (event.type !== 'agent/inbox/spliced' && event.type !== 'user/message') continue
         const messages = event.type === 'agent/inbox/spliced' ? event.data.inserted : [event.data]

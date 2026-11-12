@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from ._resources import validate_downloads, validate_resources, office_launch_args
+from ._resources import validate_downloads, validate_resources
 
 PACKAGE_METADATA_FILENAME = "deepseek-harness-runtime.json"
 
@@ -164,33 +164,15 @@ def _download(resource: str) -> Path:
     return Path(path)
 
 
-def download_office() -> Path:
-    """Download the locked npm Office sidecar and standalone Node into the resource cache.
-
-    Return its absolute directory. Reuse completed downloads; failures leave no
-    published partial installation. DSH_RESOURCE_CACHE selects the cache root.
-    This explicit operation requires network access on a cache miss, not a
-    Harness home, agent, or model. Other SDK operations never trigger downloads.
-    """
-    return _download("office")
-
-
 def download_primary_runtime() -> Path:
-    """Download locked CPython, libraries, Node, pnpm and skills into the resource cache.
+    """Download locked CPython, libraries, Node, and pnpm into the resource cache.
 
-    Return the absolute primary-runtime directory. This is independent of the
-    Office engine download and does not copy resources into a Harness home.
+    Return the absolute primary-runtime directory.
     Completed downloads are reused; DSH_RESOURCE_CACHE selects the cache root.
     """
     path = _download("primary")
     validate_resources(path.parent, _current_platform_tag())
     return path
-
-
-def resolve_office_launch_args() -> tuple[str, str]:
-    """Locate the explicitly downloaded Office CLI and its standalone Node; never download."""
-    tag = _current_platform_tag()
-    return office_launch_args(bundled_runtime_path().with_name(tag), tag)
 
 
 def main() -> None:
@@ -214,9 +196,7 @@ __all__ = [
     "RUNTIME_MODE_ENV_VAR",
     "bundled_package_dir",
     "bundled_runtime_path",
-    "download_office",
     "download_primary_runtime",
-    "resolve_office_launch_args",
     "main",
     "resolve_bundled_launch_args",
 ]

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
-import { EVENT_API, SERVICE_API, TYPE_API } from '@deepseek-ai/dsh-tool-cordis/src/api-catalog.ts'
 import { WorkspaceAnalyzer } from '../src/analyzer.ts'
 import { FaceModelEmitter } from '../src/emitter.ts'
 
@@ -43,37 +42,19 @@ describe('model-driven tool package generation', () => {
     expect(executor?.model.events.map(event => event.name)).toEqual(['tools/ptc-dispatch-log'])
     const service = record?.model.services.find(candidate => candidate.key === 'tools')
     expect(service).toBeDefined()
-    expect({
-      key: service?.key,
-      summary: service?.summary,
-      methods: service?.members
-        .filter(member => member.kind === 'method' && !member.name.startsWith('['))
-        .map(member => member.signature),
-    }).toEqual((() => {
-      const api = SERVICE_API.find(candidate => candidate.key === 'tools')
-      return {
-        key: api?.key,
-        summary: api?.summary,
-        methods: api?.methods.map(method => method.signature),
-      }
-    })())
+    expect((service?.summary ?? '').length).toBeGreaterThan(0)
+    const methodNames = service?.members
+      .filter(member => member.kind === 'method' && !member.name.startsWith('['))
+      .map(member => member.name)
+    expect(methodNames).toContain('register')
+    expect(methodNames).toContain('resolve')
+    expect(methodNames).toContain('schemas')
     const events = [...record?.model.events ?? [], ...executor?.model.events ?? []]
       .filter(event => event.name.startsWith('tools/'))
-      .sort((a, b) => a.name.localeCompare(b.name))
-    expect(events.map(event => ({
-      name: event.name,
-      mode: event.mode,
-      signature: event.signature,
-      summary: event.summary,
-    }))).toEqual(EVENT_API.filter(event => event.name.startsWith('tools/')).map(event => ({
-      name: event.name,
-      mode: event.mode,
-      signature: event.signature,
-      summary: event.summary,
-    })))
-    expect(service?.types.find(type => type.name === 'ToolDefinition')).toEqual(
-      TYPE_API.find(type => type.name === 'ToolDefinition'),
-    )
+      .map(event => event.name)
+    expect(events).toContain('tools/execute')
+    expect(events).toContain('tools/ptc-dispatch-log')
+    expect(service?.types.find(type => type.name === 'ToolDefinition')).toBeDefined()
 
     await ctx.fiber.dispose()
     expect(registry.getPackage('@deepseek-ai/dsh-tools', 'host')).toBeUndefined()

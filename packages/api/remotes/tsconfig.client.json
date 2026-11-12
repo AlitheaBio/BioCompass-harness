@@ -11,8 +11,12 @@
     "src/types.ts"
   ],
   "references": [
-    { "path": "../../team/agent-team" },
-    { "path": "../../client/product-analytics/tsconfig.client.json" },
+    {
+      "path": "../../team/agent-team"
+    },
+    {
+      "path": "../../client/product-analytics/tsconfig.client.json"
+    },
     {
       "path": "../../../vendor/cordis"
     },
@@ -38,16 +42,10 @@
       "path": "../../core/session"
     },
     {
-      "path": "../../extensions/cordis-host-runner"
-    },
-    {
       "path": "../../goal/goal"
     },
     {
       "path": "../../schedule/schedule"
-    },
-    {
-      "path": "../../feedback/message-feedback"
     },
     {
       "path": "../../host/plugin-inventory"
@@ -95,9 +93,6 @@
       "path": "../../typert/protocol"
     },
     {
-      "path": "../../feedback/command-feedback"
-    },
-    {
       "path": "../terminal-controller/tsconfig.client.json"
     },
     {
@@ -105,15 +100,6 @@
     },
     {
       "path": "../../mcp/mcp-manager"
-    },
-    {
-      "path": "../../boot/plugin-market"
-    },
-    {
-      "path": "../../document/office-to-pdf"
-    },
-    {
-      "path": "../account-controller"
     },
     {
       "path": "../../credentials/deepseek-account"

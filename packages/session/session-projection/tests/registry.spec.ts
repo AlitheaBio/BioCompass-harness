@@ -600,11 +600,8 @@ describe('SessionProjectionRegistry drive', () => {
     const fresh = ctx.sessions.create()
     expect(ctx.sessionProjections.summaryKeys().has('test/marks')).toBe(false)
     expect(ctx.sessionProjections.snapshot(session).values).toEqual({})
-    // oxlint-disable-next-line typescript/no-deprecated -- The deprecated cached face also skips a released unit.
     expect(ctx.sessionProjections.cachedSnapshot(session)).toBeUndefined()
-    // oxlint-disable-next-line typescript/no-deprecated -- The deprecated key read reports a released key as absent.
     expect(ctx.sessionProjections.stateOf(session, 'test/marks')).toBeUndefined()
-    // oxlint-disable-next-line typescript/no-deprecated -- Its materializing read skips the released unit.
     expect(ctx.sessionProjections.stateOf(session, 'test/count')).toBe(2)
     // No drive, snapshot, or materializing read advanced the released cell.
     const rows = ctx.sessionProjections.checkpoint(session)

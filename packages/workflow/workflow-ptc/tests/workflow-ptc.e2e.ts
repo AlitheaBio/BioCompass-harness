@@ -4,7 +4,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import PtcWorkflowEngine from '../src/index.ts'
@@ -22,7 +22,17 @@ async function harness(): Promise<Context> {
   await mountAgentLoopTestDependencies(built, { workingDirectory: true })
   await mountPtcRuntime(built)
   await built.plugin(AgentLoop, { agents: [] })
-  await built.plugin(LlmDeepSeek)
+  await built.plugin(LlmPiAi, {
+    providers: {
+      'deepseek-official': {
+        displayName: 'DeepSeek',
+        api: 'openai-completions',
+        baseURL: 'https://api.deepseek.com/v1',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek Flash', contextWindow: 128_000, maxTokens: 8_192 }],
+      },
+    },
+  })
   await built.plugin(SubagentRuntime)
   await built.plugin(Spawn, { providerName: 'spawn' })
   await built.plugin(PtcWorkflowEngine, { provider: 'spawn' })

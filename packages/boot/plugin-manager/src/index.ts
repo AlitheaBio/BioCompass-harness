@@ -32,7 +32,7 @@ import { bundleManifest, readProfileRegistry, registryArguments, runProfilePnpm,
 import { classifyInstallFailure } from './install-failure.ts'
 import { officialBundleInstallTarget } from './official-install-target.ts'
 import { dependencySpec, InvalidInstallSpecError, parseInstallSpec, type ParsedInstallSpec } from './install-spec.ts'
-import { attributeFailure, normalizeRegistry, NPMMIRROR_REGISTRY, registryPlan } from './registry.ts'
+import { attributeFailure, normalizeRegistry, registryPlan } from './registry.ts'
 import { flatten, writePluginEnabled } from './patch.ts'
 import { incompatiblePlugin, ManagementFailure } from './failure.ts'
 import { approveBuilds, recordPendingBuilds } from './build-approval.ts'
@@ -320,13 +320,13 @@ export class PluginManager extends TypertRemoteService {
     gitTransportTimeoutMs: z.number().step(1).min(1000).default(5000),
     idleTimeoutMs: z.number().step(1).min(1000).default(600000),
     registry: z.string().pattern(REGISTRY_URL),
-    fallbackRegistries: z.array(z.string().pattern(REGISTRY_URL)).default([NPMMIRROR_REGISTRY]),
+    fallbackRegistries: z.array(z.string().pattern(REGISTRY_URL)).default([]),
     versionListLimit: z.number().step(1).min(1).default(20),
     versionLookupConcurrency: z.number().step(1).min(1).default(4),
     detailMaxBytes: z.natural().min(1).default(1024 * 1024),
     detailImageMaxBytes: z.natural().min(1).default(5 * 1024 * 1024),
     detailFetchTimeoutMs: z.natural().min(1).max(MAX_TIMER_DELAY_MS).default(15000),
-    detailNpmFileSources: z.array(z.union(NPM_FILE_SOURCES)).min(1).default([...NPM_FILE_SOURCES]),
+    detailNpmFileSources: z.array(z.union(NPM_FILE_SOURCES)).default([]),
   })
   /** Management bundles remain protected if their files become unreadable. */
   private readonly managementBundles = new Set<string>()

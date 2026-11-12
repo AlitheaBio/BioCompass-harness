@@ -65,7 +65,6 @@ export class SubagentModelSelectionConfig extends Service {
         const parent = ctx.sessions.get(parentId)
         if (parent !== undefined) allowedModels = subagentModelSelectionPolicy(policy, parent)
       } else if (target.firstLiveSeq === 0
-        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
         && target.eventAt(SessionSeq(0))?.type !== 'session/end-seed') {
         const current = this.current()
         allowedModels = current.enabled ? current.allowedModels : undefined

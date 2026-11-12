@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import type { MockLlmBehavior, MockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -53,16 +53,24 @@ async function harness(
   vi.stubEnv('DEEPSEEK_API_KEY', 'mock-key')
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
-  await ctx.plugin(LlmDeepSeek, {
-    baseURL,
-    streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 1_000,
-    retryPolicy: {
-      mode: 'normal',
-      maxRetries: 2,
-      backoff: {
-        initialDelayMs: options.initialDelayMs ?? 10,
-        maxDelayMs: options.initialDelayMs ?? 10,
-        jitterRatio: 0,
+  await ctx.plugin(LlmPiAi, {
+    providers: {
+      'deepseek-official': {
+        displayName: 'DeepSeek',
+        api: 'anthropic-messages',
+        baseURL,
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        models: [{ id: 'mock-model' }],
+        streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 1_000,
+        retryPolicy: {
+          mode: 'normal',
+          maxRetries: 2,
+          backoff: {
+            initialDelayMs: options.initialDelayMs ?? 10,
+            maxDelayMs: options.initialDelayMs ?? 10,
+            jitterRatio: 0,
+          },
+        },
       },
     },
   })
@@ -126,8 +134,8 @@ describe('bounded retry through the real DeepSeek HTTP/SSE adapter', () => {
   })
 
   it.each([
-    ['stream_disconnect', 1] as const,
-    ['partial_disconnect', 3] as const,
+    ['stream_disconnect', 2] as const,
+    ['partial_disconnect', 4] as const,
   ])('retries %s without committing failed chunks', async (behavior, failedChunkCount) => {
     const server = await start([behavior, 'success'], {
       apiKey: 'mock-key',
@@ -189,11 +197,12 @@ describe('bounded retry through the real DeepSeek HTTP/SSE adapter', () => {
     expect(finalAssistantText(agent)).toBe('recovered from empty')
   })
 
-  it('exposes a clean partial EOF as non-default-retryable STREAM_CLOSED', async () => {
+  it('retries a premature partial EOF before message_stop as a transport failure', async () => {
     const server = await start(['partial_eof', 'success'], {
       apiKey: 'mock-key',
       partialText: 'discarded clean eof',
       chunkSize: 100,
+      successText: 'recovered after premature eof',
     })
     context = await harness(server.baseURL)
     const agent = await context.agentLoop.create(SessionId('wire-partial-eof'), {
@@ -203,15 +212,10 @@ describe('bounded retry through the real DeepSeek HTTP/SSE adapter', () => {
 
     await sendAndWait(context, agent)
 
-    expect(server.requests).toHaveLength(1)
-    const attempt = agent.session.snapshotEvents().find(event => event.type === 'assistant/attempt' && event.data.turn === 1)
-    expect(attempt?.type === 'assistant/attempt' ? expandAssistantStream(attempt.data.stream) : []).toHaveLength(3)
-    expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(false)
-    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
-    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
-      type: 'turn/end',
-      data: { reason: { kind: 'error', error: { message: 'DeepSeek Messages stream ended before message_stop', code: 'STREAM_CLOSED' } } },
-    })
+    expect(server.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry').map(event => event.data.failure.code))
+      .toEqual(['TRANSPORT'])
+    expect(finalAssistantText(agent)).toBe('recovered after premature eof')
   })
 
   it('turns a stalled body into TIMEOUT and succeeds on the next request', async () => {
@@ -314,7 +318,7 @@ describe('bounded retry through the real DeepSeek HTTP/SSE adapter', () => {
       data: { reason: { kind: 'error', error: { code: 'TRANSPORT' } } },
     })
     if (end?.type === 'turn/end' && end.data.reason.kind === 'error') {
-      expect(end.data.reason.error.message).toBe('DeepSeek Messages transport failed')
+      expect(end.data.reason.error.message).toBe('Connection error.')
     }
   })
 })

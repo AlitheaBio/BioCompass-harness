@@ -34,7 +34,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.productAnalytics` — `ProductAnalytics`
 
-Authenticated event intake; disabled instances do not inspect identity or accept new events.
+Inert local analytics intake; never transmits telemetry externally.
 
 ```ts cordis-catalog
 /**
@@ -51,31 +51,11 @@ Authenticated event intake; disabled instances do not inspect identity or accept
 @Remote({ mode: 'stream' }) async *watchPolicy(signal: AbortSignal): AsyncIterable<boolean>
 
 /**
- * Submit selected Desktop fields with cached static environment and fresh identity.
- * The first intake waits for bounded environment queries; concurrent intakes share them.
- * Missing identity is omitted; failed environment fields carry fixed reasons.
- * @param event - typed product event without message contents or credentials.
- * @returns after local submission; no delivery or warehouse acknowledgement.
+ * No-op intake when external product telemetry is removed.
+ * @param _event - typed product event.
  */
-@Remote async report(event: ProductEvent): Promise<void>
+@Remote async report(_event: ProductEvent): Promise<void>
 ```
 
 Source: [`packages/client/product-analytics/src/index.ts`](../../packages/client/product-analytics/src/index.ts)
-
-<a id="ctxproducttelemetry--producttelemetry"></a>
-
-### `ctx.productTelemetry` — `ProductTelemetry`
-
-Host analytics sender. Mounting alone sends nothing; the owning fiber drains it on unload.
-
-```ts cordis-catalog
-/**
- * Enqueue one selected product event without waiting for network delivery.
- * Queue admission and shutdown completion are not collector or warehouse acknowledgements.
- * @param record - caller-owned event containing only approved analytics fields.
- */
-emit(record: ProductTelemetryRecord): void
-```
-
-Source: [`packages/host/product-telemetry-otel/src/index.ts`](../../packages/host/product-telemetry-otel/src/index.ts)
 <!-- END GENERATED cordis-surface -->

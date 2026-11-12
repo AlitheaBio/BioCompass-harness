@@ -356,6 +356,16 @@ register<K extends keyof SessionProjectionMap, S>( definition: Omit<ProjectionDe
 register<K extends string, S>( definition: ProjectionDefinition<K, S> & { key: Exclude<K, keyof SessionProjectionMap> }, ): Promise<ProjectionHandle<S>>
 
 /**
+ * Read a currently registered unit after materializing every registered
+ * unit at the Session cursor. Unrelated wire views are not produced.
+ * The returned state is live; do not mutate it. A released key has no value.
+ * @param session - Session whose committed events are folded.
+ * @param key - key of the registered projection.
+ * @returns the current state, or `undefined` when the unit is not registered.
+ */
+stateOf(session: Session, key: string): unknown
+
+/**
  * Subscribe to the change feed. The registration is an effect on the
  * calling context's fiber.
  * @param listener - called once per client-visible unit whose raw view changed by `Object.is`, per committed event.
@@ -387,6 +397,16 @@ onEventChanged(listener: ProjectionEventChangeListener): () => void
  * @returns the snapshot; `values` is empty when no selected client-visible unit is registered.
  */
 snapshot( session: Session, keys?: ProjectionKeySelection, ): ProjectionSnapshot
+
+/**
+ * Read only already-materialized client-visible cells without folding history.
+ * Values may trail the live Session and are therefore hints, not a complete
+ * baseline. Missing cells are omitted.
+ * @param session - attached Session whose cached cells are inspected.
+ * @param keys - optional wire keys to view.
+ * @returns the lowest common cached cut, or `undefined` when no wire cell exists.
+ */
+cachedSnapshot( session: Session, keys?: ProjectionKeySelection, ): ProjectionSnapshot | undefined
 
 /**
  * The keys a Session summary carries: every registered client-visible key

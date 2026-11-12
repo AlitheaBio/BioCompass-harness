@@ -4,7 +4,6 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
-import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import { assemble } from './assemble.ts'
 import { anthropicFrame, closeMockServers, mockServer } from './mock-server.ts'
 
@@ -109,31 +108,23 @@ function expectToolPairs(request: unknown, api: Api): void {
   expect(results).toEqual(calls)
 }
 
-const tool = { name: 'lookup', description: 'Look up a value.', parameters: { type: 'object', properties: { key: { type: 'number' } }, required: ['key'] } }
-const pairs: { a: Api; b: Api | 'deepseek-messages' }[] = [
-  ...apis.flatMap(a => apis.map(b => ({ a, b }))),
-  ...apis.map(a => ({ a, b: 'deepseek-messages' as const })),
-]
+const tool = { name: 'lookup', description: 'Look up a value.', parameters: { type: 'object', properties: { key: { type: { type: 'number' }['type'] } }, required: ['key'] } }
+const pairs: { a: Api; b: Api }[] = apis.flatMap(a => apis.map(b => ({ a, b })))
 
 describe('protocol history round trips', () => {
   it.each(pairs)('$a → $b → $a preserves saved content and restores native replay', async ({ a, b }) => {
     vi.stubEnv('PROTOCOL_ROUNDTRIP_KEY', 'test-key')
     const source = await mockServer([{ events: frames(a, true) }, { events: frames(a) }, { events: frames(a) }])
-    const targetApi = b === 'deepseek-messages' ? 'anthropic-messages' : b
-    const targetProvider = b === 'deepseek-messages' ? 'deepseek-official' : 'route-b'
+    const targetApi = b
+    const targetProvider = 'route-b'
     const target = await mockServer([{ events: frames(targetApi) }])
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, { providers: {
       'route-a': { api: a, baseURL: source.url, apiKeyEnv: 'PROTOCOL_ROUNDTRIP_KEY', cacheRetention: 'none', models: [{ id: 'model' }] },
-      ...b === 'deepseek-messages' ? {} : {
-        'route-b': { api: b, baseURL: target.url, apiKeyEnv: 'PROTOCOL_ROUNDTRIP_KEY', cacheRetention: 'none', models: [{ id: 'model' }] },
-      },
+      'route-b': { api: b, baseURL: target.url, apiKeyEnv: 'PROTOCOL_ROUNDTRIP_KEY', cacheRetention: 'none', models: [{ id: 'model' }] },
     } })
-    if (b === 'deepseek-messages') await ctx.plugin(DeepSeek, {
-      baseURL: target.url, apiKeyEnv: 'PROTOCOL_ROUNDTRIP_KEY', models: [{ id: 'model' }], thinking: 'disabled',
-    })
     let history: Message[] = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Look up both values.' }] })]
     const original = await assemble(ctx, { provider: 'route-a', model: 'model', messages: history, tools: [tool] })
     expect(original.finish).toEqual({ kind: 'tool-calls' })

@@ -8,7 +8,7 @@ import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
 import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -70,13 +70,20 @@ export async function codingHarness(workdir: string, options: CodingHarnessOptio
     systemPrompt: { personaPrefix: options.personaPrefix ?? '' },
   })
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(LlmDeepSeek, {
-    ...options.modelContextWindow === undefined && options.modelMaxTokens === undefined ? {} : {
-      models: [{
-        id: 'deepseek-v4-flash',
-        ...options.modelContextWindow === undefined ? {} : { contextWindow: options.modelContextWindow },
-        ...options.modelMaxTokens === undefined ? {} : { maxTokens: options.modelMaxTokens },
-      }],
+  await ctx.plugin(LlmPiAi, {
+    providers: {
+      'deepseek-official': {
+        displayName: 'DeepSeek',
+        api: 'openai-completions',
+        baseURL: 'https://api.deepseek.com/v1',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        models: [{
+          id: 'deepseek-v4-flash',
+          name: 'DeepSeek Flash',
+          contextWindow: options.modelContextWindow ?? 128_000,
+          maxTokens: options.modelMaxTokens ?? 8_192,
+        }],
+      },
     },
   })
   await ctx.plugin(LocalSubprocessRuntime)

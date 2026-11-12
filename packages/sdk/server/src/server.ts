@@ -22,7 +22,6 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 
 import type {} from '@deepseek-ai/dsh-schedule'
 import type { SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import type {
   ApprovalRequestParams,
   CommandExecution,
@@ -88,11 +87,10 @@ function successStatus(reason: string, options: HarnessSdkJsonRpcServerOptions):
  */
 export class HarnessSdkJsonRpcServer {
   private cwd = process.cwd()
-  private provider = 'deepseek-official'
-  private model = 'deepseek-official'
+  private provider = 'anthropic'
+  private model = 'claude-sonnet-4-5'
   private reasoningEffort: ReturnType<typeof ReasoningEffortId> | undefined
   private maxTokens: number | undefined
-  private llmFiber: { dispose(): Promise<void> } | undefined
   private readonly sessions = new Map<string, SessionRecord>()
   private readonly sessionCreations = new Map<string, Promise<SessionRecord>>()
   private readonly commandTasks = new Set<Promise<CommandExecution | undefined>>()
@@ -231,8 +229,7 @@ export class HarnessSdkJsonRpcServer {
       ? undefined
       : ReasoningEffortId(params.reasoningEffort)
     if (!this.hasAdapterFor(provider)) {
-      if (provider !== 'deepseek-official') throw new Error(`no adapter registered for provider "${provider}"`)
-      this.llmFiber = await this.ctx.plugin(LlmDeepSeek)
+      throw new Error(`no adapter registered for provider "${provider}"`)
     }
     // Adapter presence was read from this service above; a successful fallback mount also requires it.
     const llm = this.ctx.get('llm') as LlmRuntime
@@ -478,9 +475,7 @@ export class HarnessSdkJsonRpcServer {
     const teardownResults = await Promise.allSettled([
       this.goalLifetime.dispose(),
       ...records.map(rec => Promise.resolve().then(() => rec.handle.dispose())),
-      ...(this.llmFiber === undefined ? [] : [Promise.resolve().then(() => this.llmFiber?.dispose())]),
     ])
-    this.llmFiber = undefined
     failures.push(...teardownResults
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map(result => result.reason as unknown))

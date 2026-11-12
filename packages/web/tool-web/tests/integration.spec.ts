@@ -1,9 +1,8 @@
 /**
- * Integration: the real fetch backend (`dsh-web-fetch-http`) + a real search provider
- * (`dsh-web-deepseek-api`) + the real seam (`dsh-web`) + the model tool (`dsh-tool-web`) + the
+ * Integration: the real fetch backend (`dsh-web-fetch-http`) + a registered search provider +
+ * the real seam (`dsh-web`) + the model tool (`dsh-tool-web`) + the
  * tool-call timeout policy (`dsh-tool-call-timeout-policy`), exercised through `executeToolFixture()` —
- * nothing bypasses the tool registry. Fetch verifies world effects against loopback HTTP; search uses the real
- * DeepSeek Search API provider with only its network boundary stubbed.
+ * nothing bypasses the tool registry. Fetch verifies world effects against loopback HTTP.
  */
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 
@@ -13,20 +12,18 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import WebRuntime from '@deepseek-ai/dsh-web'
+import WebRuntime, { type WebSearchRequest } from '@deepseek-ai/dsh-web'
 import * as WebFetchLocal from '@deepseek-ai/dsh-web-fetch-http'
-import * as WebDeepSeekApi from '@deepseek-ai/dsh-web-deepseek-api'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import * as TimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
 
 const testToolSignal = new AbortController().signal
-const SEARCH_API_BASE = 'https://api.deepseek.test/v1/tools'
+const TEST_SEARCH_PROVIDER_ID = 'test-search'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 
@@ -35,10 +32,15 @@ let base: string
 let handler: Handler
 let ctx: Context
 let fiber: Awaited<ReturnType<Context['plugin']>>
+const searchSpy = vi.fn(async (req: WebSearchRequest) => ({
+  sources: [{ url: 'https://result.test', title: `Result for ${req.query}`, snippet: 'a snippet' }],
+  truncated: false,
+}))
 // web_search and web_fetch are conditional registrations, so calls run inside an agent's step admission.
 const agent = { id: SessionId('tool-web-integration') } as Agent
 
 beforeEach(async () => {
+  searchSpy.mockClear()
   handler = (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<h1>Hello</h1><p>World</p>') }
   server = createServer((req, res) => { handler(req, res) })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -49,16 +51,20 @@ beforeEach(async () => {
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(WebRuntime, {
-    searchProvider: WebDeepSeekApi.DEEPSEEK_SEARCH_API_PROVIDER_ID,
+    searchProvider: TEST_SEARCH_PROVIDER_ID,
     fetchProvider: WebFetchLocal.LOCAL_FETCH_PROVIDER_ID,
   })
   await ctx.plugin(WebFetchLocal, {})
-  ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([{ source: 'process', values: { DEEPSEEK_API_KEY: 'search-key' } }]))
-  await ctx.plugin(WebDeepSeekApi, { searchBaseURL: SEARCH_API_BASE, sendOriginalQuestion: false })
-  // The shipped deployment shape: the tool-call budget is declared by tool-web
-  // config (default 30s, attached as ToolDefinition.timeoutMs) and enforced by
-  // the zero-config timeout-policy plugin, set above the provider backstop so the
-  // policy normally wins.
+  await ctx.plugin({
+    inject: ['web'],
+    apply(inner: Context) {
+      inner.web.registerSearchProvider({
+        id: TEST_SEARCH_PROVIDER_ID,
+        available: () => true,
+        search: req => searchSpy(req),
+      })
+    },
+  })
   await ctx.plugin(TimeoutPolicy)
   fiber = await ctx.plugin(ToolWeb)
   await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools'] }))
@@ -112,21 +118,13 @@ describe('web_fetch integration over the real backend', () => {
   })
 })
 
-describe('web_search integration over the real DeepSeek Search API provider', () => {
+describe('web_search integration over a registered search provider', () => {
   it('runs web_search end-to-end and formats the provider result', async () => {
-    const fetchMock = vi.fn(async (_endpoint: string, _init: { headers: HeadersInit; body: string }) => new Response(
-      JSON.stringify({ results: [{ url: 'https://result.test', title: 'Result', snippet: 'a snippet', date: null }] }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    ))
-    vi.stubGlobal('fetch', fetchMock)
-    const out = await call('web_search', { queries: ['deepseek-official'] })
+    const out = await call('web_search', { queries: ['biocompass-query'] })
     expect(out.isError).toBe(false)
-    expect(out.content.map(b => b.type === 'text' ? b.text : '').join('')).toContain('[Result](https://result.test)')
-    expect(fetchMock).toHaveBeenCalledOnce()
-    const [endpoint, init] = fetchMock.mock.calls[0]!
-    expect(endpoint).toBe(`${SEARCH_API_BASE}/search`)
-    expect(new Headers(init.headers).get('authorization')).toBe('Bearer search-key')
-    expect(JSON.parse(init.body)).toMatchObject({ query: 'deepseek-official' })
+    expect(out.content.map(b => b.type === 'text' ? b.text : '').join('')).toContain('[Result for biocompass-query](https://result.test)')
+    expect(searchSpy).toHaveBeenCalledOnce()
+    expect(searchSpy.mock.calls[0]?.[0]).toMatchObject({ query: 'biocompass-query' })
   })
 })
 
@@ -150,9 +148,6 @@ describe('tool-call timeout returns TOOL_TIMEOUT (deadline wins over a slow fetc
   let tfiber: Awaited<ReturnType<Context['plugin']>>
 
   beforeEach(async () => {
-    // A server that never responds: it holds the connection open until the
-    // client aborts. The cooperative deadline (via exec.signal → the fetch
-    // provider → undici) is what ends the call.
     openSockets = []
     slowServer = createServer((_req, res) => { openSockets.push(res) })
     await new Promise<void>(resolve => slowServer.listen(0, '127.0.0.1', resolve))
@@ -163,10 +158,8 @@ describe('tool-call timeout returns TOOL_TIMEOUT (deadline wins over a slow fetc
     await tctx.plugin(ToolRuntime)
     await tctx.plugin(NativeToolExecutor)
     await tctx.plugin(WebRuntime, { fetchProvider: WebFetchLocal.LOCAL_FETCH_PROVIDER_ID })
-    // Provider backstop well ABOVE the tool-call budget, so the policy wins.
     await tctx.plugin(WebFetchLocal, { timeoutMs: 30_000 })
     await tctx.plugin(TimeoutPolicy)
-    // The tool-call budget is declared by tool-web config, enforced by the policy.
     tfiber = await tctx.plugin(ToolWeb, { fetchTimeoutMs: 50 })
   })
 
@@ -179,16 +172,12 @@ describe('tool-call timeout returns TOOL_TIMEOUT (deadline wins over a slow fetc
   it('returns a structured TOOL_TIMEOUT (not the provider WEB_FETCH_TIMEOUT) when the tool-call budget wins', async () => {
     const out = await call('web_fetch', { url: slowBase }, tctx)
     expect(out.isError).toBe(true)
-    // The outer tool-call deadline won: TOOL_TIMEOUT, owned by dsh-tool-call-timeout-policy,
-    // NOT the provider's own WEB_FETCH_TIMEOUT (its 30s backstop never fired).
     expect(out.error?.info?.code).toBe('TOOL_TIMEOUT')
     const text = out.content.map(b => (b.type === 'text' ? b.text : '')).join('')
     expect(text).toContain('timed out after 50ms')
   })
 
   it('the provider backstop still protects a direct provider call (no tool-call policy in that path)', async () => {
-    // A direct provider caller bypasses tools/execute, so a short configured backstop
-    // must produce provider-owned WEB_FETCH_TIMEOUT rather than TOOL_TIMEOUT.
     const direct = new WebFetchLocal.HttpFetchProvider({
       maxResponseBytes: 5_000_000,
       maxBodyChars: 100_000,

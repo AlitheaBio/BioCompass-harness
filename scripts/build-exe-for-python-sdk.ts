@@ -16,10 +16,9 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { resolveLinuxNodePtyAddon, resolveWindowsNodePtyAddons } from './executable-native-pty.ts'
-import { officeSidecarArchives, runtimeNpmArchive, OFFICE_ASSET_IGNORES } from './build-exe-for-python-sdk-office.ts'
 import { syncPythonRuntimeProduct } from './build-exe-for-python-sdk-resources.ts'
 import { deduplicateStagedWorkspacePackages, materializeStagedLinks } from './build-exe-for-python-sdk-staging.ts'
-import { prepareOfficeSkillAssets } from './primary-runtime/prepare.ts'
+import { runtimeNpmArchive } from './primary-runtime/prepare.ts'
 import primaryLock from './primary-runtime/lock.json' with { type: 'json' }
 
 const root = resolve(import.meta.dirname, '..')
@@ -341,7 +340,6 @@ class SingleExeBuild {
   async injectPkgConfig(): Promise<void> {
     const sourceModules = join(root, 'node_modules').replaceAll('\\', '/')
     const patch = { bin: ENTRY_BIN, pkg: { assets: ASSET_GLOBS, ignore: [
-      ...OFFICE_ASSET_IGNORES,
       `${sourceModules}/**`, `${sourceModules}/.pnpm/**`,
       ...['packages', 'apps', 'vendor', 'native', 'scripts'].map(directory => `${join(root, directory).replaceAll('\\', '/')}/**`),
       `${root.replaceAll('\\', '/')}/tsconfig*.json`,
@@ -360,7 +358,6 @@ class SingleExeBuild {
     }
     const helpers = [
       { name: 'primary-runtime', source: 'scripts/primary-runtime/prepare.ts', exports: 'downloadNodeRuntime, preparePrimaryRuntime' },
-      { name: 'office-sidecar', source: 'scripts/build-exe-for-python-sdk-office.ts', exports: 'downloadOfficeSidecar' },
     ]
     const entries: Record<string, string> = {}
     for (const helper of helpers) {
@@ -379,7 +376,7 @@ class SingleExeBuild {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
     await writeFile(manifestPath, `${JSON.stringify({ ...manifest, ...patch }, null, 2)}\n`)
     await this.run('resource helper imports', process.execPath, ['--input-type=module', '--eval',
-      ['primary-runtime.mjs', 'office-sidecar.mjs'].map(file => `await import(${JSON.stringify(pathToFileURL(join(this.staging, file)).href)})`).join('\n')])
+      `await import(${JSON.stringify(pathToFileURL(join(this.staging, 'primary-runtime.mjs')).href)})`])
     console.log(`build-exe-for-python-sdk: injected pkg config into ${manifestPath}`)
   }
 
@@ -392,7 +389,6 @@ class SingleExeBuild {
     const productBase = join(this.outDir, `${OUTPUT_BASENAME}-${target.platform}-${target.arch}`)
     const product = target.platform === 'win' ? `${productBase}.exe` : productBase
     await this.prepareNativePty(target)
-    const platform = target.platform === 'macos' ? 'darwin' : target.platform === 'win' ? 'win32' : target.platform
     if (!this.cli.dryRun) await mkdir(this.outDir, { recursive: true })
     await this.runPnpm(`pkg ${target.spec}`, [
       'exec',
@@ -412,17 +408,15 @@ class SingleExeBuild {
     const ripgrep = await this.copyRipgrepSidecar(target, product)
     const resources = join(this.outDir, `${target.platform}-${target.arch}`)
     if (this.cli.dryRun) {
-      console.log(`build-exe-for-python-sdk: [dry-run] lock optional resource downloads and copy Office skills to ${resources}`)
+      console.log(`build-exe-for-python-sdk: [dry-run] lock optional resource downloads in ${resources}`)
     } else {
       await rm(resources, { recursive: true, force: true })
       await mkdir(resources, { recursive: true })
       const { version, packageManager } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { version: string; packageManager: string }
-      const office = await officeSidecarArchives(this.staging, { platform, arch: target.arch })
       const pnpm = await runtimeNpmArchive('pnpm', packageManager.replace('pnpm@', ''))
-      const inputs = { version, target: `${target.platform === 'macos' ? 'mac' : target.platform}-${target.arch}`, office, pnpm }
+      const inputs = { version, target: `${target.platform === 'macos' ? 'mac' : target.platform}-${target.arch}`, pnpm }
       const identity = createHash('sha256').update(JSON.stringify({ ...inputs, primaryLock })).digest('hex')
       await writeFile(join(resources, 'downloads.json'), JSON.stringify({ ...inputs, identity }, undefined, 2) + '\n')
-      await prepareOfficeSkillAssets(join(this.staging, 'node_modules/@deepseek-ai/dsh-skill-office/assets'), join(resources, 'office-skills'))
     }
     if (target.platform !== 'macos') return [product, ripgrep, resources]
     const spawnHelper = `${product}-spawn-helper`

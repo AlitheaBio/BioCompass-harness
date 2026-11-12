@@ -13,6 +13,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as jsonrpc from '../src/index.ts'
 
@@ -173,7 +174,21 @@ describe('dsh-sdk-jsonrpc-server plugin apply', () => {
   it('serves initialize over the injected stdio pair', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-init-'))
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    const harness = await mountPlugin(storageDir)
+    const harness = await mountPlugin(storageDir, {
+      beforeServer: async (ctx) => {
+        await ctx.plugin(LlmPiAi, {
+          providers: {
+            'deepseek-official': {
+              displayName: 'DeepSeek',
+              api: 'anthropic-messages',
+              baseURL: 'http://127.0.0.1:9',
+              apiKeyEnv: 'DEEPSEEK_API_KEY',
+              models: [{ id: 'apply-model' }],
+            },
+          },
+        })
+      },
+    })
     try {
       harness.send({ jsonrpc: '2.0', id: 'init-1', method: 'initialize', params: { cwd: storageDir, provider: 'deepseek-official', model: 'apply-model' } })
 
@@ -249,8 +264,21 @@ describe('dsh-sdk-jsonrpc-server plugin apply', () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-prompt-'))
     const llmServer = await mockCompletionServer()
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
-    const harness = await mountPlugin(storageDir)
+    const harness = await mountPlugin(storageDir, {
+      beforeServer: async (ctx) => {
+        await ctx.plugin(LlmPiAi, {
+          providers: {
+            'deepseek-official': {
+              displayName: 'DeepSeek',
+              api: 'anthropic-messages',
+              baseURL: llmServer.url,
+              apiKeyEnv: 'DEEPSEEK_API_KEY',
+              models: [{ id: 'dsagent-model' }],
+            },
+          },
+        })
+      },
+    })
     try {
       harness.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { cwd: storageDir, provider: 'deepseek-official', model: 'dsagent-model' } })
       await harness.waitForFrame(frame => frame.id === 1, 'initialize response')
@@ -354,7 +382,21 @@ describe('dsh-sdk-jsonrpc-server plugin apply', () => {
 
   it('stops serving on a bare fiber dispose (HMR-style unload) without calling exit', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-apply-dispose-'))
-    const harness = await mountPlugin(storageDir)
+    const harness = await mountPlugin(storageDir, {
+      beforeServer: async (ctx) => {
+        await ctx.plugin(LlmPiAi, {
+          providers: {
+            'deepseek-official': {
+              displayName: 'DeepSeek',
+              api: 'anthropic-messages',
+              baseURL: 'http://127.0.0.1:9',
+              apiKeyEnv: 'DEEPSEEK_API_KEY',
+              models: [{ id: 'apply-model' }],
+            },
+          },
+        })
+      },
+    })
     try {
       // Prove the handler-rejection path is live before disposal.
       harness.send({ jsonrpc: '2.0', id: 'probe-1', method: 'nope/unknown' })

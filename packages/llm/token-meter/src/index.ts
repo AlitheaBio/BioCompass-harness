@@ -244,7 +244,7 @@ export class TokenMeter extends Service {
     const projected = useProjection ? this.measurementProjectionHandle?.stateOf(session) : undefined
     while (state.consumedEvents < session.seq) {
       // Cold price caches may replay resident history.
-      // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
+      // oxlint-disable-next-line typescript/no-non-null-assertion
       const event = session.eventAt(SessionSeq(state.consumedEvents))!
       const next = projected !== undefined
         ? undefined

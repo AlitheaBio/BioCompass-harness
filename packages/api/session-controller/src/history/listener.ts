@@ -116,7 +116,6 @@ export function eventItem(item: EventItem, next?: number): {
   }
   const start = next ?? item.session.firstLiveSeq
   if (start >= item.end) return { events: [], next }
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session-created history adaptation.
   const events = item.session.snapshotEvents(SessionLogOffset(start), SessionLogOffset(item.end))
   for (const event of events) {
     if (next !== undefined && event.seq !== next) {

@@ -987,34 +987,6 @@ declare abstract class LlmAdapter {
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
-<a id="ctxdeepseekllmapiextensions--deepseekllmapiextensionregistry"></a>
-
-### `ctx.deepseekLlmApiExtensions` — `DeepSeekLlmApiExtensionRegistry`
-
-Registry of independently owned top-level fields for official DeepSeek requests.
-
-```ts cordis-catalog
-/**
- * Register the sole provider of one top-level request field. Registration is effect-scoped.
- * @param field - declaration-merged field owned by the provider.
- * @param provider - request-time field preparation and optional acceptance behavior.
- * @returns disposer that releases the field.
- */
-register<K extends keyof DeepSeekLlmApiExtensionMap>( field: K, provider: DeepSeekLlmApiExtensionProvider<DeepSeekLlmApiExtensionMap[K]>, ): () => Promise<void>
-
-/**
- * Prepare every currently registered field from one immutable base request.
- * A provider whose preparation throws, or whose value cannot be cloned, is omitted
- * from this request; the first such failure per field is logged. Only cancellation rejects. Field values are cloned
- * and frozen; providers retain no mutable alias to the outgoing request.
- * @param request - exact serialized request facts before extension fields.
- * @returns detached fields and their idempotent joint acceptance transaction.
- */
-async prepare(request: DeepSeekLlmApiExtensionRequest): Promise<PreparedDeepSeekLlmApiExtensions>
-```
-
-Source: [`packages/llm/deepseek-llm-api-extensions/src/index.ts`](../../packages/llm/deepseek-llm-api-extensions/src/index.ts)
-
 <a id="ctxllm--llmruntime"></a>
 
 ### `ctx.llm` — `LlmRuntime`

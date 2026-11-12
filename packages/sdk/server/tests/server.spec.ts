@@ -19,7 +19,7 @@ import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-a
 
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import SubagentRuntime, { SubagentRunId, type SubagentStartRequest, type SubagentRun, type SubagentResult, type SubagentRunEndInfo } from '@deepseek-ai/dsh-subagent'
 import type { JsonRpcTransportPeer } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '../src/index.ts'
@@ -259,8 +259,19 @@ describe('HarnessSdkJsonRpcServer', () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-'))
     const llmServer = await mockCompletionServer()
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
     const ctx = await makeHarness(storageDir)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'anthropic-messages',
+          baseURL: llmServer.url,
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          compat: { forceAdaptiveThinking: true },
+          models: [{ id: 'dsagent-model', reasoningEfforts: { max: 'max' } }],
+        },
+      },
+    })
     try {
       const transport = new FakeTransport()
       const server = new HarnessSdkJsonRpcServer(ctx, transport)
@@ -284,14 +295,14 @@ describe('HarnessSdkJsonRpcServer', () => {
       const body = llmServer.requests[0] as {
         model: string
         messages: { role: string }[]
-        system?: string
+        system?: unknown
         output_config?: { effort: string }
         max_tokens?: number
       }
       expect(body.model).toBe('dsagent-model')
       expect(body.output_config).toEqual({ effort: 'max' })
       expect(body.max_tokens).toBe(321)
-      expect(body.system).toBeTypeOf('string')
+      expect(body.system).toBeDefined()
       expect(body.messages[0]?.role).toBe('user')
       expect(body.messages.at(-1)?.role).toBe('user')
       expect(llmServer.headers[0]?.['x-api-key']).toBe('test-key')
@@ -546,8 +557,18 @@ describe('HarnessSdkJsonRpcServer', () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-no-system-'))
     const llmServer = await mockCompletionServer()
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
     const ctx = await makeHarness(storageDir)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'anthropic-messages',
+          baseURL: llmServer.url,
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'plain-model' }],
+        },
+      },
+    })
     try {
       const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
 
@@ -1028,7 +1049,17 @@ describe('HarnessSdkJsonRpcServer', () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-existing-llm-'))
     const ctx = await makeHarness(storageDir)
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    await ctx.plugin(LlmDeepSeek, { models: [{ id: 'preinstalled-model' }] })
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'openai-completions',
+          baseURL: 'https://api.deepseek.com/v1',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'preinstalled-model' }],
+        },
+      },
+    })
     try {
       const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
       const inspect = server as unknown as { hasAdapterFor(provider: string): boolean }
@@ -1045,11 +1076,21 @@ describe('HarnessSdkJsonRpcServer', () => {
     }
   })
 
-  it('rejects a missing non-DeepSeek provider when an LLM service already exists', async () => {
+  it('rejects a missing provider when an LLM service already exists', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-new-llm-'))
     const ctx = await makeHarness(storageDir)
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    await ctx.plugin(LlmDeepSeek)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'openai-completions',
+          baseURL: 'https://api.deepseek.com/v1',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'preinstalled-model' }],
+        },
+      },
+    })
     try {
       const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
 
@@ -1178,8 +1219,17 @@ describe('HarnessSdkJsonRpcServer', () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-unsupported-reasoning-'))
     const ctx = await makeHarness(storageDir)
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
-    // A loopback endpoint keeps the fallback-mounted official route off the network; no request is sent.
-    vi.stubEnv('DEEPSEEK_BASE_URL', 'http://127.0.0.1:9/anthropic')
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'deepseek-official': {
+          displayName: 'DeepSeek',
+          api: 'anthropic-messages',
+          baseURL: 'http://127.0.0.1:9/anthropic',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'deepseek-v4-flash', reasoningEfforts: { high: 'high' } }],
+        },
+      },
+    })
     try {
       const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
       await expect(server.handleRequest('initialize', {

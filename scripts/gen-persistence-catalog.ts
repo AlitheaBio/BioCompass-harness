@@ -16,7 +16,7 @@ import {
 } from './persistence-catalog-source.ts'
 import { extractPersistenceSchema } from './persistence-schema.ts'
 import { persistenceCatalogText, type PersistenceCatalogLocale } from './persistence-catalog-text.ts'
-import { renderPersistencePair, type PersistenceArtifact } from './persistence-artifacts.ts'
+import type { PersistenceArtifact } from './persistence-artifacts.ts'
 import { collectPluginRecords, type PluginRecordEntry } from './plugin-record-catalog.ts'
 
 export { annotateSurface, collectEventEnvelopeTypes, collectLogEvents, collectSurfaceEventTypes } from './persistence-catalog-source.ts'
@@ -222,8 +222,8 @@ export function persistenceCatalogArtifacts(scanRoot: string, schema: Persistenc
   const envelope = collectEventEnvelopeTypes(scanRoot)
   const pluginRecords = collectPluginRecords(scanRoot)
   return [
-    ...renderPersistencePair(scanRoot, OUT, render(events, envelope, schema), render(events, envelope, schema, 'zh')),
-    ...renderPersistencePair(scanRoot, OUT_PLUGIN_RECORDS, renderPluginRecordCatalog(pluginRecords), renderPluginRecordCatalog(pluginRecords, 'zh')),
+    { path: OUT, content: render(events, envelope, schema) },
+    { path: OUT_PLUGIN_RECORDS, content: renderPluginRecordCatalog(pluginRecords) },
     { path: OUT_RUNTIME_TYPES, content: renderKnownEventTypes(events) },
     { path: OUT_SCHEMA, content: encodePersistenceSnapshot(schema) },
   ]

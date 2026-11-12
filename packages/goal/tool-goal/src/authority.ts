@@ -29,7 +29,6 @@ function openTurnEvents(
   ctx: Context,
   agent: Agent,
 ): Pick<GoalToolExecution, 'events' | 'openTurnStartSeq'> {
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   const events = agent.session.snapshotEvents()
   const boundary = ctx.agents.turnBoundaryOf(agent.session)
   if (boundary.openTurnStartSeq === null) {

@@ -2652,11 +2652,11 @@ describe('continuable review regressions', () => {
     const started = await ctx.subagents.startActivation({ ...startSpec(parent), delivery: 'parent' })
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
     const child = ctx.agents.get(started.childId)!
-    // A cordis-host-runner failure report: `steer()` from a plugin still wakes
-    // a handle, so residency must survive until that turn claims the message.
+    // Plugin-sourced `steer()` wakes a handle, so residency must survive until
+    // that turn claims the message.
     const steered = createUserMessage({
-      content: message('Cordis Host handler failed'),
-      source: { kind: 'cordis-host-runner' },
+      content: message('Plugin handler failed'),
+      source: { kind: 'tool-registry' },
     })
     child.steer(steered)
     ctx.subagents.interrupt(started.childId, { kind: 'user' })

@@ -285,8 +285,6 @@ export class SessionProjectionRegistry extends Service {
   private summaryKeySet: ReadonlySet<Extract<keyof SessionProjectionMap, string>> | undefined
   private readonly listeners = new Set<ProjectionChangeListener>()
   private readonly eventListeners = new Set<ProjectionEventChangeListener>()
-  /** Keys whose deprecated registry-level read has already been reported. */
-  private readonly deprecatedStateOfKeys = new Set<string>()
 
   /**
    * Create and install the registry as `ctx.sessionProjections`.
@@ -447,17 +445,11 @@ export class SessionProjectionRegistry extends Service {
    * Read a currently registered unit after materializing every registered
    * unit at the Session cursor. Unrelated wire views are not produced.
    * The returned state is live; do not mutate it. A released key has no value.
-   * The first read of each key logs one deprecation warning per registry.
    * @param session - Session whose committed events are folded.
    * @param key - key of the registered projection.
    * @returns the current state, or `undefined` when the unit is not registered.
-   * @deprecated Use an awaited registration's `handle.stateOf(session)` or the owning domain service.
    */
   stateOf(session: Session, key: string): unknown {
-    if (!this.deprecatedStateOfKeys.has(key)) {
-      this.deprecatedStateOfKeys.add(key)
-      this.ctx.logger.warn(`sessionProjections.stateOf(session, ${JSON.stringify(key)}) is deprecated; read handle.stateOf(session) from an awaited registration, or use the owning domain service`)
-    }
     const registration = this.registrations.get(key)
     if (registration === undefined || registration.refs === 0) return undefined
     this.materializeCells(session)
@@ -534,8 +526,6 @@ export class SessionProjectionRegistry extends Service {
    * @param session - attached Session whose cached cells are inspected.
    * @param keys - optional wire keys to view.
    * @returns the lowest common cached cut, or `undefined` when no wire cell exists.
-   * @deprecated Returns only values another read already computed and may omit keys; never use it to decide behavior.
-   *   Use snapshot(session, keys) for complete values, or a retained handle for host state.
    */
   cachedSnapshot(
     session: Session,
@@ -843,7 +833,6 @@ export class SessionProjectionRegistry extends Service {
         registration.def,
         session.header,
         session.inheritedEventCount,
-        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
         session.snapshotEvents(),
       )
       registration.cells.set(session, cell)
@@ -862,7 +851,6 @@ export class SessionProjectionRegistry extends Service {
   ): void {
     if (cell.observedSeq >= throughSeq) return
     for (let seq = cell.observedSeq + 1; seq <= throughSeq; seq++) {
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = session.eventAt(SessionSeq(seq))
       /* v8 ignore next 3 -- throughSeq never exceeds the committed log, whose seqs are contiguous by the Session invariant. */
       if (event === undefined || event.seq !== seq) {
@@ -899,7 +887,6 @@ export class SessionProjectionRegistry extends Service {
             registration.def,
             session.header,
             session.inheritedEventCount,
-            // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
             session.snapshotEvents(SessionLogOffset(0), SessionLogOffset(event.seq)),
           )
           registration.cells.set(session, cell)

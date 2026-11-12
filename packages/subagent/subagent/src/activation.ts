@@ -146,7 +146,6 @@ export function observeLocalFailure(activation: LocalActivation, wake: () => voi
  * @returns final output, stop reason, and committed structured value.
  */
 export function captureLocalResult(activation: LocalActivation): SubagentResult {
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   const events = activation.handle.agent.session.snapshotEvents(activation.outputStart)
   const output = finalAssistantOutput(events) ?? []
   const stopReason = activation.failureAt === undefined ? epochStopReason(events) : 'error'

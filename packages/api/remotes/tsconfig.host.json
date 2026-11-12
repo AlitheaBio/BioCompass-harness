@@ -42,9 +42,6 @@
       "path": "../../preset/agent-preset-registry"
     },
     {
-      "path": "../../extensions/cordis-host-runner"
-    },
-    {
       "path": "../../settings/settings"
     },
     {
@@ -84,13 +81,7 @@
       "path": "../../mcp/mcp-manager"
     },
     {
-      "path": "../../boot/plugin-market"
-    },
-    {
       "path": "../../host/plugin-inventory"
-    },
-    {
-      "path": "../account-controller"
     },
     {
       "path": "../../credentials/deepseek-account"

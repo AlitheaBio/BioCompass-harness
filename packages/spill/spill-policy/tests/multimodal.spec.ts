@@ -14,7 +14,6 @@ import type { ImageAttachmentRef, SaveImageAttachment, StoredImageAttachment } f
 import FileSystem from '@deepseek-ai/dsh-fs-local'
 import { LlmAdapter, LlmRuntime, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk, ImageBlock, LlmImageRequestPricing, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
-import { deepSeekImageTokens } from '@deepseek-ai/dsh-llm-deepseek'
 import { estimateContent } from '@deepseek-ai/dsh-token-meter/estimate'
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -26,6 +25,10 @@ import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunRequest, PtcRunSpec, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import * as SpillPolicy from '../src/index.ts'
+
+function fixtureImageTokens(width: number, height: number): number {
+  return Math.max(1, Math.ceil(width / 28)) * Math.max(1, Math.ceil(height / 28))
+}
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC', 'base64')
 
@@ -60,7 +63,7 @@ class VisionAdapter extends LlmAdapter {
   }
   override imageRequestPricing(): LlmImageRequestPricing {
     return { priceImages: images => images.map(({ attachment }) => ({
-      visualTokens: deepSeekImageTokens(attachment.width, attachment.height), text: '',
+      visualTokens: fixtureImageTokens(attachment.width, attachment.height), text: '',
     })) }
   }
   stream(_options: GenerateOptions): AsyncIterable<StreamChunk> { throw new Error('fixture does not stream') }
@@ -121,7 +124,7 @@ describe('multimodal spill', () => {
     expect(paths).toHaveLength(2)
     for (const path of paths) expect(await readFile(path)).toEqual(PNG)
     const visual = result.content.filter((block): block is ImageBlock => block.type === 'image')
-      .reduce((total, block) => total + deepSeekImageTokens(block.attachment.width, block.attachment.height) + 4, 0)
+      .reduce((total, block) => total + fixtureImageTokens(block.attachment.width, block.attachment.height) + 4, 0)
     expect(visual + estimateContent(result.content.filter(block => block.type === 'text'))).toBeLessThanOrEqual(1000)
   })
 

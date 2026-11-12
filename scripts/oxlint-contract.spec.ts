@@ -285,11 +285,8 @@ export function reads(session: Session): void {
     const existing = `import { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 
 export function reads(session: Session): void {
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   session.snapshotEvents()
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   session.eventAt(SessionSeq(0))
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   session.ownEvents()
 }
 `

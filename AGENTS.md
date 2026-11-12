@@ -2,13 +2,9 @@
 
 DeepSeek Harness is an all-plugin Cordis agent harness. Read [docs/architecture.md](docs/architecture.md) before changing `packages/`; follow [docs/AGENTS.md](docs/AGENTS.md) for documentation.
 
-## Pre-stable APIs and released Session data
+## Pre-stable APIs and Session data
 
-Public APIs are pre-stable; update every consumer. Follow [version/status](docs/session-format-status.md) and [type acknowledgements](docs/cookbook/reviewing-persistence-type-changes.md). [Adjacent migration](.agents/notes/implemented/architecture/2026-08-31-released-session-format-migrations.md) may add a version-named successor but never move, overwrite, or delete committed generations; predecessors imply neither fallback nor downgrade support. SQLite uses monotonic `SCHEMA_VERSION`.
-
-Acknowledge [declared persistence-type changes](docs/cookbook/reviewing-persistence-type-changes.md).
-
-Record each externally perceptible breaking change immediately in an [upgrade guide](.agents/skills/dsh-create-upgrade-guide/SKILL.md).
+Public APIs are pre-stable; update every consumer. SQLite uses monotonic `SCHEMA_VERSION`.
 
 **Application launch.** Only `dsh` profiles launch supported Node apps; package bins, demos, and public SDK argv escapes are forbidden ([rule](docs/architecture.md#application-launch)).
 
@@ -20,20 +16,17 @@ packages/    @deepseek-ai/dsh-<pkg> workspaces at packages/<group>/<pkg>/
   core/                 agent/session API
   api/                  remote BFF
   typert/               type graphs
-  llm/                  model providers
+  llm/                  model providers (pi-ai multi-provider)
   shell/                command execution
   subprocess/           child-process management
   ssh/                  SSH execution providers
   terminal/             persistent terminals
-  ptc-runtime/          PTC execution
+  ptc-runtime/          PTC execution (Node & Python)
   sandbox/              process confinement
   deliverables/         turn deliverables
   fs/                   filesystem access
-  lsp/                  language servers
   skill/                skill loading
-  web/                  search/fetch tools
-  computer-use/         computer interaction
-  browser-use/          browser interaction
+  web/                  fetch tools
   compaction/           context compaction
   context/              request context
   subagent/             delegated agents
@@ -47,25 +40,20 @@ packages/    @deepseek-ai/dsh-<pkg> workspaces at packages/<group>/<pkg>/
   schedule/             scheduled follow-ups
   preset/               agent composition
   guard/                loop/tool guards
-  extensions/           runtime self-modification
   session/              durable sessions
   session-query/        browsing/search/export
   attachment/           binary attachments
   spill/                output spill
   storage/              non-session storage
   workspace/            workspace entities
-  feedback/             human feedback
-  identity/             anonymous identity
   settings/             user settings
   credentials/          credentials/authorization
-  acp/                  automation-only ACP
   interaction/          human interaction
   boot/                 application boot
   sdk/                  JSON-RPC SDK
   host/                 GUI host
   client/               GUI client
   mcp/                  external tools
-  experimental/         evaluated capabilities without a product-support commitment
   test-support/         test infrastructure
   util/                 zero-dependency utilities
 python/      Python SDK/runtime (python/README.md)
@@ -74,10 +62,9 @@ benchmarks/  performance gates
 .agents/     Agent workflows/notes
 docs/        Documentation (docs/AGENTS.md)
 scripts/     gates and generators
-website/     VitePress documentation projection
 ```
 
-Package groups: [packages/README.md](packages/README.md). [Experimental status](packages/experimental/README.md#status) is independent of optional delivery; nonexperimental packages need product use or an explicit [classification](scripts/product-package-policy.ts).
+Package groups: [packages/README.md](packages/README.md). Non-default packages need an explicit [classification](scripts/product-package-policy.ts).
 
 ## Commands
 
@@ -151,7 +138,6 @@ Real-API tests/demos read `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, and 
 - **Error handling:** use typed, structured failures and localized, actionable reports. Define handling ownership, containment, and failure guarantees; stop dependent work and visibly report untrusted state or unknown outcomes. Follow [dsh-error-handling](.agents/skills/dsh-error-handling/SKILL.md).
 - **An empty `catch` names the error** and why; keep its `try` to one statement.
 - **Keep comments local.** Do not restate code, expand unrelated comments, or explain distant behavior without local need ([rationale](.agents/skills/dsh-prose-standard/SKILL.md)).
-- **Ban `prove` + `nance`** ([rule](.agents/notes/implemented/process/2026-08-26-ban-ambiguous-origin-label.md)).
 - **Prefer symmetry for parallel values**; unexplained asymmetry usually signals a missed extraction.
 - **Tests describe behavior, not correctness.** Change obsolete behavior with its tests; explain why in the PR.
 - **Create Agent Notes only for durable decision rationale;** mechanical/local edits are exempt, including local UI changes ([scope](.agents/notes/README.md#when-to-write-one)). Archived notes are frozen: never edit or treat them as current authority ([archive policy](.agents/notes/README.md#archiving-and-deletion)).

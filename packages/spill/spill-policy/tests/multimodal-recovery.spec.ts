@@ -14,12 +14,9 @@ import FileSystem from '@deepseek-ai/dsh-fs-local'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import {
   createAssistantMessage, createToolResultMessage, createUserMessage, LlmAdapter, LlmRuntime,
-  resolveImageAttachmentAccess, ToolCallId,
+  offloadedImageText, projectOffloadedImages, resolveImageAttachmentAccess, ToolCallId,
 } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, ImageBlock, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
-import { deepSeekImageRequestPricing, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
-import { prepareImages } from '@deepseek-ai/dsh-llm-deepseek/src/images.ts'
-import { serialize } from '@deepseek-ai/dsh-llm-deepseek/src/serialize.ts'
+import type { ContentBlock, GenerateOptions, ImageBlock, LlmImageRequestPricing, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client'
 import NodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import Sandbox from '@deepseek-ai/dsh-sandbox-local'
@@ -40,10 +37,11 @@ const CAP = 12500
 const MODEL = 'vision-fixture'
 const LONG = `${'X'.repeat(100)}\n`.repeat(600)
 const SMALL = 'S'.repeat(36000)
-const connection = resolveAdapterOptions({ models: [{ id: MODEL, inputModalities: ['text', 'image'] }] })
 const text = (value: string): ContentBlock => ({ type: 'text', text: value })
 const textOf = (content: readonly ContentBlock[]): string => content.filter(block => block.type === 'text').map(block => block.text).join('')
 const imagesOf = (content: readonly ContentBlock[]): ImageBlock[] => content.filter((block): block is ImageBlock => block.type === 'image')
+const fixtureImageTokens = (width: number, height: number): number =>
+  Math.max(1, Math.ceil(width / 28)) * Math.max(1, Math.ceil(height / 28))
 
 async function setup(mode: 'native' | 'ptc' = 'native') {
   const root = await mkdtemp(join(tmpdir(), 'dsh-image-recovery-'))
@@ -65,7 +63,12 @@ async function setup(mode: 'native' | 'ptc' = 'native') {
   const access = (ref: ImageAttachmentRef) => resolveImageAttachmentAccess(
     ctx.attachments, path => ctx.fs.processPathFromHostPath(path), ref,
   )
-  const pricing = deepSeekImageRequestPricing(connection, MODEL, access)
+  const pricing: LlmImageRequestPricing = {
+    priceImages: images => images.map(({ attachment }) => ({
+      visualTokens: fixtureImageTokens(attachment.width, attachment.height),
+      text: offloadedImageText(attachment, access(attachment)),
+    })),
+  }
   class VisionRoute extends LlmAdapter {
     override async resolveModel(provider: string, model: string) {
       return { provider, id: model, name: model, inputModalities: ['text', 'image'] as Array<'text' | 'image'> }
@@ -112,14 +115,15 @@ async function setup(mode: 'native' | 'ptc' = 'native') {
       createToolResultMessage({ callId, content, isError: false }),
       ...contexts,
     ]
-    const prepared = await prepareImages(history, connection, MODEL, ctx.attachments, access, new AbortController().signal)
-    const body = serialize({ provider: 'vision', model: MODEL, messages: history }, connection, prepared.messages, prepared.versions, access)
-    const blocks = body.messages.flatMap(message => message.content.flatMap(block => block.type === 'tool_result' ? block.content : [block]))
-    const images = blocks.filter(block => block.type === 'image')
-    return Promise.all(images.map(async (block) => {
-      if (block.source.type !== 'base64') throw new Error('expected prepared inline image bytes')
-      const data = Buffer.from(block.source.data, 'base64')
-      const { dominant } = await sharp(data).stats()
+    const projected = projectOffloadedImages(history, ref => offloadedImageText(ref, access(ref)))
+    const retained = projected.flatMap(message => imagesOf(message.content))
+    return Promise.all(retained.map(async (block) => {
+      const version = await ctx.attachments.readImageRequest(
+        block.attachment,
+        { width: 2048, height: 2048, maxBytes: 1024 * 1024 },
+        new AbortController().signal,
+      )
+      const { dominant } = await sharp(Buffer.from(version.data)).stats()
       return dominant.r > 200 ? 'red' : dominant.g > 200 ? 'green' : dominant.b > 200 ? 'blue' : 'unexpected'
     }))
   }

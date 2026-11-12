@@ -47,6 +47,7 @@ function filesOf(bundle: BundleInfo, preferred: readonly string[], options: Bund
   const version = bundle.installTarget?.version
   if (version === undefined || semver.valid(version) !== version) return undefined
   const sources = npmFileSourceOrder(options.npmFileSources, preferred)
+  if (sources.length === 0) return undefined
   return npmFiles(bundle.name, version, sources, { timeoutMs: options.timeoutMs, lifetime: options.lifetime })
 }
 

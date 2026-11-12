@@ -18,8 +18,6 @@ import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import * as ToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
-import { resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
-import { serialize } from '@deepseek-ai/dsh-llm-deepseek/src/serialize.ts'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { mountWorkingDirectoryFixture } from '../../../subagent/subagent/tests/working-directory-fixture.ts'
@@ -28,8 +26,11 @@ import TeamService, { TeamId } from '../../agent-team/src/index.ts'
 import * as toolTeam from '../src/index.ts'
 
 function serializeRequest(request: GenerateOptions) {
-  const connection = resolveAdapterOptions({ models: [{ id: request.model, systemPromptUpdate: 'in-history' }] })
-  return serialize(request, connection, request.messages, new Map(), () => undefined)
+  return {
+    tools: request.tools ?? [],
+    system: request.system ?? '',
+    messages: request.messages.map(({ role, content }) => ({ role, content })),
+  }
 }
 
 function runtimeContextText(request: GenerateOptions) {

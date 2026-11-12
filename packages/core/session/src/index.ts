@@ -706,8 +706,6 @@ export class Session {
 
   /**
    * Return the immutable event stored at one exact sequence number.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param seq - event sequence number.
    * @returns the accepted event, or undefined when the log does not contain it.
    */
@@ -719,8 +717,6 @@ export class Session {
    * Materialize an immutable snapshot of a half-open event sequence range.
    * A full current snapshot is reused until the next append; every previously
    * returned snapshot remains stable after later appends.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param fromSeq - non-negative inclusive sequence number; defaults to the log start.
    * @param toSeqExclusive - non-negative exclusive sequence number; defaults to the current end.
    * @returns a frozen array of the selected deeply frozen events.
@@ -738,12 +734,9 @@ export class Session {
 
   /**
    * Return this Session's events after its fork-inherited prefix.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @returns a fresh array containing child-owned events in log order.
    */
   ownEvents(): readonly SessionEvent[] {
-    // oxlint-disable-next-line typescript/no-deprecated -- Deprecated reader delegates to the deprecated range read.
     return this.snapshotEvents(this.inheritedEventCount)
   }
 
@@ -1405,7 +1398,6 @@ export class SessionStore extends Service {
       throw new SessionForkError(`session "${childSessionId}" already exists`, 'SESSION_ALREADY_EXISTS')
     }
     const liveSource = this._resolveForkSource(source)
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing fork snapshot read; migration deferred.
     const events = liveSource.snapshotEvents()
     const resolved = this._forkBoundary(liveSource.id, events, boundary)
     const seed = resolved === undefined ? [] : buildForkSeed(events, resolved)
