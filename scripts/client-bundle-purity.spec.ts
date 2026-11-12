@@ -316,7 +316,7 @@ describe('client bundle purity gate', () => {
     expect(resolveId(timer)).toBeNull()
     expect(() => resolveId(`${timer}/src/index.ts`)).toThrow(/purity/)
     expect(() => resolveId('@deepseek-ai/cordis-plugin-hmr')).toThrow(/purity/)
-    const config = clientConfigs(packageDir('extensions/cordis-client-runner'))[0]
+    const config = clientConfigs(packageDir('client/connection'))[0]
     const deps = config?.deps as { neverBundle: (specifier: string) => boolean }
     expect(deps.neverBundle(timer)).toBe(false)
     expect(deps.neverBundle('@deepseek-ai/cordis')).toBe(true)
@@ -363,19 +363,19 @@ describe('client bundle purity gate', () => {
 
 describe('client bundle experimental input isolation', () => {
   const experimental = '@deepseek-ai/dsh-experimental-client-ui-voice-input'
-  const experimentalDir = packageDir('experimental/client-ui-voice-input')
 
   function fixture() {
     const root = mkdtempSync(join(tmpdir(), 'dsh-client-inputs-'))
     onTestFinished(() => { rmSync(root, { recursive: true, force: true }) })
     const owner = join(root, 'client')
     const entry = join(owner, 'lib/types/client/index.js')
-    const prototype = join(root, 'prototype/src/index.js')
+    const prototypeDir = join(root, 'prototype')
+    const prototype = join(prototypeDir, 'src/index.js')
     for (const file of [entry, prototype]) mkdirSync(dirname(file), { recursive: true })
     writeFileSync(join(owner, 'package.json'), JSON.stringify({ name: REQUESTING_PACKAGE, type: 'module' }))
-    writeFileSync(join(root, 'prototype/package.json'), JSON.stringify({ name: experimental, type: 'module' }))
+    writeFileSync(join(prototypeDir, 'package.json'), JSON.stringify({ name: experimental, type: 'module' }))
     writeFileSync(prototype, 'export const marker = "experimental sentinel"\n')
-    return { root, owner, entry, prototype }
+    return { root, owner, entry, prototypeDir, prototype }
   }
 
   function config(kind: 'static' | 'dynamic', dir = REQUESTING_PACKAGE_DIR): UserConfig {
@@ -440,15 +440,6 @@ describe('client bundle experimental input isolation', () => {
     expect(existsSync(join(owner, 'lib/index.js'))).toBe(false)
   })
 
-  it.each(['static', 'dynamic'] as const)('keeps retained-name experimental %s inputs outside ordinary artifacts', async (kind) => {
-    const { root, owner, entry, prototype } = fixture()
-    const name = '@deepseek-ai/dsh-tool-terminal'
-    writeFileSync(join(root, 'prototype/package.json'), JSON.stringify({ name, type: 'module' }))
-    writeFileSync(entry, `export { marker } from ${JSON.stringify(importPath(entry, prototype))}\n`)
-    await expect(bundle(owner, config(kind))).rejects.toThrow(/client bundle isolation.*experimental/)
-    await expect(bundle(owner, config(kind, packageDir('experimental/tool-terminal')))).resolves.toContain('experimental sentinel')
-  })
-
   it('proves the static library otherwise hides the experimental input in its emitted JavaScript', async () => {
     const { owner, entry, prototype } = fixture()
     writeFileSync(entry, `export { marker } from ${JSON.stringify(importPath(entry, prototype))}\n`)
@@ -465,10 +456,10 @@ describe('client bundle experimental input isolation', () => {
   })
 
   it.each(['static', 'dynamic'] as const)('allows an experimental %s artifact to keep its own inputs', async (kind) => {
-    const { owner, entry, prototype } = fixture()
+    const { owner, entry, prototypeDir, prototype } = fixture()
     writeFileSync(entry, `export { marker } from ${JSON.stringify(importPath(entry, prototype))}\n`)
 
-    await expect(bundle(owner, config(kind, experimentalDir))).resolves.toContain('experimental sentinel')
+    await expect(bundle(owner, config(kind, prototypeDir))).resolves.toContain('experimental sentinel')
   })
 
   it('rejects experimental ownership preserved only by an emitted compiler source map', async () => {

@@ -65,14 +65,9 @@ const publicationSourceAllowlist: Readonly<Record<string, readonly string[]>> = 
 const publishedRepositoryUrl = 'git+https://github.com/deepseek-ai/deepseek-harness.git'
 /** Packages that participate in the experimental policy. */
 const experimentalPackageDirectory = /^packages\/experimental\/[^/]+$/
-/** Private reference tool run from the repository; it publishes no files. */
-const pluginMarketGeneratorDirectory = 'apps/plugin-market-generator'
-/**
- * Ordinary directories whose packages this repository publishes: one release member each. The reference plugin
- * market generator is a private repository tool, not a published application.
- */
+/** Ordinary directories whose packages this repository publishes: one release member each. */
 const standardReleaseMemberDirectory = new RegExp(
-  `^(?:packages/(?!experimental/)[^/]+/[^/]+|apps/(?!desktop(?:-host)?$|${pluginMarketGeneratorDirectory.slice('apps/'.length)}$)[^/]+|vendor/[^/]+)$`,
+  '^(?:packages/(?!experimental/)[^/]+/[^/]+|apps/(?!desktop(?:-host)?$)[^/]+|vendor/[^/]+)$',
   'u',
 )
 /** Installable application assembled by electron-builder rather than published to npm. */
@@ -83,10 +78,7 @@ const appPackageFiles: Readonly<Record<string, readonly string[]>> = {
   '@deepseek-ai/dsh-desktop-host': [
     'lib/index.js', 'lib/cli.js',
   ],
-  // Sourcemaps stay out by payload policy; the worker-preview surface
-  // (dist/preview.html and dist/preview/) backs opt-in experimental
-  // packages and is not published.
-  '@deepseek-ai/dsh-web-frontend': ['dist', '!dist/**/*.map', '!dist/preview.html', '!dist/preview'],
+  '@deepseek-ai/dsh-web-frontend': ['dist', '!dist/**/*.map'],
 }
 
 /** The subset of package.json fields this constraint check cares about. */
@@ -188,20 +180,6 @@ export function readWorkspaceManifests(repositoryRoot: string): WorkspaceManifes
 const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // Tools entry points share error classes and invocation stages through runtime chunks.
   '@deepseek-ai/dsh-tools': ['lib/pipeline.js', 'lib/shared-*.js'],
-  // The embedded OAR implementation retains its upstream license.
-  '@deepseek-ai/dsh-experimental-subagent-oar': ['LICENSE-OAR'],
-  // CUA publishes its client API and attributed native source for local macOS builds.
-  '@deepseek-ai/dsh-cua': ['lib/remote-types.js', 'lib/api.js', 'lib/bridge.js', 'lib/native-client.js', 'lib/protocol.js'],
-  '@deepseek-ai/dsh-experimental-cua-macos': ['native/bin', 'cua-helper.json', 'native/Package.swift', 'native/Info.plist', 'native/DSHComputerUse.icns', 'native/build_app.py', 'native/Sources', 'native/tests/swift', 'native/tests/test_swift.py', 'native/LICENSE.cua-driver', 'native/LICENSE.computer-use-icon', 'native/upstream.json', 'native/README.md', 'native/README.zh.md', 'native/protocol.schema.json'],
-  '@deepseek-ai/dsh-webhook-github': ['examples/github-review/cordis.yml', 'examples/github-review/github-ready-review-rule.mjs'],
-  // Liveshare publishes its built Relay gateway entry and the shared runtime
-  // chunk that entry imports. Its `./types` export is a type-only module, so
-  // the emitted tree contributes that one runtime file; the declarations still
-  // ship as the whole tree.
-  '@deepseek-ai/dsh-experimental-liveshare': [
-    'lib/owner-gateway/cli.js',
-    'lib/retry-backoff-*.js',
-  ],
   // Owned Worker bundles import this public bootstrap before their business entry.
   '@deepseek-ai/dsh-app-boot': ['lib/worker/profile-resolution-bootstrap.js'],
   // Statically linked client libraries keep their stylesheets next to the emitted
@@ -218,33 +196,21 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // The physical-key protocol is a public entry usable without the browser service.
   '@deepseek-ai/dsh-client-shortcuts': ['lib/protocol.js'],
   // The CPython side ships as source .py files, published as-is rather than built.
-  '@deepseek-ai/dsh-experimental-ptc-runtime-python': ['py/**/*.py'],
-  '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice': ['runtime/assets.json'],
+  '@deepseek-ai/dsh-ptc-runtime-python': ['py/**/*.py'],
   // Node profile configuration and process bootstraps have separate bundles.
   '@deepseek-ai/dsh-ptc-runtime-node': ['lib/configuration.js', 'lib/process.js', 'lib/persistent-process.js'],
-  // The Inspector owns a Worker and a mirrored frontend outside package export paths.
-  '@deepseek-ai/dsh-experimental-inspector': ['lib/client.*.js', 'lib/worker.js', 'lib/devtools/**'],
   // Creator's composition guidance travels with the declaration package.
   '@deepseek-ai/dsh-agent-preset': ['skills'],
-  // Personalized pages ship the location guidance used by their Creator.
-  '@deepseek-ai/dsh-creation-recommendations': ['references/*.md', 'skills/*.md'],
-  // Official-plugin recommendations ship the skill text their provider loads.
-  '@deepseek-ai/dsh-plugin-recommendations': ['skills/*.md'],
   // The Web Host mounts the default-off settings owner independently of the
   // delegation-tool instances.
   '@deepseek-ai/dsh-tool-subagent': ['lib/model-selection-settings.js'],
   // The JSONL backend resolves its private verification Worker relative to
   // import.meta.url; it is shipped without a public package subpath.
   '@deepseek-ai/dsh-session-persistence-jsonl': ['lib/worker.cjs'],
-  // The plugin market parses fetched indexes in a private Worker resolved
-  // relative to import.meta.url; it is shipped without a public package subpath.
-  '@deepseek-ai/dsh-plugin-market': ['lib/worker.cjs'],
   // The argv-prefix runner entry ships beside the lib as its own bundle;
   // sandbox-local resolves it through the package's ./runner export. tsdown
   // also shares its generated FFI code through a hashed runtime chunk.
   '@deepseek-ai/dsh-sandbox-windows-acl': ['lib/runner.js', 'lib/types-*.js', 'assets'],
-  '@deepseek-ai/dsh-skill-badge': ['assets'],
-  '@deepseek-ai/dsh-skill-office': ['assets'],
   '@deepseek-ai/dsh-subprocess': ['lib/control.js'],
   // SSH launches a private helper and shares wire definitions and TLS setup
   // between that helper and the connection owner.
@@ -260,10 +226,6 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
     'lib/output.js',
     'scripts/ensure-spawn-helper.mjs',
   ],
-  // tsdown shares the repository/pack code between the lib entry and the bin
-  // through a hashed chunk. The committed bin.js is the link target pnpm can
-  // resolve at install time, before the build produces lib/bin.js.
-  '@deepseek-ai/dsh-experimental-webworker-packer': ['bin.js', 'lib/repository-*.js'],
   // Startup and runtime share the advertised URL parser.
   '@deepseek-ai/dsh-web-app': ['lib/public-url-*.js'],
   // The headless entry and its startup row share the JSON projection code
@@ -560,7 +522,7 @@ export function checkWorkspaceManifest({ dir, manifest }: WorkspaceManifest): st
     }
   }
 
-  if (dir.startsWith('apps/') && dir !== desktopApplicationDirectory && dir !== pluginMarketGeneratorDirectory && manifest.name?.startsWith('@deepseek-ai/')) {
+  if (dir.startsWith('apps/') && dir !== desktopApplicationDirectory && manifest.name?.startsWith('@deepseek-ai/')) {
     const expectedFiles = appPackageFiles[manifest.name]
     if (expectedFiles === undefined) {
       errors.push(`${label}: app package has no publication files policy`)

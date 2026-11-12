@@ -117,9 +117,10 @@ async function servingRun(options: {
 }
 
 describe('catalog and local closure', () => {
-  it('selects the real catalog closure from this checkout', () => {
-    const entries = generateOfficialBundleCatalog(root).map(entry => entry.packageName)
-    expect(entries).toEqual([...ON_DEMAND_BUNDLES])
+  it('selects a real bundle closure from this checkout', () => {
+    const catalogEntries = generateOfficialBundleCatalog(root).map(entry => entry.packageName)
+    expect(catalogEntries).toEqual([...ON_DEMAND_BUNDLES])
+    const entries = ['@deepseek-ai/dsh-web-app']
     const packages = readWorkspacePackages(root)
     const release = readReleaseMembers(root)
     const selection = selectBundleDependencies({ entries, packages, platform: hostPlatform() })

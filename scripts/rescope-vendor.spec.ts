@@ -85,17 +85,9 @@ describe('exactEditState', () => {
 
 describe('product identifiers', () => {
   it.each([
-    'apps/cli/tests/optional-bundle-transitions.e2e.ts',
     'apps/web/tests/agent-preset-selection.e2e.ts',
     'apps/web/tests/developer-tools-settings.e2e.ts',
-    'docs/subsystems/extensions.md',
-    'docs/subsystems/extensions.zh.md',
-    'docs/upgrade-guide/v0.2.0-rc.2/schedule-bundle-retired/guide.md',
-    'docs/upgrade-guide/v0.2.0-rc.2/schedule-bundle-retired/guide.zh.md',
-    'docs/upgrade-guide/v0.2.1-alpha.1/subagent-preset-composition/guide.md',
-    'docs/upgrade-guide/v0.2.1-alpha.1/subagent-preset-composition/guide.zh.md',
     'docs/user/guide/schedule.md',
-    'docs/user/guide/schedule.zh.md',
     'packages/bundle/web-app/cordis.patch.yml',
     'packages/client/ui-agent-preset/src/client/CreatePluginMenuItem.tsx',
     'packages/client/ui-agent-preset/src/client/analytics.ts',
@@ -108,7 +100,6 @@ describe('product identifiers', () => {
     'packages/client/ui-entry-customization/src/client/index.ts',
     'packages/client/ui-entry-customization/tests/menu.client.spec.tsx',
     'packages/client/ui-workspace/tests/workspaces-service.client.spec.ts',
-    'packages/extensions/cordis-host-runner/tests/inspect-registry.spec.ts',
     'snapshots/session/cordis-inspect-liveness/client-fixture.mjs',
     'snapshots/session/cordis-inspect-timeout/client-fixture.mjs',
   ])('preserves the product values in %s', (file) => {
@@ -159,13 +150,11 @@ describe('product identifiers', () => {
   })
 
   it.each([
-    ['apps/cli/tests/optional-bundle-transitions.e2e.ts', 1],
     ['packages/client/ui-conversation/src/client/input/submission-analytics.ts', 1],
     ['packages/client/ui-conversation/tests/service-orchestration.client.spec.ts', 1],
     ['packages/client/ui-entry-customization/src/client/index.ts', 1],
     ['packages/client/ui-entry-customization/tests/menu.client.spec.tsx', 1],
     ['packages/client/ui-workspace/tests/workspaces-service.client.spec.ts', 1],
-    ['packages/extensions/cordis-host-runner/tests/inspect-registry.spec.ts', 2],
     ['snapshots/session/cordis-inspect-liveness/client-fixture.mjs', 1],
     ['snapshots/session/cordis-inspect-timeout/client-fixture.mjs', 2],
   ] as const)('reverses real package references in %s and restores them', (file, lines) => {
@@ -177,7 +166,7 @@ describe('product identifiers', () => {
   })
 
   it('rewrites multiline fenced imports while preserving prose and fenced product data', () => {
-    const file = 'docs/subsystems/extensions.md'
+    const file = 'docs/user/guide/schedule.md'
     const text = "The `cordis` preset.\n```ts\nconst preset = 'cordis'\nimport {\n  Context,\n} from 'cordis'\n```\n"
     const scoped = "The `cordis` preset.\n```ts\nconst preset = 'cordis'\nimport {\n  Context,\n} from '@deepseek-ai/cordis'\n```\n"
     expectRoundTrip(file, text, scoped, 1)
@@ -188,7 +177,7 @@ describe('product identifiers', () => {
     const scoped = `# The 'cordis' preset.\n- name: ${name.replace('cordis', '@deepseek-ai/cordis')} # 'cordis' stays product data\n`
     for (const [file, wrap] of [
       ['packages/bundle/web-app/cordis.patch.yml', (value: string) => value],
-      ['docs/subsystems/extensions.md', (value: string) => `The \`cordis\` preset.\n\`\`\`yaml\n${value}\`\`\`\n`],
+      ['docs/user/guide/schedule.md', (value: string) => `The \`cordis\` preset.\n\`\`\`yaml\n${value}\`\`\`\n`],
     ] as const) {
       expectRoundTrip(file, wrap(text), wrap(scoped), 1)
     }
@@ -208,14 +197,14 @@ describe('product identifiers', () => {
   })
 
   it('rewrites declarations in an older event-name exception', () => {
-    const file = 'packages/extensions/cordis-host-runner/src/index.ts'
+    const file = 'packages/api/remotes/src/remote-events.ts'
     const text = "ctx.emit('cordis/inspect-query')\nimport { Context } from 'cordis'\ndeclare module 'cordis' {}\n"
     const scoped = "ctx.emit('cordis/inspect-query')\nimport { Context } from '@deepseek-ai/cordis'\ndeclare module '@deepseek-ai/cordis' {}\n"
     expectRoundTrip(file, text, scoped, 2)
   })
 
   it.each(['```ts\n```\n', "```ts\nimport 'cordis'\n"])('keeps fence line counts without requiring a closing fence', (text) => {
-    const file = 'docs/subsystems/extensions.md'
+    const file = 'docs/user/guide/schedule.md'
     const scoped = text.replace("import 'cordis'", "import '@deepseek-ai/cordis'")
     expectRoundTrip(file, text, scoped, scoped === text ? 0 : 1)
   })

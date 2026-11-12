@@ -203,13 +203,13 @@ describe('weighted partition assignment', () => {
 describe('coverage file inventory', () => {
   it('keeps JSON file paths and project ownership while dropping exempt suites', async () => {
     const root = await temporaryRoot()
-    const exemptDir = join(root, 'packages/experimental/webworker-runtime/tests')
+    const exemptDir = join(root, 'scripts')
     await mkdir(exemptDir, { recursive: true })
-    await writeFile(join(exemptDir, 'transform-corpus.spec.ts'), '')
+    await writeFile(join(exemptDir, 'oxlint-contract.spec.ts'), '')
     const output = JSON.stringify([
       { projectName: 'thread-safe', file: join(root, 'packages/a/tests/a.spec.ts') },
       { projectName: 'process-bound', file: join(root, 'packages/b/tests/with spaces.spec.ts') },
-      { projectName: 'thread-safe', file: join(exemptDir, 'transform-corpus.spec.ts') },
+      { projectName: 'thread-safe', file: join(exemptDir, 'oxlint-contract.spec.ts') },
     ])
     const inventory = parseFileInventory(output, root)
     expect(inventory.files).toEqual([

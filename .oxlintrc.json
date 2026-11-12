@@ -21,9 +21,7 @@
     "**/.oxlint-contract-*/**", // Scratch files created by the executable lint-contract tests.
     "**/oxlint-contract-*", // Flat probes use real TypeScript project include paths.
     "packages/typert/generator/tests/fixtures/type-model/**", // tsgolint rejects this fixture's preserved project shapes before rules run.
-    "website/.generated/**",
     "vendor/**", // Vendored source keeps upstream style and idioms.
-    "packages/experimental/claude-code-mods/examples/*/{hooks,tests,types}/**", // Claude Code's published example mods and their tests keep the upstream style; see the headers.
     "native/**", // The imported landlock-run subtree has its own gates; see native/README.md.
     "**/*.js",
     "**/*.mjs",
@@ -39,8 +37,7 @@
         "apps/*/src/**/*.{ts,tsx}",
         "apps/*/tests/**/*.{ts,tsx}",
         "examples/**/*.{ts,tsx}",
-        "scripts/**/*.{ts,tsx}",
-        "website/**/*.{ts,tsx}"
+        "scripts/**/*.{ts,tsx}"
       ],
       "rules": {
         "no-var": "error",
@@ -154,8 +151,7 @@
         "packages/*/*/src/**/*.{ts,tsx}",
         "apps/*/src/**/*.{ts,tsx}",
         "examples/**/*.{ts,tsx}",
-        "scripts/**/*.{ts,tsx}",
-        "website/**/*.{ts,tsx}"
+        "scripts/**/*.{ts,tsx}"
       ],
       "rules": {
         "typescript/no-non-null-assertion": "error",
@@ -204,19 +200,6 @@
         "scripts/**/*.spec.{ts,tsx}"
       ],
       "rules": {
-        // Session assertions inspect the log; other deprecated APIs remain errors.
-        "typescript/no-deprecated": [
-          "error",
-          {
-            "allow": [
-              {
-                "from": "file",
-                "name": ["snapshotEvents", "eventAt", "ownEvents"],
-                "path": "packages/core/session/src/index.ts"
-              }
-            ]
-          }
-        ],
         "typescript/no-invalid-void-type": "error",
         "typescript/no-non-null-assertion": "off", // Assertions commonly follow an expect() that proves presence.
         "typescript/no-unnecessary-condition": "off",
@@ -233,8 +216,7 @@
         "packages/**/*.{ts,tsx}",
         "apps/**/*.{ts,tsx}",
         "examples/**/*.{ts,tsx}",
-        "scripts/**/*.{ts,tsx}",
-        "website/**/*.{ts,tsx}"
+        "scripts/**/*.{ts,tsx}"
       ],
       "rules": {
         "sonarjs/duplicates-in-character-class": "error",
@@ -255,8 +237,7 @@
         "packages/**/*.{ts,tsx}",
         "apps/**/*.{ts,tsx}",
         "examples/**/*.{ts,tsx}",
-        "scripts/**/*.{ts,tsx}",
-        "website/**/*.{ts,tsx}"
+        "scripts/**/*.{ts,tsx}"
       ],
       "rules": {
         "@stylistic/indent": [
@@ -338,21 +319,6 @@
       "rules": {
         "@stylistic/quotes": "off"
       }
-    },
-    {
-      "files": [
-        "packages/experimental/webworker-runtime/src/node/**/*.ts",
-        "packages/experimental/webworker-runtime/src/storage/memory.ts",
-        "packages/experimental/webworker-runtime/src/module-system/module-loader.ts",
-        "packages/experimental/webworker-runtime/src/transport/synthetic-http.ts"
-      ],
-      "rules": {
-        "typescript/require-await": "off", // Async faces Node and Cordis define (fs promises, the module seam) reject rather than throw; the VFS beneath them never awaits.
-        "typescript/no-extraneous-class": "off" // Node constructs these (`new Script()`, `new Worker()`), so a stub that refuses must still be a class.
-      },
-      "plugins": [
-        "typescript"
-      ]
     }
   ]
 }

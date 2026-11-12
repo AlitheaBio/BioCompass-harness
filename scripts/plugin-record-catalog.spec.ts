@@ -205,11 +205,9 @@ export type SessionEvent<T extends keyof SessionEventMap = keyof SessionEventMap
     const empty = persistenceCatalogArtifacts(root, schema)
     const experimentalPaths = [
       'docs/experimental-persistence-catalog.md',
-      'docs/experimental-persistence-catalog.zh.md',
-      'docs/experimental-persistence-catalog.i18n.yaml',
     ]
     expect(empty.map(artifact => artifact.path)).toEqual([
-      'docs/persistence-catalog.md', 'docs/persistence-catalog.zh.md', 'docs/persistence-catalog.i18n.yaml',
+      'docs/persistence-catalog.md',
       ...experimentalPaths,
       'packages/core/session/src/known-event-types.ts', 'docs/persistence-schema.json',
     ])

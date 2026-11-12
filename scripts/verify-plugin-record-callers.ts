@@ -163,9 +163,8 @@ export function checkPluginRecordCallers(files: ReadonlyMap<string, string>): Pl
     throw new Error(`verify-plugin-record-callers: ${OWNER_FILE} no longer exports function ${RESTRICTED_NAME}; update this gate with the move or rename.`)
   }
   const paths = [...files.keys()]
-  if (!paths.some(file => file.startsWith(EXPERIMENTAL_PREFIX))
-    || !paths.some(file => file.startsWith('packages/') && !isAdmittedCaller(file))) {
-    throw new Error('verify-plugin-record-callers: the corpus lacks experimental or release package source; the file listing no longer matches the repository.')
+  if (!paths.some(file => file.startsWith('packages/') && !isAdmittedCaller(file))) {
+    throw new Error('verify-plugin-record-callers: the corpus lacks release package source; the file listing no longer matches the repository.')
   }
   return paths
     .filter(file => !isAdmittedCaller(file))

@@ -321,32 +321,6 @@ describe('gate graph validation', () => {
     expect(gates.find(gate => gate.id === 'cli-help')).toMatchObject({ env: { DSH_CLI_HELP_CONCURRENCY: raw } })
   })
 
-  it('keeps the concrete terminology policy in the documentation gate', () => {
-    const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
-
-    expect(ids).toContain('concrete-terms')
-  })
-
-  it('checks retrospective releases alongside the current persistence history', () => {
-    for (const mode of ['doc-sync', 'ci-static'] as const) {
-      const ids = withPnpmEntrypoint(() => gatesForMode(mode).map(subject => subject.id))
-      expect(ids).toEqual(expect.arrayContaining(['persistence-changes', 'persistence-releases']))
-    }
-  })
-
-  it('requires complete Session format references locally and in CI', () => {
-    const { scripts } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-      scripts: Record<string, string>
-    }
-    for (const mode of ['doc-sync', 'doc-quick', 'ci-static'] as const) {
-      expect(withPnpmEntrypoint(() => gatesForMode(mode))).toContainEqual(expect.objectContaining({
-        id: 'persistence-formats',
-        displayCommand: 'pnpm run verify-persistence-formats',
-      }))
-    }
-    expect(scripts['verify-persistence-formats']).toBe('tsx scripts/persistence-formats.ts')
-  })
-
   it('keeps package-group subsystem ownership in the documentation gate', () => {
     const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
 
@@ -411,9 +385,9 @@ describe('gate graph validation', () => {
   it('schedules the longest documentation leaves before short checks', () => {
     const ids = withPnpmEntrypoint(() => gatesForMode('doc-sync').map(subject => subject.id))
 
-    expect(ids.slice(0, 11)).toEqual([
-      'doc-typecheck', 'docs-site-build', 'doc-graphs', 'cli-help', 'markdown-links', 'type-equivalence',
-      'cordis-catalog', 'cordis-inspect-catalog', 'workflow-guest', 'mermaid', 'translation-pairing',
+    expect(ids.slice(0, 8)).toEqual([
+      'doc-typecheck', 'doc-graphs', 'cli-help', 'markdown-links', 'type-equivalence',
+      'cordis-catalog', 'workflow-guest', 'mermaid',
     ])
   })
 
@@ -475,15 +449,6 @@ describe('gate graph validation', () => {
     },
   )
 
-  it.each(['ci-primary', 'ci-static', 'check-all'] as const)(
-    'keeps weighted approval policy tests in %s',
-    (mode) => {
-      const ids = withPnpmEntrypoint(() => gatesForMode(mode).map(subject => subject.id))
-
-      expect(ids).toContain('approval-policy')
-    },
-  )
-
   it.each(['ci-primary', 'ci-static', 'check-all', 'hygiene'] as const)(
     'keeps hard-coded Client UI copy enforcement in %s',
     (mode) => {
@@ -514,17 +479,14 @@ describe('gate graph validation', () => {
   it('keeps native Windows coverage blocking and behind the complete build', () => {
     const complete = withPnpmEntrypoint(() => gatesForMode('ci-windows-complete'))
     const observational = withPnpmEntrypoint(() => gatesForMode('ci-windows-observational-ready'))
-      .filter(gate => gate.id !== 'docs-site-build' && gate.id !== 'electron-install')
+      .filter(gate => gate.id !== 'electron-install')
     const byId = new Map(complete.map(subject => [subject.id, subject]))
 
     expect(byId.get('coverage')?.allowFailure).not.toBe(true)
     expect(byId.get('coverage')?.needs).toContain('build')
     expect(byId.get('coverage-exempt-heavy')?.allowFailure).not.toBe(true)
-    expect(byId.get('coverage')?.needs).toContain('build')
     expect(byId.get('coverage-exempt-heavy')?.needs).toContain('build')
-    expect(byId.get('coverage-exempt-heavy')?.args).toContain(
-      'packages/experimental/webworker-packer/tests/image-loadable.spec.ts',
-    )
+    expect(byId.get('coverage-exempt-heavy')?.args).toContain('packages/typert/')
     expect(observational).not.toHaveLength(0)
     for (const gate of observational) {
       const completeGate = byId.get(gate.id)
@@ -547,8 +509,7 @@ describe('gate graph validation', () => {
 
     const completeBuiltBin = withPnpmEntrypoint(() => gatesForMode('ci-windows-complete'))
       .find(gate => gate.id === 'built-bin-smoke')
-    expect(completeBuiltBin?.after).toContain('windows-site')
-    expect(completeBuiltBin?.after).not.toContain('docs-site-build')
+    expect(completeBuiltBin?.after).toContain('publint')
   })
 
   it('reuses the Windows build without dropping diagnostics or rebuilding the workspace', () => {
@@ -560,11 +521,10 @@ describe('gate graph validation', () => {
 
     expect(scripts['check:ci:windows-observational-ready']).toBe('tsx scripts/run-gates.ts ci-windows-observational-ready')
     expect(scripts).not.toHaveProperty('check:ci:windows-observational')
-    const completeOnly = new Set(['build', 'windows-site', 'native-system', 'coverage', 'coverage-exempt-heavy'])
+    const completeOnly = new Set(['build', 'native-system', 'coverage', 'coverage-exempt-heavy'])
     const shared = complete.filter(gate => !completeOnly.has(gate.id))
-    expect(ready.map(gate => gate.id).sort()).toEqual([...shared.map(gate => gate.id), 'docs-site-build'].sort())
+    expect(ready.map(gate => gate.id).sort()).toEqual(shared.map(gate => gate.id).sort())
     expect(ready.some(gate => gate.id === 'build')).toBe(false)
-    expect(ready.find(gate => gate.id === 'docs-site-build')?.displayCommand).toBe('pnpm run docs:build:mpa')
     for (const diagnostic of shared) {
       expect(ready.find(gate => gate.id === diagnostic.id)).toMatchObject({
         command: diagnostic.command,
@@ -1005,8 +965,6 @@ describe('Node 24 lane ownership', () => {
         'apps/cli/tests/profiles/headless/tests/source-tool.built.e2e.ts',
         'apps/desktop/tests/acl-skill.built.e2e.ts',
         'packages/subprocess/subprocess-local/tests/spawn-runner-built.e2e.ts',
-        'packages/subagent/subagent-codex/tests/loader-composition.e2e.ts',
-        'packages/subagent/subagent-claude-code/tests/loader-composition.e2e.ts',
         'packages/team/agent-team/tests/built-lib.e2e.ts',
       ]),
     )

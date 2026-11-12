@@ -177,7 +177,9 @@ export function findTopLevelAwaits(file: string, sourceText: string): TopLevelAw
  * that holds TypeScript sources, because the gate would then pass by scanning less than it claims.
  */
 export function sourceCorpus(repositoryRoot: string = root, pattern: string = SOURCE_GLOB): string[] {
-  const files = globSync(pattern, { cwd: repositoryRoot }).map(file => file.replaceAll('\\', '/')).sort()
+  const files = globSync(pattern, { cwd: repositoryRoot, exclude: ['**/oxlint-contract-*'] })
+    .map(file => file.replaceAll('\\', '/'))
+    .sort()
   if (files.length === 0) throw new Error(`${GATE}: scanned an empty corpus; ${pattern} no longer matches.`)
   if (!files.some(file => file.endsWith('.tsx'))) {
     throw new Error(`${GATE}: the corpus holds no .tsx file; ${pattern} no longer covers TSX sources.`)
@@ -214,7 +216,7 @@ function holdsTypeScript(directory: string): boolean {
   }
   return entries.some(entry => entry.isDirectory()
     ? holdsTypeScript(join(directory, entry.name))
-    : /\.tsx?$/u.test(entry.name))
+    : !entry.name.startsWith('oxlint-contract-') && /\.tsx?$/u.test(entry.name))
 }
 
 /** What one repository scan checked, excluded, and found. */

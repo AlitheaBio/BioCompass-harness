@@ -245,16 +245,8 @@ describe('package dependency scope', () => {
       'carrierKeyOf', 'createScope', 'scopeOf', 'scopeTarget',
     ])
     expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-typert-protocol']).toBeUndefined()
-    expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-experimental-translator'])
-      .toEqual(['TranslationError'])
-    expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-experimental-forge'])
-      .toEqual(['changeRequestKey'])
-    expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-experimental-worktree'])
-      .toEqual(['generatedWorktreeName'])
-    expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-fs']).toEqual(['FsError'])
     expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-session'])
-      .toEqual(['SESSION_FORMAT_VERSION', 'appendPluginRecord', 'pluginRecordOf'])
-    expect(PACKAGE_DEPENDENCY_POLICY.peerRequiredHostExports['@deepseek-ai/dsh-timeout']).toEqual(['deadline'])
+      .toEqual(['SESSION_FORMAT_VERSION'])
   })
 
   it('discovers the Client directory, dsh.client declarations, and configured Host packages', () => {

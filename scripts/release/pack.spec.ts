@@ -59,7 +59,7 @@ function packGate(root: string, args: string[] = []): Gate {
     label: 'release pack fixture',
     displayCommand: 'pnpm exec node release pack fixture',
     command: process.execPath,
-    args: [pnpmEntry, '--dir', root, 'exec', process.execPath, '--import', tsxHook, packScript, '--family', 'vendor', '--out', 'packed', ...args],
+    args: [pnpmEntry, '--config.verify-deps-before-run=false', '--dir', root, 'exec', process.execPath, '--import', tsxHook, packScript, '--family', 'vendor', '--out', 'packed', ...args],
     env: { npm_execpath: pnpmEntry, DSH_PACK_FIXTURE: root, DSH_CLIENT_COMMIT_HASH: commit },
   }
 }

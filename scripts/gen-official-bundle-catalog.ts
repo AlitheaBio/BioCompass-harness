@@ -119,9 +119,10 @@ function localized(value: LocalizedText): string {
  * Write changed metadata or freshness-check it against the owning package resources.
  * @param root - Repository root containing source and metadata resources.
  * @param check - Reject drift without changing the generated file.
+ * @param names - Catalog admission list; defaults to the installation-owned list.
  */
-export function syncOfficialBundleCatalog(root: string, check: boolean): void {
-  const source = renderOfficialBundleCatalog(generateOfficialBundleCatalog(root))
+export function syncOfficialBundleCatalog(root: string, check: boolean, names: readonly string[] = ON_DEMAND_BUNDLES): void {
+  const source = renderOfficialBundleCatalog(generateOfficialBundleCatalog(root, names))
   const path = resolve(root, OUTPUT)
   let current: string | undefined
   try { current = readFileSync(path, 'utf8') }

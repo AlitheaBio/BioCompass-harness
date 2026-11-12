@@ -413,17 +413,21 @@ function collectNpmDeps(manifests: Map<string, Manifest>, names: Set<string>, br
  * @param manifests - workspace manifests keyed by repository-relative path.
  * @param names - every workspace package name, which never counts as external.
  * @param browser - Direct third-party packages resolved by the browser builds.
+ * @param hostBundledMap - Optional Host-bundled dependency map override for unit tests.
  * @returns each external package mapped to whether it is a runtime dependency.
  */
 export function tierExternalDeps(
-  manifests: Map<string, Manifest>, names: Set<string>, browser: ReadonlySet<string> = new Set(),
+  manifests: Map<string, Manifest>,
+  names: Set<string>,
+  browser: ReadonlySet<string> = new Set(),
+  hostBundledMap: Readonly<Record<string, readonly string[]>> = HOST_BUNDLED_DEPENDENCIES,
 ): Map<string, boolean> {
   const tiers = new Map<string, boolean>()
   // `tsx` is runtime by fiat: the root source-run scripts execute through its ESM hook.
   tiers.set('tsx', true)
   for (const [path, manifest] of manifests) {
     const devOnly = DEV_ONLY_AREAS.some(area => (area.endsWith('/') ? path.startsWith(area) : path === area))
-    const hostBundled = manifest.name === undefined ? [] : HOST_BUNDLED_DEPENDENCIES[manifest.name] ?? []
+    const hostBundled = manifest.name === undefined ? [] : hostBundledMap[manifest.name] ?? []
     for (const dependency of hostBundled) {
       if (!ALL_KINDS.some(kind => Object.hasOwn(manifest[kind] ?? {}, dependency))) {
         throw new Error(`gen-third-party-notices: ${manifest.name} embeds ${dependency} but does not declare it`)

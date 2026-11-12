@@ -17,7 +17,6 @@ export interface ProductPackagePolicy {
  */
 export const PRODUCT_PACKAGE_POLICY: Readonly<Record<string, ProductPackagePolicy>> = {
   'packages/core/agent-tool-presentation': { category: 'optional', reason: 'Deprecated selector retained for existing executor configurations.' },
-  'packages/credentials/deepseek-account': { category: 'optional', reason: 'Shared Desktop account view types.' },
   'packages/ptc-runtime/ptc-runtime-python': { category: 'optional', reason: 'Explicit Python PTC execution runtime.' },
   'packages/ssh/ssh': { category: 'optional', reason: 'Explicit remote connection and helper configuration.' },
   'packages/ssh/ssh-helper-runtime': { category: 'optional', reason: 'Private executable carrier for explicitly configured SSH connections.' },

@@ -163,14 +163,10 @@ describe('verify-plugin-record-callers', () => {
     }
   })
 
-  it('refuses a corpus without experimental or release package source', () => {
-    const withoutExperimental = corpus('')
-    withoutExperimental.delete(EXPERIMENTAL)
+  it('refuses a corpus without release package source', () => {
     const withoutRelease = corpus('')
     withoutRelease.delete(RELEASE)
-    for (const files of [withoutExperimental, withoutRelease]) {
-      expect(() => checkPluginRecordCallers(files)).toThrow(/lacks experimental or release package source/)
-    }
+    expect(() => checkPluginRecordCallers(withoutRelease)).toThrow(/lacks release package source/)
   })
 
   it('reads tracked and unignored sources outside vendor, skipping other files and deleted ones', () => {
