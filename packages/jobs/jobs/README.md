@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-jobs
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-jobs` lets tools keep long-running work active while an agent continues. Each job receives a stable `<kind>-<short-uuid>` id, and its owning agent can read output, wait with a timeout, or request cancellation. Ownership is scoped to the agent session, so other agents cannot inspect or stop the job; completion arrives as an in-session notice without polling. Users can watch retained live output without consuming what the agent can read. Background jobs can start only when the deployment supplies job execution.
@@ -104,7 +102,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Process-local registry](../jobs-local/README.md) — the shipped implementation that runs jobs in this process.
 - [Model-facing job controls](../tool-jobs/README.md) — the `job_output`, `job_list`, and `job_kill` tools and completion notices.
 - [Jobs lifecycle and output ownership](../../../.agents/notes/implemented/architecture/2026-09-03-jobs-seam-consolidation.md) — one lifecycle, output ring, and observation stream.
-- [job-registry seam Agent Note](../../../.agents/notes/archived/architecture/2026-07-26-job-registry-seam.md) — the owner-fenced registry contract and its rationale.
+- job-registry seam Agent Note — the owner-fenced registry contract and its rationale.
 - [Jobs seam consolidation Agent Note](../../../.agents/notes/implemented/architecture/2026-09-03-jobs-seam-consolidation.md) — one output ring, one projection, one event stream.
 
 -----

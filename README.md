@@ -1,64 +1,45 @@
-# DeepSeek Harness
+# BioCompass Harness
 
-English | [中文](README.zh.md)
+BioCompass Harness (`dsh`) is an open-source, local-first scientific agent harness built by [Alithea Bio](https://github.com/AlitheaBio/BioCompass-harness) on the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis) ([_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)).
 
-DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
-
-It is built on an **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512).
-
-Documentation: [https://deepseek-harness.github.io/deepseek-harness/](https://deepseek-harness.github.io/deepseek-harness/)
-
-## Developer preview
-
-DeepSeek Harness is in _developer preview_ and iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+All cloud telemetry, session-log uploaders, proprietary Office conversion binaries, and unprompted registry pings have been stripped so the Web UI, Electron Desktop app, headless CLI, TypeScript SDK, and Python SDK run cleanly with zero external phone-home dependencies.
 
 Review the [safety notice](SAFETY.md) before running the project.
 
-## Run
+## Run from source
 
-### Run from `npm`
-
-Install `Node.js`, then run:
+Install Node.js (`>=24.9.0`) and `pnpm`, then build and launch the Web UI:
 
 ```sh
-npx @deepseek-ai/dsh web
-```
-
-The command starts the Web UI at `http://127.0.0.1:3080` by default and opens it in the default browser for a local launch. An SSH launch only prints the host URL because the SSH client or editor owns the local forwarded address. Pass `--no-open` to run the server without opening a browser. See [Web UI guide](docs/user/guide/index.md).
-
-### Run from source
-
-To run from a repository checkout:
-
-```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
+git clone https://github.com/AlitheaBio/BioCompass-harness.git
+cd BioCompass-harness
 pnpm install
 pnpm run build
 pnpm dsh web
 ```
 
-`pnpm run build` prepares the repository artifacts. `pnpm dsh web` uses those built artifacts without rebuilding.
+`pnpm run build` prepares the repository artifacts. `pnpm dsh web` starts the Web UI at `http://127.0.0.1:3080` by default and opens it in the browser (`--no-open` skips opening a browser). See the [Web UI guide](docs/user/guide/index.md).
 
-## Community and support
+### Model providers and API keys
 
-- Submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).
-- Add the [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic to your plugin repository for discoverability.
-- Join <a href="https://discord.gg/4MrtZUhpxg">DeepSeek Harness Discord community</a>.
+Model access runs through `packages/llm/llm-pi-ai` (`anthropic`, `openai`, `google`, `deepseek`, and `openrouter`), defaulting to `anthropic` (`claude-sonnet-4-5`). Configure credentials in **Settings → Models** or via environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`) and optional `*_BASE_URL` overrides (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL`, `OPENROUTER_BASE_URL`).
 
-## Contributing
+### Other surfaces
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Web development watch mode:** `pnpm run dev:web` builds artifacts, serves the Web UI, and rebuilds client bundles on source edits.
+- **Desktop app:** `pnpm run dev:desktop` builds and launches the Electron Desktop app.
+- **Headless CLI:** `pnpm dsh --profile headless "task"` runs one task from source.
+- **SDKs:** TypeScript (`packages/sdk`) and Python (`python/sdk` + `python/sdk-runtime`) drive the same `dsh` profiles over JSON-RPC.
 
 ## Development
 
-Start with the [development guide](docs/development.md) and [architecture documentation](docs/architecture.md).
-
-`pnpm run dev:web` builds, serves, and rebuilds client bundles on source edits in one terminal, and `make help` lists the matching Make targets for Web and Desktop; the guide's application commands section owns the full table.
+Start with the [development guide](docs/development.md), [architecture documentation](docs/architecture.md), and [package map](packages/README.md).
 
 For agents, follow [AGENTS.md](AGENTS.md).
 
-## Citation
+## Upstream attribution
+
+Derived from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) by DeepSeek AI:
 
 ```bibtex
 @misc{deepseek-harness2026,

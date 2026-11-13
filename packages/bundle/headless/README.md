@@ -5,8 +5,6 @@ kind: "package-bundle"
 
 # @deepseek-ai/dsh-headless
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-headless` runs one dsh task from the command line and prints the final answer, then exits — no GUI, no server, no browser. Type `dsh --profile headless "run the tests"` and the agent handles it with the same model, tools, and safety defaults as every other surface. It suits scripts, CI, and one-off jobs: it opens no ports and leaves nothing running behind. It also offers a JSON event stream (`--json`) and `--session-id` to resume a conversation. Exit code 0 means the task completed; 1 means it aborted or errored. The boundary: one task per invocation, no interactive follow-up.
@@ -55,7 +53,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 The shipped headless profile disables the managed credential store and its authorization and DeepSeek account consumers. API-key routes use the launch environment, then `<invocation cwd>/.env`, then `$DSH_HOME/.env`. Keys and sign-ins saved by the GUI are ignored without changing their file. Providers that require a saved sign-in fail unless stored authentication is restored; external provider credential chains, such as AWS profiles, remain available.
 
-The DeepSeek Search and Fetch APIs [follow the session's DeepSeek credentials](../../web/web-deepseek-api/README.md#authentication). In the shipped headless profile, they send the DeepSeek model route's `DEEPSEEK_API_KEY` to that route's origin, so no sign-in is needed. Without that key, the model request omits `web_search`.
+The DeepSeek Search and Fetch APIs follow the session's DeepSeek credentials. In the shipped headless profile, they send the DeepSeek model route's `DEEPSEEK_API_KEY` to that route's origin, so no sign-in is needed. Without that key, the model request omits `web_search`.
 
 Unset an empty launch variable to allow its `.env` fallback; an exported empty value shadows that fallback.
 
@@ -97,7 +95,7 @@ A supervisor that interrupts a process must await its exit before resuming its S
 
 ### Experimental Auto review
 
-For model-reviewed full-access execution, explicitly enable [Auto review for headless supervision](../../experimental/auto-review/README.md#headless-supervision), select `--permission-mode auto --approval-policy never`, and use native tools. Auto reviews supported calls before execution and has no file sandbox. Its JSON denials let a supervisor inspect the failure and send scoped revision instructions through `--session-id`. Headless has no live approval-response channel.
+For model-reviewed full-access execution, explicitly enable Auto review for headless supervision, select `--permission-mode auto --approval-policy never`, and use native tools. Auto reviews supported calls before execution and has no file sandbox. Its JSON denials let a supervisor inspect the failure and send scoped revision instructions through `--session-id`. Headless has no live approval-response channel.
 
 ### Machine-readable output
 
@@ -182,7 +180,7 @@ These limits tell you when headless does not fit and what it needs from the `dsh
 
 - **One task per run** — after the task is answered the process exits; there is no interactive follow-up, so split multi-step work into separate runs.
 - **Final background-job settlement may be absent from persisted history** — process teardown can end Session routing or close its writer before an owned job settles, including normal completion and signal shutdown; the [job lifecycle contract](../../../docs/subsystems/jobs.md#session-lifecycle-records) defines how consumers retain incomplete intervals.
-- **Custom startup** — compositions that disable `headless-startup` must [configure the policy directly](../../../docs/upgrade-guide/v0.2.1-rc.2/headless-policy-composition/guide.md).
+- **Custom startup** — compositions that disable `headless-startup` must configure the policy directly.
 - **Windows extra roots** — the ACL backend rejects subprocess calls with extra roots when a tool executes; it does not stop the model request. Filesystem tools enforce the grants independently. See [platform limits](../../sandbox/sandbox-local/README.md).
 - **Runs through the `dsh` launcher** — starting the headless profile another way fails at startup, because only the launcher can request the process exit.
 - **No pre-token heartbeat** — in default mode stderr stays silent until the provider emits a non-empty reasoning delta; a delayed first token exposes no earlier progress signal.

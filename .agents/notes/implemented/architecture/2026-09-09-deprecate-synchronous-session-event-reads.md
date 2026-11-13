@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-09-deprecate-synchronous-session-event-reads.zh.md)
-
 ## Problem
 
 Synchronous access to arbitrary event positions makes consumers depend on the complete Session event sequence being immediately available in memory. The storage direction is to stop retaining that complete sequence in memory. Once historical events require storage I/O, the runtime cannot preserve the same synchronous read guarantee without retaining the history or blocking on storage.
@@ -48,4 +46,4 @@ Calls outside test files carry line-scoped `typescript/no-deprecated` waivers th
 
 ## Related decisions
 
-The [session immutability decision](2026-06-11-dev-invariants-over-deep-readonly.md) continues to own event ownership and freezing; this decision supersedes its recommendation to use synchronous historical readers. The [required projection reader decision](2026-08-19-session-projection-mandatory-seam.md) continues to own missing-state failures and typed state reads. The [recallable compaction proposal](../../proposed/feature/2026-07-06-recallable-compaction.md) retains its recall design while replacing its proposed synchronous history access with paged reads.
+The [session immutability decision](2026-06-11-dev-invariants-over-deep-readonly.md) continues to own event ownership and freezing; this decision supersedes its recommendation to use synchronous historical readers. The [required projection reader decision](2026-08-19-session-projection-mandatory-seam.md) continues to own missing-state failures and typed state reads. The recallable compaction proposal retains its recall design while replacing its proposed synchronous history access with paged reads.

@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-22-subagent-tool-owned-communication.zh.md)
-
 ## Problem
 
 The continuation manager inspected a Symbol on the standard messaging tool before adding tool instructions and parent addressing to the initial task. This coupled orchestration to one tool implementation and made result-delivery guidance depend on tool installation. A published internal entry point carried both that marker and a host prompt adapter used only by tests.
@@ -14,7 +12,7 @@ The continuation manager inspected a Symbol on the standard messaging tool befor
 
 The manager owns result delivery. Local activations with `delivery: 'parent'` receive automatic-result guidance even without messaging tools; caller-owned activations receive no parent-delivery promise. Settlement timing, recipients, output, and suppression of closing text after a final message to the parent remain unchanged. Tool visibility grants no messaging authority.
 
-This supersedes the Symbol identity and initial-task communication-guidance choices in [adjacent messaging](2026-08-27-adjacent-agent-steer-messaging.md). Its message attribution, fixed Steer delivery, and rejection of a separate report operation remain active. The internal entry point and prompt adapter are removed; the [upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.2/subagent-user-controls/guide.md) owns caller migration.
+This supersedes the Symbol identity and initial-task communication-guidance choices in [adjacent messaging](2026-08-27-adjacent-agent-steer-messaging.md). Its message attribution, fixed Steer delivery, and rejection of a separate report operation remain active. The internal entry point and prompt adapter are removed; the upgrade guide owns caller migration.
 
 ## Alternatives considered
 

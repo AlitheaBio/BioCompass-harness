@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-agent-tool-presentation
 
-English | [中文](README.zh.md)
-
 > **Deprecated:** For new configurations, mount `@deepseek-ai/dsh-tool-executor-native` or `@deepseek-ai/dsh-tool-executor-ptc` directly. Existing configurations remain supported. To migrate, replace this selector row with the corresponding executor row and remove `config.mode`; do not load both in the same scope.
 
 ## Summary
@@ -87,7 +85,7 @@ The package-level contract is enough for most consumers; read these when you nee
 - [tools package](../tools/README.md) — the scoped registry and executor API.
 - [agent-presets package](../../preset/agent-preset-registry/README.md) — how presets compose agents and their standing mounts.
 - [Node ptc-runtime package](../../ptc-runtime/ptc-runtime-node/README.md) — the TypeScript runtime a PTC mode needs.
-- [historical PTC mode executor-collapse note](../../../.agents/notes/archived/bug-fix/2026-08-07-ptc-executor-collapse.md) — why the announced and callable surfaces stay the same.
+- historical PTC mode executor-collapse note — why the announced and callable surfaces stay the same.
 - [Core group map](../README.md) — how the core packages compose.
 
 -----

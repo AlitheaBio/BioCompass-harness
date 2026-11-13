@@ -2,11 +2,9 @@
 
 Status: implemented
 
-English | [中文](2026-10-14-no-top-level-await-in-packages.zh.md)
-
 ## Problem
 
-The child-process entry `src/worker.ts` of [speech-to-text-sensevoice](../../../../packages/experimental/speech-to-text-sensevoice/README.md) ran `await startRecognitionServer(...)` at module scope. Top-level await makes module evaluation asynchronous: an importer's evaluation waits on it, and an entry failure becomes a module-loading failure instead of an error the entry handles explicitly. The same file is also the package's `./worker` export, and the browser Preview's module loader wraps module bodies as CommonJS, so it refuses to pack top-level await, which kept voice-input-bundle out of the image. No repository gate prevented this pattern; a repository-wide scan found two more cases outside bins: ssh's `src/helper-entry.ts` (the target of the `./helper` export) and inspector's `src/worker/entry.ts` (a worker_threads entry).
+The child-process entry `src/worker.ts` of speech-to-text-sensevoice ran `await startRecognitionServer(...)` at module scope. Top-level await makes module evaluation asynchronous: an importer's evaluation waits on it, and an entry failure becomes a module-loading failure instead of an error the entry handles explicitly. The same file is also the package's `./worker` export, and the browser Preview's module loader wraps module bodies as CommonJS, so it refuses to pack top-level await, which kept voice-input-bundle out of the image. No repository gate prevented this pattern; a repository-wide scan found two more cases outside bins: ssh's `src/helper-entry.ts` (the target of the `./helper` export) and inspector's `src/worker/entry.ts` (a worker_threads entry).
 
 ## Decision
 
@@ -41,5 +39,5 @@ The trade-off costs:
 ## Testing
 
 - [verify-no-top-level-await.spec.ts](../../../../scripts/verify-no-top-level-await.spec.ts) pins every included and excluded form, the corpus guards, and the current exclusion list; [run-gates.spec.ts](../../../../scripts/run-gates.spec.ts) pins the gate's registration. With the asynchronous startup of the three entries above at module scope, the gate reports 4 cases (1 in sensevoice, 1 in ssh, 2 in inspector) and fails.
-- [worker-entry.spec.ts](../../../../packages/experimental/speech-to-text-sensevoice/tests/worker-entry.spec.ts) launches the sensevoice entry and pins that a failure before readiness exits with code 1, leaves stdout empty, and reports the reason on stderr without a stack trace.
-- [helper-boundaries.spec.ts](../../../../packages/ssh/ssh/tests/helper-boundaries.spec.ts) launches the ssh helper entry, and [integration.host.spec.ts](../../../../packages/experimental/inspector/tests/integration.host.spec.ts) starts the inspector Worker through `startInspector`; no spec drives the inspector worker entry's startup-failure frame.
+- worker-entry.spec.ts launches the sensevoice entry and pins that a failure before readiness exits with code 1, leaves stdout empty, and reports the reason on stderr without a stack trace.
+- [helper-boundaries.spec.ts](../../../../packages/ssh/ssh/tests/helper-boundaries.spec.ts) launches the ssh helper entry, and integration.host.spec.ts starts the inspector Worker through `startInspector`; no spec drives the inspector worker entry's startup-failure frame.

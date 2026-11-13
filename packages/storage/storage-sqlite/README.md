@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-storage-sqlite
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-storage-sqlite` is a storage backend that hosts every routed unit in one SQLite database file, storing each record as one JSON document per row, registered as backend `sqlite`. A single record update replaces one data row, which is what makes this the right medium for high-frequency, point-sized writes. Choose it when a domain's data changes often or the deployment prefers one queryable database; choose the JSON backend when the data should be readable as plain files. The backend is host-side only: it contributes no prompt, tool, or schema, so the model and the agent loop never see it.
@@ -99,7 +97,7 @@ Read these pages when this backend's view is not enough: the subsystem reference
 - [Storage subsystem](../../../docs/subsystems/storage.md) — the backend contract, domain semantics, and generated API.
 - [Storage package map](../README.md) — the family's packages and their repository position.
 - [JSON storage backend](../storage-json/README.md) — the human-readable medium for small, inspectable data.
-- [domain KV storage Agent Note](../../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.md) — the design behind the backend family and the deferred session-backend migration.
+- domain KV storage Agent Note — the design behind the backend family and the deferred session-backend migration.
 
 -----
 

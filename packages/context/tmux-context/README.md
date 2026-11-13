@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tmux-context
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-tmux-context` lets the model identify the tmux session, window, pane, and pane-tree layout containing its agent process. It adds a durable, source-attributed reading on the first step of a turn only when that location changed. Terminals that merely inherit tmux environment variables without running in the named pane add nothing; failed queries also add nothing and do not fail the turn. This package is opt-in and is not included in the shipped Web or headless profiles.
@@ -86,7 +84,7 @@ At the first step of a turn, the listener checks whether an injection is due, qu
 
 Read these pages when the package-level contract is not enough. They move from the design decision to the executor the query runs through and the exhaustive configuration.
 
-- [tmux location context decision record](../../../.agents/notes/archived/feature/2026-07-27-tmux-location-context.md) — design rationale for the tty-based detection and reading shape.
+- tmux location context decision record — design rationale for the tty-based detection and reading shape.
 - [Shell subsystem](../../../docs/subsystems/shell.md) — the executor service the read-only query runs through.
 - [Context group map](../README.md) — sibling request-context packages.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tmux-context) — every accepted config field and its source declaration.

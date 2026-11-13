@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-host-plugin-inventory
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Clients can call `pluginInventory/list` to display the host’s current plugins in load order, including each entry’s identifier, module specifier, effective enablement, live phase, and available display text. Deployments with an agent-preset roster also report each preset’s metadata, health, and flattened plugin composition; without a roster, preset data is absent. Each response is a point-in-time, read-only snapshot for display and diagnostics: it cannot mutate plugins and provides no history or change subscription.
@@ -81,7 +79,7 @@ Read these when the inventory contract is not enough: how the Remote reaches cli
 
 - [Remote assembly](../../api/remotes/README.md) — how clients consume `pluginInventory/list` without importing the Host implementation.
 - [Cordis plugin loader](../../../vendor/loader/README.md) — the Loader whose entries this package projects.
-- [Plugin inventory settings surface](../../client/ui-settings-plugin-inventory/README.md) — the browser-side projection that renders the inventory.
+- Plugin inventory settings surface — the browser-side projection that renders the inventory.
 
 -----
 

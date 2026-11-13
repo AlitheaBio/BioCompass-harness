@@ -1,7 +1,5 @@
 # Profile management
 
-English | [中文](boot.zh.md)
-
 The [boot package group](../../packages/boot/README.md) owns launcher-provided profile access and the plugin manager. [Plugin Manager](../../packages/boot/plugin-manager/README.md) documents persistence, reload and package-operation behavior.
 
 ## Management records
@@ -22,13 +20,13 @@ The [boot package group](../../packages/boot/README.md) owns launcher-provided p
 
 ## Market records
 
-[Plugin Market](../../packages/boot/plugin-market/README.md) reads index format 1, validated by [`dsh-plugin-market-index`](../../packages/util/plugin-market-index/README.md).
+Plugin Market reads index format 1, validated by `dsh-plugin-market-index`.
 
 `MarketIndexSummary` carries one configured index URL with the `title` and `description` of its last successful read and, when the last read failed, its `error`.
 
 `MarketQuery` selects one page of an index: fuzzy `text`, a `category`, `labels` that must all be present, a `MarketSort`, `offset`, `limit` up to 100, `refresh` to fetch again instead of using a cached document, and `fetchedAt` to continue the pages of one document. `MarketSearchResult` carries the index URL, `title`, optional `description`, market `metadata`, the document's `fetchedAt`, the page's `entries`, the `total` number of matches, and the `nextOffset`. Each `MarketListingEntry` adds `defaultVersion`, the version installed by default, and `installation`, the profile's status for the package name; each of its `versions` adds `install`, the exact spec and optional first registry for `installBundle`, and `compatibility`, the evaluation of its `engines.dsh` including a version exemption.
 
-`PluginDetail` is a market entry's long description: `{ status: 'found' }` with its `origin` (`locale`, `readme`, or `repository`), its `markdown`, and a `document` id whose images `GET /api/plugin-market/detail-file` serves, or `{ status: 'none' }`. The [plugin market documents the order](../../packages/boot/plugin-market/README.md#plugin-detail-documents) its sources are read in.
+`PluginDetail` is a market entry's long description: `{ status: 'found' }` with its `origin` (`locale`, `readme`, or `repository`), its `markdown`, and a `document` id whose images `GET /api/plugin-market/detail-file` serves, or `{ status: 'none' }`. The plugin market documents the order its sources are read in.
 
 ## Profile reconciliation
 

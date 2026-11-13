@@ -17,14 +17,7 @@ import {
   graphNodeId as nodeId,
   type PackageGraphNode,
 } from './package-graph.ts'
-import { rewriteTranslationLinkLocales } from './translation-links.ts'
-import {
-  generatedRegions,
-  parseTranslationPairingManifest,
-  renderGeneratedRegion,
-  spliceGeneratedRegion,
-  translationPairSourcePredicate,
-} from './translation-pairing.ts'
+import { renderGeneratedRegion } from './translation-pairing.ts'
 import { TypeScriptProject } from './ts-project.ts'
 
 const root = resolve(import.meta.dirname, '..')
@@ -108,43 +101,12 @@ const GROUP_ORDER = [
 
 const SERVICE_ROLES: ServiceRole[] = [
   {
-    key: 'actionCards',
-    pkg: 'action-cards',
-    title: 'Optional action cards',
-    mode: 'service',
-    consumers: ['creation-recommendations', 'client-ui-action-cards'],
-    note: 'Owns the card tool, card state, user actions and status notices; card kinds register their actions and handlers.',
-  },
-  {
-    key: 'pluginRecommendations',
-    pkg: 'plugin-recommendations',
-    title: 'Explicit-need plugin recommendations',
-    mode: 'service',
-    consumers: ['client-ui-plugin-recommendations'],
-    note: 'Reads the current catalog text of an official plugin card and enables the plugin through the profile plugin manager after a click.',
-  },
-  {
     key: 'headlessStartup',
     pkg: 'headless',
     title: 'Headless invocation options',
     mode: 'core',
     consumers: ['headless'],
     note: 'Supplies parsed task and run options to the headless runner and its sandbox-policy configuration.',
-  },
-  {
-    key: 'cotTranslation',
-    pkg: 'experimental-client-ui-cot-translation',
-    title: 'Reasoning translation Remote',
-    mode: 'service',
-    note: 'Serves reasoning translations, reuses saved results, and joins ordinary Session activation for uncached inactive Sessions.',
-  },
-  {
-    key: 'translator',
-    pkg: 'experimental-translator',
-    title: 'Anonymous text translation',
-    mode: 'service',
-    consumers: ['experimental-client-ui-cot-translation'],
-    note: 'Resolves Google or Bing requests and retains shared experimental records through the active Session writer.',
   },
   {
     key: 'hmr',
@@ -167,16 +129,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'plugin-manager',
     title: 'Current-profile plugin and bundle management',
     mode: 'core',
-    consumers: ['plugin-manager', 'ui-settings-plugin-inventory'],
+    consumers: ['plugin-manager'],
     note: 'Shares profile package operations with the CLI and reports persisted and running state to Web and agent callers.',
-  },
-  {
-    key: 'pluginMarket',
-    pkg: 'plugin-market',
-    title: 'Plugin market index reader',
-    mode: 'core',
-    consumers: ['client-ui-plugin-market', 'plugin-market'],
-    note: 'Fetches and validates the index sources the user configures; installation goes through the plugin manager.',
   },
   {
     key: 'profileContext',
@@ -193,39 +147,6 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['api-gateway', 'host-frontend-static'],
     note: 'Owns browser authentication and shared HTTP request dispatch; API adapters register endpoints and streams.',
-  },
-  {
-    key: 'forge',
-    pkg: 'experimental-forge',
-    title: 'Code host change requests',
-    mode: 'seam',
-    implementations: ['experimental-forge-github'],
-    consumers: ['experimental-forge-session', 'experimental-client-ui-forge'],
-    note: 'Providers map remote and change request URLs, look up change requests by head branch, and read status in batches; watchers of one change request share one polling loop.',
-  },
-  {
-    key: 'forgeSession',
-    pkg: 'experimental-forge-session',
-    title: 'Session change request bindings',
-    mode: 'service',
-    consumers: ['experimental-client-ui-forge'],
-    note: 'A Session projection derives bindings from shell results and binding records and publishes their URLs without status to clients; push results trigger head-branch discovery, and Session watchers poll bound change requests through the forge registry.',
-  },
-  {
-    key: 'forgePanel',
-    pkg: 'experimental-client-ui-forge',
-    title: 'Forge panel Remote',
-    mode: 'service',
-    note: 'Streams one panel state per followed Session: Git inspection using Session permissions, the recognized code host and its sign-in, and the bound change requests with polled status.',
-  },
-  {
-    key: 'worktrees',
-    pkg: 'experimental-worktree',
-    title: 'Git worktree creation',
-    mode: 'seam',
-    implementations: ['experimental-worktree'],
-    consumers: ['experimental-tool-worktree'],
-    note: 'Explicit experimental creation from a pinned local commit. Existing write permissions govern checkout and shared Git metadata; the working-directory service owns the resulting Session directory.',
   },
   {
     key: 'workingDirectory',
@@ -246,40 +167,12 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Connection-owned providers serve shared resource tools in the calling agent scope.',
   },
   {
-    key: 'browserUse',
-    pkg: 'browser-use',
-    title: 'Browser-use provider registration',
-    mode: 'seam',
-    implementations: ['experimental-browser-use-playwright-mcp', 'experimental-browser-use-chrome-devtools-mcp', 'experimental-browser-use-stagehand-native'],
-    consumers: ['experimental-browser-use-playwright-mcp', 'experimental-browser-use-chrome-devtools-mcp', 'experimental-browser-use-stagehand-native'],
-    note: 'One provider-owned name per service instance. Providers own their tools and browser resources per live Session; the shared service has no browser operation API.',
-  },
-  {
-    key: 'computerUse',
-    pkg: 'computer-use',
-    title: 'Computer-use provider registration',
-    mode: 'seam',
-    implementations: ['experimental-computer-use-cua-driver-mcp', 'experimental-computer-use-cua-driver-native'],
-    consumers: ['experimental-computer-use-cua-driver-mcp', 'experimental-computer-use-cua-driver-native'],
-    note: 'One provider-owned name per service instance. Each provider also owns its model tools; the service has no common action API, runtime selection, or Session workflow lock.',
-  },
-  {
-    key: 'cuaAccess', pkg: 'cua', title: 'Computer Use permission controls',
-    mode: 'core', consumers: ['cua'],
-    note: 'The native provider owns application consent and cancellation; the optional Client page queries and changes those decisions through its Remote.',
-  },
-  {
-    key: 'officeToPdf', pkg: 'office-to-pdf', title: 'Office to PDF conversion',
-    mode: 'core', consumers: ['client-ui-sidebar-documentpreview'],
-    note: 'Authorized Office bytes are converted on the Host using the declared native target engine, or Node WASM when no native target is declared.',
-  },
-  {
     key: 'attachments',
     pkg: 'attachment',
     title: 'Durable binary attachment storage',
     mode: 'seam',
     implementations: ['attachment-local'],
-    consumers: ['api-session-controller', 'tool-fs', 'llm-pi-ai', 'llm-deepseek'],
+    consumers: ['api-session-controller', 'tool-fs', 'llm-pi-ai'],
     note: 'The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content.',
   },
   {
@@ -295,26 +188,9 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'llm',
     title: 'LLM adapter registry',
     mode: 'seam',
-    implementations: ['llm-deepseek', 'llm-pi-ai', 'llm-replay'],
+    implementations: ['llm-pi-ai', 'llm-replay'],
     consumers: ['agent-loop', 'compaction-basic'],
     note: 'Adapters register provider implementations; the loop and compaction call the provider-neutral stream service.',
-  },
-  {
-    key: 'sessionLogDeepSeek',
-    pkg: 'session-log-deepseek',
-    title: 'Session-log upload policy',
-    mode: 'core',
-    implementations: [],
-    note: 'Plugins register caller-owned exclusions before the canonical Session-log request contribution is prepared; unmatched requests use normal upload eligibility.',
-  },
-  {
-    key: 'deepseekLlmApiExtensions',
-    pkg: 'deepseek-llm-api-extensions',
-    title: 'Official DeepSeek request extensions',
-    mode: 'seam',
-    implementations: ['session-log-deepseek', 'plugin-package-inventory-deepseek'],
-    consumers: ['llm-deepseek'],
-    note: 'Plugins prepare independent top-level fields; the official adapter merges them and commits their delivery state after HTTP acceptance.',
   },
   {
     key: 'tokenMeter',
@@ -337,15 +213,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'session',
     title: 'In-memory session store',
     mode: 'core',
-    consumers: ['agent-loop', 'agent', 'session-persistence', 'session-query', 'session-query-sqlite', 'subagent', 'message-feedback'],
+    consumers: ['agent-loop', 'agent', 'session-persistence', 'session-query', 'session-query-sqlite', 'subagent'],
     note: 'Owns append-only Session instances and emits the durable session event feed.',
-  },
-  {
-    key: 'speechController',
-    pkg: 'experimental-api-speech-to-text',
-    title: 'Experimental transcription Remote',
-    mode: 'core',
-    note: 'Validates bounded browser audio before provider dispatch.',
   },
   {
     key: 'sessionController',
@@ -453,7 +322,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Durable session persistence seam',
     mode: 'seam',
     implementations: ['session-persistence-jsonl'],
-    consumers: ['agent-loop', 'tool-bash', 'hooks-claude-code', 'hooks-codex', 'session-query', 'session-query-sqlite', 'message-feedback'],
+    consumers: ['agent-loop', 'tool-bash', 'session-query', 'session-query-sqlite'],
     note: 'The JSONL backend persists the SessionEvent vocabulary as one artifact per Session.',
   },
   {
@@ -486,17 +355,17 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Credential seam',
     mode: 'seam',
     implementations: ['credentials-local'],
-    consumers: ['api-settings-controller', 'llm-deepseek', 'llm-pi-ai'],
+    consumers: ['api-settings-controller', 'llm-pi-ai'],
     note: 'Configuration carries references to secrets; providers own the values. Consumers resolve per operation, so a rotated credential reaches the very next request; the settings controller exposes value-free views and write-only storage.',
   },
   {
     key: 'deepseekAccount',
     pkg: 'deepseek-account',
-    title: 'DeepSeek account',
+    title: 'Account authorization seam',
     mode: 'seam',
-    implementations: ['deepseek-account-platform'],
-    consumers: ['api-account-controller', 'llm-deepseek'],
-    note: 'The Host owns browser authorization and local credentials; UI consumers receive state without tokens.',
+    implementations: [],
+    consumers: [],
+    note: 'Host-owned account authorization service definition; retained as a zero-network TypeScript seam.',
   },
   {
     key: 'authorization',
@@ -512,32 +381,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'client-product-analytics',
     title: 'Desktop interaction collection',
     mode: 'service',
-    note: 'Accepts selected Desktop events, enriches available login identity, and observes live compaction under the live Host collection policy.',
-  },
-  {
-    key: 'otel',
-    pkg: 'otel',
-    title: 'Shared OTel reporting channels',
-    mode: 'service',
-    consumers: ['host-product-telemetry-otel', 'session-telemetry-otel'],
-    note: 'Product analytics and Session feedback adapters create independent reporting channels through one injected service.',
-  },
-  {
-    key: 'productTelemetry',
-    pkg: 'host-product-telemetry-otel',
-    title: 'Product usage event sender',
-    mode: 'service',
-    note: 'Exports explicitly submitted analytics events through OTLP/HTTP; mounting alone collects nothing.',
-  },
-
-  {
-    key: 'sessionTelemetry',
-    pkg: 'session-telemetry',
-    title: 'Session telemetry seam',
-    mode: 'seam',
-    implementations: ['session-telemetry-otel'],
-    consumers: [],
-    note: 'The seam captures, redacts, and hands session records to one backend; nothing else consumes the service — its output leaves the process.',
+    note: 'Inert local no-op intake for Desktop events; never transmits telemetry externally.',
   },
   {
     key: 'storage',
@@ -555,20 +399,6 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['workspace'],
     note: 'Waits for every configured backend, then publishes the domain form as one lifecycle-bound service for typed durable state.',
-  },
-  {
-    key: 'messageFeedback',
-    pkg: 'message-feedback',
-    title: 'Lifecycle-bound message feedback',
-    mode: 'core',
-    note: 'Owns per-assistant-message feedback in the canonical Session log, target validation, per-item compare-and-set, and the Host unary Remote contract. Feedback stays outside model history; log export follows the consumer policy.',
-  },
-  {
-    key: 'sessionFeedback',
-    pkg: 'command-feedback',
-    title: 'Session-level feedback recorder',
-    mode: 'core',
-    note: 'Records one Session-level remark with its category as a log-only feedback/record event on a live Session through the Host unary Remote contract; the /feedback command shares the same producer.',
   },
   {
     key: 'workspaceRegistry',
@@ -624,7 +454,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'tools',
     title: 'Scoped tool registry and executor selection',
     mode: 'core',
-    consumers: ['agent-loop', 'tool-ask-user', 'tool-bash', 'tool-cordis', 'tool-fs', 'tool-terminal', 'tool-skill', 'tool-subagent', 'tool-todo', 'tool-web'],
+    consumers: ['agent-loop', 'tool-ask-user', 'tool-bash', 'tool-fs', 'tool-terminal', 'tool-skill', 'tool-subagent', 'tool-todo', 'tool-web'],
     note: 'Registers capabilities and scoped executors. Native and PTC providers own descriptions and complete raw call batches; their optional shared pipeline handles tool policy and dispatch.',
   },
   {
@@ -677,7 +507,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'skill',
     title: 'Skill provider registry',
     mode: 'seam',
-    implementations: ['sandbox-windows-acl', 'skill-badge', 'skill-filesystem', 'skill-office'],
+    implementations: ['sandbox-windows-acl', 'skill-filesystem'],
     consumers: ['tool-skill'],
     note: 'Merges provider skill catalogs; tool-skill renders the session-prefix catalog and loads complete skill bodies.',
   },
@@ -686,7 +516,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'agent',
     title: 'Agent service',
     mode: 'core',
-    consumers: ['agent-loop', 'acp', 'subagent'],
+    consumers: ['agent-loop', 'subagent'],
     note: 'Owns live Agent handles, the create/resume factory seam, and process-local initiator propagation.',
   },
   {
@@ -740,8 +570,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Subprocess seam',
     mode: 'seam',
     implementations: ['subprocess-local', 'subprocess-ssh'],
-    consumers: ['bash-local', 'bash-sandbox', 'terminal-bash', 'lsp-stdio', 'subagent-acp', 'subagent-codex', 'subagent-claude-code'],
-    note: 'The bash executors, the PTY shell backend, the LSP host, and the out-of-process ACP, Codex, and Claude Code subagent backends spawn through ctx.subprocess; the service owns process coordinates, tree/session lifetime, stdio dispositions, terminal mechanics, and kill escalation.',
+    consumers: ['bash-local', 'bash-sandbox', 'terminal-bash'],
+    note: 'The bash executors and the PTY shell backend spawn through ctx.subprocess; the service owns process coordinates, tree/session lifetime, stdio dispositions, terminal mechanics, and kill escalation.',
   },
   {
     key: 'shell',
@@ -749,8 +579,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Bash executor seam',
     mode: 'seam',
     implementations: ['bash-local', 'bash-sandbox', 'pwsh-local'],
-    consumers: ['tool-bash', 'tool-pwsh', 'hooks-claude-code', 'hooks-codex'],
-    note: 'The model-facing shell tools and hook bridges consume this seam; sandboxed, remote, or PowerShell executors replace bash-local without touching them.',
+    consumers: ['tool-bash', 'tool-pwsh'],
+    note: 'The model-facing shell tools consume this seam; sandboxed, remote, or PowerShell executors replace bash-local without touching them.',
   },
   {
     key: 'shellEnv',
@@ -793,8 +623,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Approval seam',
     mode: 'seam',
     implementations: [],
-    consumers: ['tools', 'tool-bash', 'acp'],
-    note: 'One-shot permission decisions dispatched over the `approval/request` waterfall; answerers are listeners (the ACP bridge for its own agents), absence fails closed to `unavailable`.',
+    consumers: ['tools', 'tool-bash'],
+    note: 'One-shot permission decisions dispatched over the `approval/request` waterfall; answerers are listeners, absence fails closed to `unavailable`.',
   },
   {
     key: 'permissionPresets',
@@ -809,7 +639,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'ptc-runtime',
     title: 'PTC execution seam',
     mode: 'seam',
-    implementations: ['ptc-runtime-node', 'experimental-ptc-runtime-python'],
+    implementations: ['ptc-runtime-node', 'ptc-runtime-python'],
     consumers: ['tool-executor-ptc', 'workflow-ptc'],
     note: 'Runs programs against host-provided async bindings; tool-executor-ptc owns PTC presentation and workflow-ptc owns workflow orchestration.',
   },
@@ -837,18 +667,9 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'subagent',
     title: 'Subagent provider and continuation service',
     mode: 'seam',
-    implementations: ['subagent-spawn-in-process', 'subagent-fork-in-process', 'subagent-acp', 'subagent-codex', 'subagent-claude-code', 'subagent-dsh-sdk'],
-    consumers: ['tool-subagent', 'tool-subagent-control', 'tool-ralph'],
-    note: 'Providers prepare local children or execute external tasks; one activation manager owns both lifecycles. The delegation tool selects a backend, control tools deliver local follow-ups, and workflows await activation results.',
-  },
-  {
-    key: 'speechToText',
-    pkg: 'experimental-speech-to-text',
-    title: 'Experimental speech recognition providers',
-    mode: 'seam',
-    implementations: ['experimental-speech-to-text-sensevoice'],
-    consumers: ['experimental-api-speech-to-text'],
-    note: 'Routes explicit recognizers; the browser uses the authenticated Remote and keeps transcripts in the draft until submission.',
+    implementations: ['subagent-spawn-in-process', 'subagent-fork-in-process'],
+    consumers: ['tool-subagent', 'tool-subagent-control'],
+    note: 'Providers prepare local children or execute delegated tasks; one activation manager owns both lifecycles. The delegation tool selects a backend, control tools deliver local follow-ups, and workflows await activation results.',
   },
   {
     key: 'agentTeams',
@@ -857,20 +678,6 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['tool-agent-team'],
     note: 'Owns the shared task DAG for a subagent tree; tool-agent-team contributes task controls.',
-  },
-  {
-    key: 'claudeCodeMods',
-    pkg: 'experimental-claude-code-mods',
-    title: 'Claude Code mods bridge',
-    mode: 'core',
-    note: 'Loads mods that defineMod plugins add, raises their hook chains from harness extension points, and draws the band above the prompt over its Remote.',
-  },
-  {
-    key: 'inspector',
-    pkg: 'inspector',
-    title: 'Cross-realm runtime inspection',
-    mode: 'core',
-    note: 'Owns the Worker-hosted CDP target and the transport-independent Host and Client observation and Cordis-tree query API.',
   },
   {
     key: 'jobs',
@@ -886,9 +693,9 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'web',
     title: 'Web access provider registry',
     mode: 'seam',
-    implementations: ['web-search-deepseek', 'web-deepseek-api', 'web-fetch-http'],
+    implementations: ['web-fetch-http'],
     consumers: ['tool-web'],
-    note: 'Search and fetch providers register into one ctx.web seam; tool-web owns the stable model-facing names.',
+    note: 'Fetch providers register into one ctx.web seam; tool-web owns the stable model-facing names.',
   },
   {
     key: 'spillStore',
@@ -921,8 +728,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'web-app',
     title: 'Served Web GUI',
     mode: 'core',
-    consumers: ['harness-dev-context'],
-    note: 'The web-runtime row advertises one URL for its Web GUI: the configured publicUrl, otherwise the listener origin; DSH_WEB_URL, the startup URL, and harness-dev-context read the same value.',
+    consumers: [],
+    note: 'The web-runtime row advertises one URL for its Web GUI: the configured publicUrl, otherwise the listener origin; DSH_WEB_URL and the startup URL read the same value.',
   },
   {
     key: 'clientModules',
@@ -938,48 +745,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Workflow script engine',
     mode: 'seam',
     implementations: ['workflow-ptc'],
-    consumers: ['tool-workflow', 'tool-ralph'],
-    note: 'One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents.',
-  },
-  {
-    key: 'webhookRuntime',
-    pkg: 'webhook',
-    title: 'Webhook rule runtime',
-    mode: 'core',
-    consumers: ['webhook-github'],
-    note: 'Provider adapters dispatch authenticated deliveries; trusted plugins register independent process-local rules, and the runtime turns non-null results into ordinary Workspace-backed Sessions without delivery or completion state.',
-  },
-  {
-    key: 'lsp',
-    pkg: 'lsp',
-    title: 'Language-server navigation seam',
-    mode: 'seam',
-    implementations: ['lsp-stdio'],
-    consumers: ['tool-lsp'],
-    note: 'Provider registration and selection plus normalized query execution over exactly four operations; the seam offers no protocol escape hatch, so a backend translates into the normalized request and result.',
-  },
-  {
-    key: 'dynamicCordisRunner',
-    pkg: 'cordis-host-runner',
-    title: 'Dynamic Cordis package host runner',
-    mode: 'core',
-    consumers: ['tool-cordis'],
-    note: 'Owns the in-memory definition registry, the vm sandbox for host halves, and the request-run round trip; browser pages reach the same service over the wire through its remote namespace.',
-  },
-  {
-    key: 'cordisInspect',
-    pkg: 'cordis-host-runner',
-    title: 'Dynamic Cordis inspect registry',
-    mode: 'core',
-    consumers: ['tool-cordis'],
-    note: 'Registers host inspect providers, mirrors the client provider manifest, and routes client queries through the dynamic Cordis transport.',
-  },
-  {
-    key: 'liveshareShares',
-    pkg: 'experimental-liveshare',
-    title: 'Owner share management Remote',
-    mode: 'service',
-    note: 'Publishes the owner share-management operations as one Typert Remote namespace that the owner client face calls; every method delegates to the same operations the same-origin routes used.',
+    consumers: ['tool-workflow'],
+    note: 'One engine per context, as in bash, with no named-provider registry; workflow consumers start runs whose agent() calls fan out through ctx.subagents.',
   },
 ]
 
@@ -1122,7 +889,7 @@ const APP_EXAMPLES = [
     title: 'DSH Base Composition',
     label: 'packages/bundle/base/cordis.patch.yml',
     config: 'packages/bundle/base/cordis.patch.yml',
-    summary: 'The dsh-base bundle patch shared by the web, headless, sdk, and acp profiles; their mode bundles and user layers patch over it, while sdk-minimal owns a separate standalone tree.',
+    summary: 'The dsh-base bundle patch shared by the web, headless, and sdk profiles; their mode bundles and user layers patch over it, while sdk-minimal owns a separate standalone tree.',
   },
 ]
 
@@ -1579,12 +1346,17 @@ function renderEventRelations(pkgs: Pkg[], events: readonly EventEntry[]): strin
   lines.push(renderGeneratedRegion('event-producer-consumer:events', rows.join('\n')))
   // Every declared event needs a dispatcher: zero means dead vocabulary or an
   // unrecognized semantic dispatch form. Listener-free extension points remain
-  // valid. Client-declared events are exempt: the relation scan seeds the HOST
-  // aggregate program only (host+client cannot share one program — the cordis
-  // Context merges collide), so client dispatch sites are structurally
-  // invisible here; their rows stay in the table for the declarations' sake.
+  // valid. Client-declared events are exempt because the relation scan seeds
+  // the HOST aggregate program only; Service Definition events whose concrete
+  // producers live in optional external provider plugins are explicitly listed.
+  const externalProviderEvents = new Set([
+    'deepseek-account/session-expired',
+    'deepseek-account/signed-out',
+    'llm/models-updated',
+  ])
   const undispatched = [...events]
     .filter(event => !event.source.startsWith('packages/client/'))
+    .filter(event => !externalProviderEvents.has(event.name))
     .filter(event => (relations.get(event.name)?.dispatchers.size ?? 0) === 0)
     .map(event => event.name)
     .sort()
@@ -1789,29 +1561,7 @@ function renderDocs(): GraphDoc[] {
     { rel: 'docs/tool-execution-pipeline.md', content: renderToolPipeline() },
   ]
   docs.unshift({ rel: 'docs/graph-atlas.md', content: renderIndex(docs) })
-  const events = docs.find(doc => doc.rel === 'docs/event-producer-consumer.md')
-  if (events !== undefined) docs.push(spliceChineseRegions(events))
   return docs
-}
-
-/**
- * Splice a generated page's regions into its authored Chinese counterpart,
- * localizing paired-document links; the surrounding Chinese prose stays authored.
- */
-function spliceChineseRegions(doc: GraphDoc): GraphDoc {
-  const rel = doc.rel.replace(/\.md$/, '.zh.md')
-  const context = {
-    repoRoot: root,
-    sourcePath: rel,
-    isTranslationPairSource: translationPairSourcePredicate(parseTranslationPairingManifest(
-      readFileSync(resolve(root, 'scripts/translation-pairing.manifest.json'), 'utf8'),
-    )),
-  }
-  let content = readFileSync(resolve(root, rel), 'utf8')
-  for (const region of generatedRegions(doc.content)) {
-    content = spliceGeneratedRegion(content, rewriteTranslationLinkLocales(region.text, context).content)
-  }
-  return { rel, content }
 }
 
 function renderIndex(docs: GraphDoc[]): string {
@@ -1841,8 +1591,6 @@ function renderIndex(docs: GraphDoc[]): string {
   return [
     ...generatedHeader('Documentation Graph Index'),
     'These diagrams show relationships that the generated catalogs do not. Use them to find package relationships, capability seams, event flow, model-facing tools, app composition, and runtime lifecycle paths. Exact signatures and type definitions still live in the [subsystem pages](subsystems/core.md) (types + the generated Cordis API regions) and [tool-catalog.md](tool-catalog.md).',
-    '',
-    'The process decision behind this index is recorded in [the documentation graph Agent Note](../.agents/notes/archived/process/2026-07-03-documentation-graph-atlas.md).',
     '',
     '| Graph | Mode |',
     '| --- | --- |',

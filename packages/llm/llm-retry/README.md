@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-llm-retry
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Mount `@deepseek-ai/dsh-llm-retry` to retry failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; scheduled attempts reach the session log before backoff, and cancellation leaves consistent history. Retries re-run the failed step in the same open turn, while direct `ctx.llm.stream()` calls remain single-attempt. Each retry is another billed provider request, and always mode continues until success, cancellation, or disposal.
@@ -99,7 +97,7 @@ The plugin is one listener in the `agent/request-error` waterfall. Always mode's
 Read these pages when the package-level contract is not enough. They move from the service contract to the adapters that own retry policies.
 
 - [dsh-llm service](../llm/README.md) — the provider-neutral service whose adapters own `retryPolicy`.
-- [llm-deepseek adapter](../llm-deepseek/README.md) — a provider adapter with a route-level `retryPolicy`.
+- llm-deepseek adapter — a provider adapter with a route-level `retryPolicy`.
 - [llm-pi-ai adapter](../llm-pi-ai/README.md) — a multi-provider adapter with per-profile `retryPolicy`.
 - [Terminal LLM stream failures](../../../.agents/notes/implemented/architecture/2026-07-29-terminal-llm-stream-failures.md) — how failures reach the service boundary as terminal chunks.
 - [LLM streaming subsystem](../../../docs/subsystems/llm-streaming.md) — the `StreamChunk` protocol and adapter contract.

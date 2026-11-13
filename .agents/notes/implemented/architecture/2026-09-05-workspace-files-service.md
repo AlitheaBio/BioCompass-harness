@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-05-workspace-files-service.zh.md)
-
 ## Problem
 
 The Web client needs to look at files inside a session's workspace from a browser that may not be on the Host machine: a file the agent produced, the path a `read` tool row names, later a file tree and previews of files that are neither small nor text. The one endpoint that read a workspace file over the wire lived on the Session Controller as `workspace-file.ts`, beside session lifecycle it had nothing to do with. It returned a whole file under one total byte cap, so a large log could not be looked at even in part and a binary could not be looked at at all; it had no `stat`, no listing, and no change signal, so a preview could not learn that the agent had rewritten the file without re-reading it; and its result named the file by a Host `url`, a spelling nothing on the Client used as an address.
@@ -107,7 +105,7 @@ The Client export registers one `ResourceProvider<'file'>` into `ctx.resources` 
 
 ### Related notes
 
-The [resource model](2026-09-05-client-resource-model.md) owns `ctx.resources`, `useResource`, the `dsh-resource://<type>/…` address grammar, and the reasoning for one resource per address; the [text preview and file tree](../../../../packages/client/ui-sidebar-documentpreview/README.md) are the shipped consumers of `read`, `list`, and the `file` provider; the [right Sidebar docking infrastructure](../feature/2026-09-04-right-sidebar-docking-infrastructure.md) is the surface they open into; [historical workspace file links](../../archived/feature/2026-07-31-web-workspace-file-links.md) is where serving files over HTTP was rejected. Anyone extending this system reaches the same five methods through `remote.workspaceFiles` and the same `file` resource through `useResource<'file'>`; the wire types are published as `@deepseek-ai/dsh-api-workspace-files/types`. The [workspace file read authority](2026-09-09-workspace-file-read-authority.md) owns Host read access and the HTML security trade-off; [Document Preview](2026-09-08-document-preview-operations.md) owns content loading and per-tab freshness.
+The [resource model](2026-09-05-client-resource-model.md) owns `ctx.resources`, `useResource`, the `dsh-resource://<type>/…` address grammar, and the reasoning for one resource per address; the [text preview and file tree](../../../../packages/client/ui-sidebar-documentpreview/README.md) are the shipped consumers of `read`, `list`, and the `file` provider; the [right Sidebar docking infrastructure](../feature/2026-09-04-right-sidebar-docking-infrastructure.md) is the surface they open into; historical workspace file links is where serving files over HTTP was rejected. Anyone extending this system reaches the same five methods through `remote.workspaceFiles` and the same `file` resource through `useResource<'file'>`; the wire types are published as `@deepseek-ai/dsh-api-workspace-files/types`. The [workspace file read authority](2026-09-09-workspace-file-read-authority.md) owns Host read access and the HTML security trade-off; [Document Preview](2026-09-08-document-preview-operations.md) owns content loading and per-tab freshness.
 
 ## Alternatives considered
 

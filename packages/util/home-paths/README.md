@@ -5,8 +5,6 @@ kind: "package-library"
 
 # @deepseek-ai/dsh-home-paths
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `@deepseek-ai/dsh-home-paths` lets package authors resolve the DeepSeek Harness data root and the shared agent configuration root their consumers read. An explicit path wins over the environment variable, which wins over the default under the operating-system home; blank environment values are ignored. Its public helpers can render a root without revealing an absolute machine path, expand only bare or current-user tilde forms, and canonicalize watch targets whose final components do not yet exist. Use it as a direct library dependency, not through `cordis.yml`.
@@ -98,7 +96,7 @@ Read these pages when you need the launcher or the consumers that depend on a si
 
 - [Boot package](../../boot/app-boot/README.md) — the launcher that resolves the home before any plugin mounts.
 - [Shell environment](../../shell/shell-env/README.md) — how `DSH_HOME` reaches model shell calls.
-- [Anonymous user id](../../identity/anonymous-user-id/README.md) — a stored identity file under the resolved home.
+- Anonymous user id — a stored identity file under the resolved home.
 
 -----
 

@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-22-subagent-target-user-controls.zh.md)
-
 ## Problem
 
 A browser knows the subagent it is displaying, but requiring its direct creator and a continuable marker makes every control caller repeat history metadata. A caller-supplied parent id checks address consistency without establishing the caller's identity or permission. Calls that resolve only the global access resource also cannot express a grant on one target Session.
@@ -28,6 +26,6 @@ This supersedes the direct-parent addressing requirement for human continuation 
 
 ## Consequences
 
-Remote callers update their prompt fields, interrupt endpoint, and non-owner policy actions and resources; the [upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.2/subagent-user-controls/guide.md) owns the migration. History URLs retain parent ids for consistency checks. Cold host prompts may read creation ancestry twice, once to find the live root and again during restoration; no verified-ancestry cache is retained across asynchronous work.
+Remote callers update their prompt fields, interrupt endpoint, and non-owner policy actions and resources; the upgrade guide owns the migration. History URLs retain parent ids for consistency checks. Cold host prompts may read creation ancestry twice, once to find the live root and again during restoration; no verified-ancestry cache is retained across asynchronous work.
 
 Gateway tests cover target grants, global-only and parent-only refusal, separate send and interrupt actions, owner access, and refusal before side effects. Continuation tests cover nested and cold targets with online or offline creators, unavailable roots, and rejection of a root as a subagent target. The Web interrupt scenario exercises the renamed endpoint and parked-input behavior through the shipped composition.

@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-07-21-serial-cross-platform-ci-reference.zh.md)
-
 ## Problem
 
 The pull-request workflow consolidates required checks into dedicated Linux and Windows jobs. Those jobs still should not be the only completeness oracle: a defect in their gate inventory or dependency graph could omit work while the required aggregate stays green.
@@ -28,7 +26,7 @@ The standalone [Sandbox](../../../../.github/workflows/sandbox.yml) workflow bel
 
 Master reference jobs are diagnostic and do not participate in the pull request's required `all checks passed` result. The ci-master and Sandbox workflows keep their cross-platform references on master pushes. Performance is evaluated from completed hosted-job timestamps and reported as a measurement; it is not encoded as a `timeout-minutes` value.
 
-The active serial references run on the self-hosted `vm-backup` (`serial / linux`) and `dsh-win-ci` (`serial / windows`) pools; the one remaining disabled hosted serial reference (`serial-macos`) uses `macos-latest`, and there is no standard-hosted `serial / linux` label. The master-only Wine job runs on `ubuntu-latest`, while the pull-request native jobs use the hosted `dsh-windows-2025-16core` runner under normal operation, the self-hosted `[self-hosted, dsh-win-ci, windows]` pool under the `selfhosted` failover value, and Blacksmith's Windows runners under the `blacksmith` value (see the [blacksmith failover leg note](2026-09-09-blacksmith-failover-leg.md); see the [failover runbook](2026-07-26-ci-failover-runbook.md)), with build and targeted process checks required under the [native Windows decision](2026-08-08-native-windows-pull-request-ci.md). Required pull-request jobs use portable standard capacity under the [required-CI decision](../../archived/process/2026-07-23-portable-required-pull-request-ci.md). Higher-core hosted runners remain manual benchmarks because a correctness path must remain runnable without repository-external runner configuration.
+The active serial references run on the self-hosted `vm-backup` (`serial / linux`) and `dsh-win-ci` (`serial / windows`) pools; the one remaining disabled hosted serial reference (`serial-macos`) uses `macos-latest`, and there is no standard-hosted `serial / linux` label. The master-only Wine job runs on `ubuntu-latest`, while the pull-request native jobs use the hosted `dsh-windows-2025-16core` runner under normal operation, the self-hosted `[self-hosted, dsh-win-ci, windows]` pool under the `selfhosted` failover value, and Blacksmith's Windows runners under the `blacksmith` value (see the blacksmith failover leg note; see the [failover runbook](2026-07-26-ci-failover-runbook.md)), with build and targeted process checks required under the [native Windows decision](2026-08-08-native-windows-pull-request-ci.md). Required pull-request jobs use portable standard capacity under the required-CI decision. Higher-core hosted runners remain manual benchmarks because a correctness path must remain runnable without repository-external runner configuration.
 
 ## Alternatives considered
 

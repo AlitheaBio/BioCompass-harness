@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-08-09-client-conversation-node-assembly.zh.md)
-
 ## Problem
 
 Client Session owned transport windows, connection state, and pending interactions while also interpreting Assistant, Tool, message, command, compaction, retry, and turn-tail events in a centralized transcript fold. Adding one business node required changes to Session switches, history replay, indexes, caches, and React grouping; business identity, state evolution, and final presentation had no independent owner.
@@ -337,11 +335,11 @@ Assistant streaming to final and Tool running to settled stay in one Seat while 
 
 When business logic deliberately changes a materialized Node to hidden, it leaves visible order and remounts when visible again. This is explicit business withdrawal of presentation, distinct from the stable-Seat guarantee for running→settled.
 
-The concrete Tool renderer remains governed by the [`ui-tool ownership decision`](../../archived/architecture/2026-08-08-client-tool-presentation-ownership.md). Tool Definition supplies recursive root/subcall data, and `ui-tool` dispatches concrete presentation by the Tool-name keyed slot.
+The concrete Tool renderer remains governed by the `ui-tool ownership decision`. Tool Definition supplies recursive root/subcall data, and `ui-tool` dispatches concrete presentation by the Tool-name keyed slot.
 
 Trajectory registers its own target and business Definitions against the same Assembler and `SessionEventLikeEntry` window as Chat. Its target builder preserves the stage-oriented read model without consuming the Chat Builder's legacy slice or running an independent history fold. Chat and Trajectory keep independent scalar and packed Assistant reducers; target-specific Definitions do not change the shared Context, Reader, or Location contracts.
 
-The target-specific Trajectory Definitions, retained stage model, Steering adaptation, complexity bounds, and presentation hot paths are owned by the [Trajectory Context assembly decision](../../archived/architecture/2026-08-11-trajectory-conversation-context-assembly.md).
+The target-specific Trajectory Definitions, retained stage model, Steering adaptation, complexity bounds, and presentation hot paths are owned by the Trajectory Context assembly decision.
 
 ## Runtime and render path
 

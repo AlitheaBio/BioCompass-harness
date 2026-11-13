@@ -12,18 +12,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 import { LINK_MAP } from './gen-cordis-catalog.ts'
 import { parseJsDoc, pointer, rawJsDoc } from './jsdoc.ts'
-import { rewriteTranslationLinkLocales } from './translation-links.ts'
-import {
-  computeTranslationPairingRecord,
-  renderTranslationPairingRecord,
-  translationPairPaths,
-} from './translation-pairing-record.ts'
-import {
-  languageSwitcherTargets,
-  parseTranslationPairingManifest,
-  renderGeneratedRegion,
-  translationPairSourcePredicate,
-} from './translation-pairing.ts'
+import { translationPairPaths } from './translation-pairing-record.ts'
+import { renderGeneratedRegion } from './translation-pairing.ts'
 import { githubSlug } from './verify-md-links.ts'
 
 const root = resolve(import.meta.dirname, '..')
@@ -1040,28 +1030,15 @@ export function render(entries: CatalogEntry[], locale: Locale = 'en'): string {
 }
 
 /**
- * Compute both language versions and their consistency record.
- * @param scanRoot - Repository root used to resolve paired-document links.
+ * Compute the English configuration catalog output.
+ * @param scanRoot - Repository root used to collect package configurations.
  * @returns Repository-relative output paths and exact generated content.
  */
 export function computeConfigCatalogOutputs(scanRoot: string = root): ReadonlyMap<string, string> {
-  const entries = collectConfigCatalog()
-  const context = {
-    repoRoot: scanRoot,
-    isTranslationPairSource: translationPairSourcePredicate(parseTranslationPairingManifest(
-      readFileSync(resolve(scanRoot, 'scripts/translation-pairing.manifest.json'), 'utf8'),
-    )),
-  }
+  const entries = collectConfigCatalog(scanRoot)
   const en = render(entries, 'en')
-  const zh = rewriteTranslationLinkLocales(
-    render(entries, 'zh'),
-    { ...context, sourcePath: PATHS.zh },
-    languageSwitcherTargets(PATHS.source),
-  ).content
   return new Map([
     [PATHS.source, en],
-    [PATHS.zh, zh],
-    [PATHS.meta, renderTranslationPairingRecord(PATHS, computeTranslationPairingRecord(PATHS, en, zh, context))],
   ])
 }
 

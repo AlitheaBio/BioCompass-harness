@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-08-23-installed-python-wheel-black-box-ci.zh.md)
-
 ## Problem
 
 The Python SDK unit suite drives fake peers, while the packaged-runtime workflow can run the source SDK against a newly built executable before either Python distribution exists. Its clean virtual environment exercises only the default and MCP cases, and required pull-request CI builds only Linux x64. A source checkout, editable install, mismatched SDK/runtime pair, broken native wheel, platform-specific closure, or real-provider integration can therefore escape the evidence that blocks a merge.
@@ -34,7 +32,7 @@ The pull-request `python-runtime` job in CI Python calls the reusable builder fo
 
 ## Existing decisions and supersession
 
-This decision supersedes the single-target topology in the archived [required Python runtime pull-request validation](../../archived/testing/2026-08-12-required-python-runtime-pull-request-ci.md) while retaining its requirement that the real executable, snapshots, wheels, and clean installation meet in each selected target check. [docs/architecture.md](../../../../docs/architecture.md) owns the launched application and customization surface; the [single-file Python SDK runtime distribution](../architecture/2026-07-10-single-file-executable-sdk-runtime-distribution.md) remains authoritative for SEA packaging, native sidecars, wheel tags, and release artifacts.
+This decision supersedes the single-target topology in the archived required Python runtime pull-request validation while retaining its requirement that the real executable, snapshots, wheels, and clean installation meet in each selected target check. [docs/architecture.md](../../../../docs/architecture.md) owns the launched application and customization surface; the [single-file Python SDK runtime distribution](../architecture/2026-07-10-single-file-executable-sdk-runtime-distribution.md) remains authoritative for SEA packaging, native sidecars, wheel tags, and release artifacts.
 
 ## Alternatives considered
 

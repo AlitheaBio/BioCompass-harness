@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-fs-local
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-fs-local` to read, list, watch, write, edit, patch, delete, and move files on the host. Relative paths use a configurable base; absolute paths and parent traversal remain unrestricted. Aliases share one identity. Optional guards reject stale versions, and text publication preserves permissions. Moves can also apply hunks and report a published destination separately from source removal. Use `fs-sandbox` when mutations need confinement.
@@ -110,7 +108,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [fs-sandbox](../fs-sandbox/README.md) — the sandbox-enforcing backend that extends this one.
 - [tool-fs](../tool-fs/README.md) — the model-facing tools that consume `ctx.fs`.
 - [fs-observation-policy](../fs-observation-policy/README.md) — the policy plugin that guards mutations through the `fs/*` events.
-- [Windows DACL preservation note](../../../.agents/notes/archived/bug-fix/2026-07-19-windows-atomic-write-dacl-preservation.md) — why atomic replacement copies the target's access policy.
+- Windows DACL preservation note — why atomic replacement copies the target's access policy.
 
 -----
 

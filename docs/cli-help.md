@@ -11,7 +11,6 @@ Run `pnpm run gen-cli-help` to regenerate; run `pnpm run verify-cli-help` to che
 
 - [`dsh`](#dsh)
 - [`dsh plugin`](#dsh-plugin)
-- [`dsh acp`](#dsh-acp)
 - [`dsh headless`](#dsh-headless)
 - [`dsh sdk`](#dsh-sdk)
 - [`dsh sdk-minimal`](#dsh-sdk-minimal)
@@ -77,24 +76,6 @@ Options:
   --profile <name>  the profile whose plugins to manage (initialized on first
                     use)
   -h, --help        show this help
-```
-
-<a id="dsh-acp"></a>
-## `dsh acp`
-
-Invocations: `dsh acp --help`, `dsh --profile acp --help`
-
-```text
-Usage: dsh --profile acp [options]
-
-Serve automation clients over Agent Client Protocol stdio.
-
-Options:
-  -h, --help  show this help
-
-Example:
-  dsh --profile acp     serve ACP until the client disconnects
-
 ```
 
 <a id="dsh-headless"></a>

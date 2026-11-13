@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-12-peer-principal-and-remote-access.zh.md)
-
 ## Problem
 
 A Remote method on the Host could not tell whom one call spoke for, and could not restrict callable methods by caller. The [`PeerScope`](../../../../packages/typert/protocol/src/types.ts) contract stated "Who the Peer is and what it may do are not recorded here"; [Connection](../../../../packages/client/connection/src/rpc-host.ts) had a single operator Peer, `admit()` returned it for every authenticated request, and the `/api` route and the interceptor's Fetch handler used it unconditionally instead of the admission result; [Gateway](../../../../packages/api/gateway/src/index.ts) silently fell back to `operatorPeer()` when a caller named no Peer.
@@ -536,7 +534,7 @@ Business code does not pass a principal down as a function parameter: the identi
 |---|---|
 | `kind` is unchanged | Still `'user'`; existing `kind === 'user'` checks are unaffected |
 | Owner messages are unchanged | An owner call writes no field, so its source is byte-identical to the source before principals existed; a message without the field (including every older Session) is the owner's |
-| Not part of model requests | LLM adapters read only the model source ([`llm-deepseek/src/replay.ts`](../../../../packages/llm/llm-deepseek/src/replay.ts)) |
+| Not part of model requests | LLM adapters read only the model source (`llm-deepseek/src/replay.ts`) |
 | Session format | `SESSION_FORMAT_VERSION` is not bumped; per the [persistence type-change cookbook](../../../../docs/cookbook/reviewing-persistence-type-changes.md) the change records an acknowledgement |
 
 Example consumer use, outside this Note's scope: tool guards and pre-step rechecks read `source.principal` of the user messages in a turn and judge by the non-owner caller when any message carries one; a turn mixing owner and viewer messages takes the strictest.

@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-05-official-on-demand-bundles.zh.md)
-
 ## Problem
 
 Native subagent integrations bring their own runtimes. Shipping those dependencies with every DSH installation charges that cost to people who never delegate to them, while requiring a package name hides the integrations from the Plugins page.
@@ -18,7 +16,7 @@ The running installation owns the target. Published applications offer the exact
 
 Every Official package remains in the DSH release family. Packed DSH dependencies, optional dependencies, and peers use the exact family version. Publication prerequisites place catalog packages before the DSH package advertising them without adding their runtimes to DSH production dependencies. Catalog verification rejects missing metadata, unsupported membership, and stale generated content.
 
-The [shipped optional-bundle policy](../process/2026-09-15-shipped-optional-bundles.md) still owns lightweight installation-provided bundles. The [optional-composition decision](2026-09-21-experimental-capabilities-as-optional-bundles.md) owns shared patch behavior and global optional tools. Native bundles insert ordinary Host rows, so any profile can select them; profiles that keep the package without its bundle mount the same rows explicitly. The [identity compatibility decision](2026-10-06-web-desktop-plugin-identity-compatibility.md) owns retained names, selectors, and deferred naming cleanup.
+The [shipped optional-bundle policy](../process/2026-09-15-shipped-optional-bundles.md) still owns lightweight installation-provided bundles. The optional-composition decision owns shared patch behavior and global optional tools. Native bundles insert ordinary Host rows, so any profile can select them; profiles that keep the package without its bundle mount the same rows explicitly. The [identity compatibility decision](2026-10-06-web-desktop-plugin-identity-compatibility.md) owns retained names, selectors, and deferred naming cleanup.
 
 ## Alternatives considered
 

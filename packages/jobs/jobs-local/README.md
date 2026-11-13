@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-jobs-local
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-jobs-local` runs background jobs inside the harness process while the agent continues. The owning agent can read, wait on, list, and cancel its jobs; mounting `dsh-tool-jobs` also delivers completion notices in-session. Configurable concurrency and output-retention limits bound resource use. Producers can supply output for periodic reading or append it directly; users can observe retained output without consuming the agent's unread output. Jobs end when their owner or the harness shuts down.
@@ -121,7 +119,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Model-facing job controls](../tool-jobs/README.md) — the `job_output`, `job_list`, and `job_kill` tools and completion notices.
 - [Generic long-running tool runtime reference](../jobs/README.md) — the design behind the background-job runtime.
 - [Job lifecycle recording decision](../../../.agents/notes/implemented/bug-fix/2026-09-30-job-session-lifecycle.md) — durable timing, execution identity, and recording-failure behavior.
-- [job-registry seam Agent Note](../../../.agents/notes/archived/architecture/2026-07-26-job-registry-seam.md) — the owner-fenced registry contract and its rationale.
+- job-registry seam Agent Note — the owner-fenced registry contract and its rationale.
 
 -----
 

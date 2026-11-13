@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-ui-reference
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-client-ui-reference` when Web users need to mention files, folders, or sessions from one `@` completion menu. It lists files before sessions and keeps either group available when the other cannot load. Picking a file, folder, or session inserts an atomic reference with a stable clipboard form; folder rows also let users descend without closing completion. File rows omit redundant root locations, and session rows show a workspace only when it differs from the current one. Session mentions are validated before model context is captured, while browsing candidates has no model effect.
@@ -75,7 +73,7 @@ These pages cover the suggestion machinery, the reference seams, and the input p
 - [ui-input-trigger](../ui-input-trigger/README.md) — the inline suggestion machinery the source registers into.
 - [file-reference](../../context/file-reference/README.md) — the `@file` seam and its provider contract.
 - [session-reference](../../context/session-reference/README.md) — the `@session` seam and prepared snapshot semantics.
-- [Web input machine and slash pipeline](../../../.agents/notes/archived/architecture/2026-07-25-web-input-machine-and-slash-pipeline.md) — how references and commands share the input machine.
+- Web input machine and slash pipeline — how references and commands share the input machine.
 
 -----
 

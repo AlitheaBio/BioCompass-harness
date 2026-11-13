@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-sandbox
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-sandbox` to run a subprocess and everything it spawns under a per-call file-access policy. A command can run without writes (`read-only`), write only inside its workspace (`workspace-write`), or run unrestricted (`danger-full-access`). If the requested mode cannot be enforced, the call fails with `SANDBOX_UNAVAILABLE` instead of running unconfined. After a denied call, the model can request one strictly wider mode for human approval. This is same-world confinement: the process still shares the host kernel and filesystem; use a container, microVM, or remote executor when the whole environment must be isolated.
@@ -112,7 +110,7 @@ The ladder is a closed table — `read-only` may escalate to `workspace-write` o
 Start with the subsystem reference for the exhaustive contract, then the backends, consumers, and policy source that realize it.
 
 - [Process sandbox subsystem](../../../docs/subsystems/sandbox.md) — the complete vocabulary, per-call policy, and classification dialects.
-- [The historical subprocess sandbox decision](../../../.agents/notes/archived/feature/2026-07-06-sandbox.md) — capability boundary, escalation design, and deferred phases.
+- The historical subprocess sandbox decision — capability boundary, escalation design, and deferred phases.
 - [Local sandbox backends](../sandbox-local/README.md) — the per-platform runners behind `ctx.sandbox`.
 - [Bash sandbox executor](../../shell/bash-sandbox/README.md) — the confined bash consumer.
 - [Sandbox policy package](../sandbox-policy/README.md) — where the per-call mode and workspace root come from.

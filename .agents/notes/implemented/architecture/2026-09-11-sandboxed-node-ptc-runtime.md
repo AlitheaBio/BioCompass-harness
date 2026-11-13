@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-11-sandboxed-node-ptc-runtime.zh.md)
-
 ## Problem
 
 A Node worker isolates JavaScript state but does not apply the calling Session's OS sandbox policy. Model code can import filesystem and subprocess APIs directly, bypassing the tool-policy path even when nested `tools.*` calls receive the correct checks. Terminating the worker also does not establish that its child processes have stopped.
@@ -22,7 +20,7 @@ The host preserves `ELECTRON_RUN_AS_NODE` for child startup; the bootstrap remov
 
 File mode, observed denial and enforcement completeness travel in `PtcRunResult.sandbox` separately from the program outcome. Restricted execution fails if the required sandbox backend cannot launch. Full access is an explicit policy mode. Program success does not prove full enforcement, and neither the `process` descriptor nor the extra control pipe claims multi-tenant isolation.
 
-The [experimental Python provider](../../../../packages/experimental/ptc-runtime-python/README.md) shares the resolved file policy and sandbox diagnostics while retaining its local Unix execution and configured wall deadline. Per-call timeout overrides remain unsupported.
+The [Python provider](../../../../packages/ptc-runtime/ptc-runtime-python/README.md) shares the resolved file policy and sandbox diagnostics while retaining its local Unix execution and configured wall deadline. Per-call timeout overrides remain unsupported.
 
 ### Control and lifetime
 

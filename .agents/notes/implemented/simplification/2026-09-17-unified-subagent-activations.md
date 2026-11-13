@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-17-unified-subagent-activations.zh.md)
-
 ## Problem
 
 Local one-shot execution and continuable residency separately owned child creation, cancellation, structured capture, results, and cleanup. Foreground and Job-backed tool paths added more ownership paths. Workflow code still needed to await a result, while external backends needed one process execution without acquiring a multi-turn protocol.
@@ -24,7 +22,7 @@ Parent completion notices include final text regardless of `send_message` availa
 
 The native Session reader rejects duplicate child membership for both local and external catalog entries.
 
-The [continuable residency](../feature/2026-07-28-continuable-subagent-conversations.md), [fork request prefix](../architecture/2026-08-10-fork-children-stay-one-shot.md), and [parent-owned catalog](../architecture/2026-09-01-parent-owned-subagent-catalog.md) records retain their independent rationale. The [subagent package reference](../../../../packages/subagent/subagent/README.md) owns current provider, result-delivery, and activation-capacity contracts; the corresponding [capability seam](../../archived/feature/2026-06-21-subagent-capability-seam.md), [settlement delivery](../../archived/feature/2026-08-06-manager-owned-subagent-settlement-delivery.md), and [capacity](../../archived/feature/2026-09-15-continuable-activation-capacity.md) records remain historical snapshots. This decision owns the shared entry point, external participation, and caller-versus-parent result delivery.
+The [continuable residency](../feature/2026-07-28-continuable-subagent-conversations.md), [fork request prefix](../architecture/2026-08-10-fork-children-stay-one-shot.md), and [parent-owned catalog](../architecture/2026-09-01-parent-owned-subagent-catalog.md) records retain their independent rationale. The [subagent package reference](../../../../packages/subagent/subagent/README.md) owns current provider, result-delivery, and activation-capacity contracts; the corresponding capability seam, settlement delivery, and capacity records remain historical snapshots. This decision owns the shared entry point, external participation, and caller-versus-parent result delivery.
 
 Released Session generations remain immutable. Historical one-shot descriptors stay readable; removing current execution paths does not justify rewriting or discarding durable history.
 

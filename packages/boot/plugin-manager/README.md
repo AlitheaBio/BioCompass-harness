@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-plugin-manager
 
-English | [中文](README.zh.md)
-
 Application-owned profiles supply their bundled package-manager invocation through launcher facts. It takes precedence over `pnpmCommand` for package operations and registry inspection; its environment applies only to those subprocesses.
 
 ## Summary
@@ -143,7 +141,7 @@ The `@deepseek-ai/dsh-plugin-manager/diagnostic` entry supplies Desktop Host and
 - [App boot](../app-boot/README.md) — profile layers and startup policy.
 - [Plugin inventory](../../host/plugin-inventory/README.md) — current Loader and preset observations.
 - [Plugin manager page](../../client/ui-plugin-manager/README.md) — the Web sidebar page over this service.
-- [Plugin settings](../../client/ui-settings-plugin-inventory/README.md) — the read-only Web inventory.
+- Plugin settings — the read-only Web inventory.
 
 <a id="model-experience"></a>
 ## Model Experience

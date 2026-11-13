@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-08-23-client-derived-tool-presentation.zh.md)
-
 ## Problem
 
 Session history is a durable journal interface, while tool cards are Client presentation. Computing card views during `page` or `follow` would couple history reads to the Tools registry, Agent presets, restored scopes, presenter execution, and transient UI types.
@@ -689,9 +687,9 @@ The absence of optional `view` is a prerelease wire-type decision shared by all 
 
 The current [terminal-card rules](../../../../packages/client/ui-tool/README.md) permit nested terminal cards, replacing only the terminal child-card prohibition and its visual-equivalence requirement. This note remains active for raw-journal ownership, Client derivation, and the diff/read/search/web child restrictions.
 
-This note partially supersedes the implementation fact in [Client tool presentation ownership](../../archived/architecture/2026-08-08-client-tool-presentation-ownership.md) that “card models receive Host views.” Its core decisions remain: `ui-tool` owns presentation, business plugins use keyed slots, and Conversation owns only lifecycle and topology.
+This note partially supersedes the implementation fact in Client tool presentation ownership that “card models receive Host views.” Its core decisions remain: `ui-tool` owns presentation, business plugins use keyed slots, and Conversation owns only lifecycle and topology.
 
-This note preserves [toolview dissolution](../../archived/architecture/2026-07-23-toolview-dissolution.md): the Client still has one slot registration model and does not restore `ToolViewRegistry`.
+This note preserves toolview dissolution: the Client still has one slot registration model and does not restore `ToolViewRegistry`.
 
 This note narrows the consumer scope of the [render-intent union](2026-07-02-tool-render-intent-union.md). The Host APIs and types remain, while the Session Remote and Web Client do not consume them. This note owns the transport split without rewriting that presenter decision.
 

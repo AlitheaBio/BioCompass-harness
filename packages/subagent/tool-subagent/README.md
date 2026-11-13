@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tool-subagent
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use this package to give an agent a named tool that delegates work to a configured backend. Every call starts a managed activation and returns the child's name; the runtime owns completion notices and cleanup. Local children support messages and restoration, while external backends execute one task and return their final answer through the completion notice. Supported backends can expose approved child LLM routes. Each instance can select a child preset and depth limit.
@@ -128,7 +126,7 @@ Read these pages when the package-level contract is not enough; they move from t
 - [dsh-tool-subagent-control](../tool-subagent-control/README.md) — messaging, interrupt, and listing tools for continuable children.
 - [Generated tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent) — the default schema and backend-specific wording.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-subagent) — every accepted config field.
-- [Historical model-selected subagent routes](../../../.agents/notes/archived/feature/2026-08-18-model-selected-subagent-routes.md) — selection policy, inheritance, discovery, and the fork restriction.
+- Historical model-selected subagent routes — selection policy, inheritance, discovery, and the fork restriction.
 
 -----
 
@@ -167,7 +165,7 @@ The schema is prefix-stable across adapter registration and catalog changes. Eac
 
 #### What the model sees
 
-Visible delegation tools share delegation and collaboration guidance, listing tools in name order and instructing the model to start independent delegations together and keep working while they run, and to end its turn instead of sleeping or polling when only waiting for their results remains. Ending the turn works because a settled child notifies its parent and a notice that reaches an idle parent starts one independent model request; hosts that keep children progressing alternate `agent.whenIdle()` and `waitForChildren(agent)` ([`dsh-subagent`](../subagent/README.md), [`session.ts`](../../acp/acp/src/session.ts)). Hidden or unavailable tools are omitted; no guidance appears when none are visible. With both `subagent` and `subagent_fork` visible, the text is:
+Visible delegation tools share delegation and collaboration guidance, listing tools in name order and instructing the model to start independent delegations together and keep working while they run, and to end its turn instead of sleeping or polling when only waiting for their results remains. Ending the turn works because a settled child notifies its parent and a notice that reaches an idle parent starts one independent model request; hosts that keep children progressing alternate `agent.whenIdle()` and `waitForChildren(agent)` ([`dsh-subagent`](../subagent/README.md), `session.ts`). Hidden or unavailable tools are omitted; no guidance appears when none are visible. With both `subagent` and `subagent_fork` visible, the text is:
 
 ##### Tool-guidance section
 

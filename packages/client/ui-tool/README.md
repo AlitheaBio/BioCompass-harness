@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-ui-tool
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-client-ui-tool` is the client Tool presentation plugin of the dsh web client: it renders every tool call in the conversation. `ui-conversation` dispatches each ordered `tool-call` Conversation Node through the matching key of `conversation.chat.node`; this package renders its root and PTC dispatch children, then dispatches every atomic call through the keyed `tool.call.toolview` slot. Unregistered Tool names use the generic card. Business UI packages register only their wire Tool names and atomic views — they do not pair Session events, rebuild the transcript, or own root/subcall topology, because the Runtime remains authoritative for call/result pairing, lifecycle, and recursive `subCalls` projection.
@@ -118,7 +116,7 @@ These pages cover the conversation host, the view slots, and the card models.
 - [ui-primitives](../ui-primitives/README.md) — the output card atoms the built-in views compose.
 - [ui-skill](../ui-skill/README.md) — a business-owned registration for the `skill` tool.
 - [ui-user-questions](../ui-user-questions/README.md) — the question panels the `ask_user_question` row reopens.
-- [Auto review](../../experimental/auto-review/README.md) — the structured denial identity and user-visible reason owner.
+- Auto review — the structured denial identity and user-visible reason owner.
 - [Conversation subsystem](../../../docs/subsystems/conversation.md) — how a business-owned feature registers a Conversation node.
 - [Slot system standard](../../../.agents/notes/implemented/architecture/2026-07-22-slot-type-chain-implementation.md) — the composition model behind the keyed slot.
 

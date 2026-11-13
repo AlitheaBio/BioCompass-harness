@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-goal
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-goal` lets one long-running completion objective persist across turns, session resume, fork, and process restarts. Users and agents can create, edit, pause, resume, complete, block, or clear it; compare-and-set updates reject stale views. A configurable round cap (256 by default) bounds automatic continuation, and blocked goals retain a stable policy code with a human-readable explanation. The package stores goal state but does not schedule work, and continuation permission remains process-local rather than durable. Choose it for one objective spanning many turns; skip it for routine single-turn work or parallel objectives.
@@ -126,7 +124,7 @@ The package-level contract is enough for most consumers; read these when you nee
 - [Goal subsystem](../../../docs/subsystems/goal.md) — the goal types, durable change payloads, and generated service API.
 - [Goal group map](../README.md) — the goal packages and how they compose.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-goal) — every accepted config field and its source declaration.
-- [historical Goal domain Agent Note](../../../.agents/notes/archived/feature/2026-07-19-persisted-same-session-goal-domain.md) — the domain design, alternatives, and decisions.
+- historical Goal domain Agent Note — the domain design, alternatives, and decisions.
 
 -----
 

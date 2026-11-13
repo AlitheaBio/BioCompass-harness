@@ -1,11 +1,3 @@
----
-layout: false
-head:
-  - - meta
-    - http-equiv: refresh
-      content: 0; url=./guide/quickstart
----
+# BioCompass Harness
 
-# DeepSeek Harness
-
-English | [中文](index.zh.md)
+Start with the [Web UI user guide](./guide/index.md).

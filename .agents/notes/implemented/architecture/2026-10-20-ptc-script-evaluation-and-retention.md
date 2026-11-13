@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-20-ptc-script-evaluation-and-retention.zh.md)
-
 ## Problem
 
 Program syntax and memory lifetime answer different questions. A consumer may need Script declarations and completion values while requiring either a fresh environment or retained references. Inferring memory lifetime from REPL syntax prevents that choice.
@@ -30,4 +28,4 @@ VM Script uses a separate realm inside the managed child process. Top-level awai
 
 Script state is best-effort process memory, with the same explicit owner release and sandbox invalidation rules as retained REPL execution. It is neither serialized nor reconstructed by rerunning earlier programs. An uncaught callback exception or unhandled rejection terminates the Script process; programs must await asynchronous work.
 
-The published format union now includes `script`, and custom retained providers must report `retainsState`. The [upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.2/ptc-script-format/guide.md) describes consumer migration. Source deployments need the evaluator modules and Acorn packages; private process bundles include those dependencies.
+The published format union now includes `script`, and custom retained providers must report `retainsState`. The upgrade guide describes consumer migration. Source deployments need the evaluator modules and Acorn packages; private process bundles include those dependencies.

@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-session-projection
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-session-projection` when clients need current per-session state—such as todos, goals, or conversation statistics—without replaying the raw event log. Domains define synchronous projections from committed session events, and clients receive complete, schema-validated JSON values through snapshots and change notifications. Snapshots identify the last event reflected by every returned value, so carriers can pair state with the matching history cut. Projection state can be checkpointed for faster cold reads, while host-only projections remain private to the host.
@@ -83,7 +81,7 @@ A domain that owns projected state declares `sessionProjections` as a Cordis ser
 <a id="deprecated-plugin-compatibility"></a>
 ### Deprecated plugin compatibility
 
-`register(definition)` keeps its public return type `Promise<ProjectionHandle<S>>`, but the runtime value is a callable thenable, not a native `Promise` (`typeof` is `"function"`; `instanceof Promise` is false). Awaiting it delivers the retained handle; calling it releases the registration through the original Cordis effect disposer. Calling the return value is deprecated; use `handle.dispose()` in new code. Use `Promise.resolve(registration)` when an API requires a native Promise or treats functions as callbacks, including Vitest Promise assertions. See the [upgrade guide](../../../docs/upgrade-guide/v0.2.1-rc.2/session-projection-handles/guide.md).
+`register(definition)` keeps its public return type `Promise<ProjectionHandle<S>>`, but the runtime value is a callable thenable, not a native `Promise` (`typeof` is `"function"`; `instanceof Promise` is false). Awaiting it delivers the retained handle; calling it releases the registration through the original Cordis effect disposer. Calling the return value is deprecated; use `handle.dispose()` in new code. Use `Promise.resolve(registration)` when an API requires a native Promise or treats functions as callbacks, including Vitest Promise assertions. See the upgrade guide.
 
 Legacy synchronous `return register(...)`, `ctx.effect(() => register(...))`, and synchronous generator yields retain cleanup ownership. Returning the registration from an async function assimilates the thenable into a handle, which Cordis rejects as `Invalid effect`. Yielding it from an async generator also yields the handle: that effect fails with `Invalid effect` when disposed and never adopts the registration, while the plugin stays active and its fiber releases the registration on unload. Async plugins and effects await registration and return `void`; the owning fiber releases the registration automatically.
 
@@ -145,7 +143,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Session persistence subsystem](../../../docs/subsystems/persistence.md) — the event log projections fold over.
 - [Session projection cache](../session-projection-cache/README.md) — the persisted checkpoints that make cold reads skip full log loads.
 - [Session package map](../README.md) — adjacent persistence, title, and telemetry packages.
-- [Session-projection RFC](../../../.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md) — the design rationale for projections and the command log.
+- Session-projection RFC — the design rationale for projections and the command log.
 
 -----
 

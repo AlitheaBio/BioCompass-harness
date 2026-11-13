@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-ui-subagent
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Browse local subagent conversations and external tasks from the parent header. Local conversations show activity, token usage, and duration; continuable children accept follow-up prompts and support Stop. External tasks appear as non-navigable leaves without an execution status. Historical one-shot conversations open as read-only records. The ordinary sidebar omits subagent conversations, and the separate `@` source inserts a running child's label without granting continuation authority.
@@ -93,7 +91,7 @@ These pages cover the conversation surface, the host seam, and the design notes.
 - [ui-conversation](../ui-conversation/README.md) — the chat surface hosting the header action and composer chain.
 - [ui-input-trigger](../ui-input-trigger/README.md) — the suggestion machinery hosting the `@` source.
 - [subagent](../../subagent/subagent/README.md) — the host-side capability seam behind continuable children.
-- [historical Web subagent conversations](../../../.agents/notes/archived/feature/2026-07-27-web-subagent-conversations.md) — the catalog and composer specification.
+- historical Web subagent conversations — the catalog and composer specification.
 - [Current-turn interrupt](../../subagent/subagent/README.md) — the independent Stop semantics.
 
 -----

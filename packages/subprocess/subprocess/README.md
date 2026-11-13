@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-subprocess
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `ctx.subprocess` resolves executables, starts explicitly specified child processes or real terminal sessions, streams or collects bounded output, and terminates the full managed process range. Configure one subprocess implementation for each composition, choosing local or remote execution according to where commands must run. Each request sets argv, working directory, stdio, environment overrides, termination grace, and cancellation, with no shell interpretation or hidden execution defaults. Child environments remove ambient credentials and `DSH_*` values before applying explicit overrides; callers own deadlines, teardown policy, and model-facing rendering, while collected output remains readable after exit.
@@ -124,7 +122,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Subprocess subsystem](../../../docs/subsystems/subprocess.md) — spawn specs, output readers, outcomes, and the `DSH_*` environment in full.
 - [dsh-subprocess-local](../subprocess-local/README.md) — the local host provider that implements this contract.
 - [dsh-bash-local](../../shell/bash-local/README.md) — the largest consumer: bash commands over this service.
-- [Subprocess seam Agent Note](../../../.agents/notes/archived/architecture/2026-07-26-subprocess-seam.md) — why the process half became its own seam and what moved with it.
+- Subprocess seam Agent Note — why the process half became its own seam and what moved with it.
 
 -----
 

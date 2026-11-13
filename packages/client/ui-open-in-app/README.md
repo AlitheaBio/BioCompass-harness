@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-ui-open-in-app
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Open a Session’s directory through **Open in** in its Header More menu or its row/title context menu. The submenu lists installed, localized applications in Host order with icons and names, without a default marker. File-tree, document-preview, and delivery controls also open files or directories through native applications. Availability, icons, and launches come from [`dsh-host-open-in-app`](../../host/open-in-app/README.md); mount both packages together. A Session without a known directory or eligible application has no Open in item.
@@ -102,6 +100,6 @@ The Host verifies the path through the composed filesystem before opening or rev
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-The feature-level decisions, including the split into the host package and this surface, are recorded in the [historical promotion Agent Note](../../../.agents/notes/archived/feature/2026-08-25-promote-open-anywhere-plugin.md); the document preview's file controls are recorded in the [historical default-application Agent Note](../../../.agents/notes/archived/feature/2026-09-16-open-in-default-app-for-sidebar-files.md).
+The feature-level decisions, including the split into the host package and this surface, are recorded in the historical promotion Agent Note; the document preview's file controls are recorded in the historical default-application Agent Note.
 
 </details>

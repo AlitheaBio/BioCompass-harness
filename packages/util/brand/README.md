@@ -5,8 +5,6 @@ kind: "package-library"
 
 # @deepseek-ai/dsh-brand
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-brand` makes structurally identical strings or numbers non-interchangeable at the type level: a `SessionId` cannot be passed where a `ToolCallId` is expected, and an event sequence cannot be passed where a log offset is required. `brandString<T>()` and `brandNumber<T>()` apply nominal brands without shared runtime state, so owning packages can define domain types without importing an unrelated capability.
@@ -91,7 +89,7 @@ Keeping these helpers in their own package means `dsh-jobs` can brand `JobId` wi
 Read these pages when you need the values these primitives brand or the type conventions around them.
 
 - [Core subsystem](../../../docs/subsystems/core.md) — where the shared `SessionId` brand and the type rules are documented.
-- [LSP subsystem](../../../docs/subsystems/lsp.md) — `LspProviderId`, a branded provider id built on this primitive.
+- LSP subsystem — `LspProviderId`, a branded provider id built on this primitive.
 - [Jobs package](../../jobs/jobs/README.md) — the `JobId` brand owned by the jobs capability.
 
 -----

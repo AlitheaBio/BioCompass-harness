@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-locale
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-client-locale` to switch the web GUI between the shipped English, Chinese, Japanese, Spanish, French, German, Russian, and Brazilian Portuguese (`pt`, including `pt-PT` browser requests) locales or languages added by client plugins. User selections take effect immediately; every authenticated browser persists them as `locale.preference` in `$DSH_HOME/cordis.patch.yml` through the Host settings service. New browsers use the first supported language requested by the browser until the Host read delivers a stored preference. Plugin authors add typed namespace dictionaries and translate through the public locale API; slot-rendered copy updates without a reload.
@@ -114,7 +112,7 @@ The typed object form requires complete dictionaries for both baseline locales. 
 Read these when the locale contract is not enough: the slot face it implements, the settings surface it rides, and the persistence decision behind the preference.
 
 - [Client slot system](../ui-slots/README.md) — the slot model and the `LocaleFace` seat this package implements.
-- [historical Host-backed preferences decision](../../../.agents/notes/archived/bug-fix/2026-08-06-host-backed-web-preferences.md) — why the preference persists in Host settings instead of the browser.
+- historical Host-backed preferences decision — why the preference persists in Host settings instead of the browser.
 - [Settings group map](../../settings/README.md) — the settings service that stores the preference.
 - [Client group map](../README.md) — the browser half this package belongs to.
 

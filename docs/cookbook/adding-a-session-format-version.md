@@ -1,7 +1,5 @@
 # Cookbook: adding a Session log format version
 
-English | [中文](adding-a-session-format-version.zh.md)
-
 ## Summary
 
 Use this tutorial to introduce the next Session log format version without rewriting released data. Read the [version and release-status authority](../session-format-status.md) to identify the checkout writer and the latest released format. Let N denote that verified released format and N+1 the target; substitute numeric values for these placeholders in names and metadata. Start with a working contributor checkout and read the [package checklist](adding-a-package.md), [format library](../../packages/session/session-format/README.md), and [released-format decision](../../.agents/notes/implemented/architecture/2026-08-31-released-session-format-migrations.md).
@@ -30,7 +28,7 @@ Released codecs preserve accepted interpretations. A current-version codec can a
 
 Same-version logs bypass adjacent migrations and can mix historical and newer record variants after resume. Each integer therefore identifies a family of supported representations, not one fixed schema. Owning readers must retain and distinguish those variants; the next outgoing migration must handle them. Do not add same-version migrations or rely on `restoreCurrent` alone for normalization: current-version JSONL reads using transformed validation bypass that hook. Use disposable, isolated Harness homes for interim integration formats; rerun changed adjacent conversions from unchanged historical input rather than rewriting a committed generation or using a real user's home.
 
-Before changing the writer, use the [archive command](../persistence-changes/historical-formats/README.md#maintenance) to preserve its complete persistence schema, then add the bilingual format reference under `docs/persistence-changes/historical-formats/vN.*`. Preserve all earlier records. The format coverage check requires every integer below the new writer to have its own document; the current generated catalog covers only the new writer.
+Before changing the writer, use the archive command to preserve its complete persistence schema, then add the bilingual format reference under `docs/persistence-changes/historical-formats/vN.*`. Preserve all earlier records. The format coverage check requires every integer below the new writer to have its own document; the current generated catalog covers only the new writer.
 
 <a id="add-an-identity-edge"></a>
 ## 2. Add an identity edge

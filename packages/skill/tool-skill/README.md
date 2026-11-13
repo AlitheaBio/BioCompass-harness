@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tool-skill
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Agents can discover and load skills during a session. When the `skill` tool is visible, model-invocable skills or incomplete discovery produce a durable catalog before the first request. The tool loads full instructions; users can invoke user-invocable skills with `/name`. Entry, visibility, and completeness changes append a replacement catalog. Incomplete discovery publishes confirmed skills with a warning, including when none are confirmed. Configure `catalogDescriptionMaxLength` to cap descriptions.
@@ -100,7 +98,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [Skill subsystem reference](../../../docs/subsystems/skills.md) — the registry and provider vocabulary behind the catalog.
 - [skill package](../skill/README.md) — the registry and the shared `renderSkillContent` rendering.
 - [Generated tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-skill) — the exact `skill` schema the model receives.
-- [User-explicit skill invocation Agent Note](../../../.agents/notes/archived/feature/2026-08-08-user-explicit-skill-invocation.md) — the `/name` gesture design.
+- User-explicit skill invocation Agent Note — the `/name` gesture design.
 
 -----
 

@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-web
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-web` to search the web or fetch a URL without tying callers to a specific vendor. It selects a usable backend for each operation and gives callers consistent cancellation, errors, and result limits. Choose it for plugins or tools that call `ctx.web.search()` or `ctx.web.fetch()`; the shipped `dsh-tool-web` tools load it for you. A search or fetch requires a configured, usable provider because this package does not make network requests on its own.
@@ -84,7 +82,7 @@ A provider's availability is a cheap local check — for example whether its API
 <a id="listing-providers"></a>
 ### Listing providers
 
-`listProviders()` returns every registered search and fetch provider as `{ id, title?, description? }` entries, each list in registration order; it lists unavailable providers too, because a picker shows what can be pinned. `title` is the provider's optional display name, and a picker shows `id` when it is absent. `description` is optional `LocalizedText` from `dsh-package-manifest`, a plain string or translations keyed by lowercase language id with a required `en` entry, stating what the provider suits and what it costs or cannot do; a picker shows it under the selected provider and shows nothing when it is absent. Each registration and each disposal emits the payload-free `web/providers-changed` event after the registry changes, and observer failures cannot veto the change. Clients call the same method as the `web` Remote namespace, `ctx.remote.web.listProviders()`, whose Remote result carries the lists in `value` only when `ok` is true, and refresh on the forwarded `web/providers-changed` event; the [Web search and fetch settings page](../../client/ui-settings-web-search/README.md) fills its Search and Fetch menus this way. A plugin (including one written in creator mode) that registers a provider with a `title` appears in the matching menu under that title, shows its `description` while selected, and choosing it pins `searchProvider` or `fetchProvider` to its `id`.
+`listProviders()` returns every registered search and fetch provider as `{ id, title?, description? }` entries, each list in registration order; it lists unavailable providers too, because a picker shows what can be pinned. `title` is the provider's optional display name, and a picker shows `id` when it is absent. `description` is optional `LocalizedText` from `dsh-package-manifest`, a plain string or translations keyed by lowercase language id with a required `en` entry, stating what the provider suits and what it costs or cannot do; a picker shows it under the selected provider and shows nothing when it is absent. Each registration and each disposal emits the payload-free `web/providers-changed` event after the registry changes, and observer failures cannot veto the change. Clients call the same method as the `web` Remote namespace, `ctx.remote.web.listProviders()`, whose Remote result carries the lists in `value` only when `ok` is true, and refresh on the forwarded `web/providers-changed` event; the Web search and fetch settings page fills its Search and Fetch menus this way. A plugin (including one written in creator mode) that registers a provider with a `title` appears in the matching menu under that title, shows its `description` while selected, and choosing it pins `searchProvider` or `fetchProvider` to its `id`.
 
 ```text
 // Remote: web/listProviders; Host event: web/providers-changed
@@ -106,7 +104,7 @@ A search or fetch backend outside the shipped composition is a plugin package th
       name: '@example/dsh-web-search-acme'
 ```
 
-`dsh --profile <name> --dump-config` prints the row under the patch file's layer. After the restart, the provider appears in the **Web search provider** or **Web fetch provider** menu of the [settings page](../../client/ui-settings-web-search/README.md) under its `title`, or its `id` when it has none; the page needs no change. Choosing it pins `searchProvider` or `fetchProvider` to its `id`. If the row is later removed while the provider is selected, the menu shows the stored id as **(not loaded)** and each call fails with `WEB_PROVIDER_CONFIGURED_MISSING` until another provider is chosen.
+`dsh --profile <name> --dump-config` prints the row under the patch file's layer. After the restart, the provider appears in the **Web search provider** or **Web fetch provider** menu of the settings page under its `title`, or its `id` when it has none; the page needs no change. Choosing it pins `searchProvider` or `fetchProvider` to its `id`. If the row is later removed while the provider is selected, the menu shows the stored id as **(not loaded)** and each call fails with `WEB_PROVIDER_CONFIGURED_MISSING` until another provider is chosen.
 
 <a id="search-readiness"></a>
 ### Search and fetch readiness
@@ -191,7 +189,7 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 
 These limits define when the service is incomplete on its own. They are current package constraints.
 
-- **No availability observation** — `listProviders()` and `web/providers-changed` report which providers are registered, not whether they are usable; there is no capability-status query, and `searchReady()` and `fetchReady()` report only the selected provider's credential readiness and answer true when selection fails. Availability is observable only by running a search or fetch and routing the thrown code, and the no-provider failure is the generic `WEB_PROVIDER_UNAVAILABLE` with no per-provider reason enumeration ([Agent Note](../../../.agents/notes/archived/simplification/2026-07-04-drop-unconsumed-web-observation-surface.md)).
+- **No availability observation** — `listProviders()` and `web/providers-changed` report which providers are registered, not whether they are usable; there is no capability-status query, and `searchReady()` and `fetchReady()` report only the selected provider's credential readiness and answer true when selection fails. Availability is observable only by running a search or fetch and routing the thrown code, and the no-provider failure is the generic `WEB_PROVIDER_UNAVAILABLE` with no per-provider reason enumeration (Agent Note).
 - **Search requests carry only `query` and `maxResults`** — provider-neutral controls (recency, domain filters, regional hints, search depth) are deferred until the backends can honor them ([seam Agent Note](../../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.md)).
 - **`WebFetchBody` has no `pdf` arm** — text-extractable PDF support is named deferred work; the closed union makes adding it a compile-enforced change across the web packages.
 - **Provider-backed page extraction is out of scope of `fetch()`** — a Firecrawl/Tavily-style `web_extract` capability is deferred rather than widening the fetch operation.

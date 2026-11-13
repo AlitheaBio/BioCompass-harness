@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-10-desktop-local-updater-qualification.zh.md)
-
 ## Problem
 
 Desktop update interaction depends on feed parsing, network failures, download integrity, and platform preparation. Simulated updater events cannot establish that these operations work together. Requiring cloud cache configuration and hardware signing for each feedback cycle makes local product validation depend on release infrastructure.
@@ -14,7 +12,7 @@ The [Windows local qualification command](../../../../apps/desktop/README.md) ru
 
 Each invocation atomically allocates a temporary directory and an operating-system-assigned loopback port. Request barriers establish concurrency without sleeps. Server close and child exit are awaited before temporary files are removed. Independent processes can run concurrently without sharing updater cache or user data. The command requires built Desktop modules and stays separate from source-plane unit tests.
 
-This testing decision supplements the [release policy](../architecture/2026-08-25-electron-desktop-packaging-and-updates.md); it does not supersede signing, publication integrity, installed-artifact qualification, or the pending [mandatory update proposal](../../proposed/feature/2026-09-08-desktop-mandatory-update-api.md). Those records remain active.
+This testing decision supplements the [release policy](../architecture/2026-08-25-electron-desktop-packaging-and-updates.md); it does not supersede signing, publication integrity, installed-artifact qualification, or the pending mandatory update proposal. Those records remain active.
 
 ## Alternatives considered
 

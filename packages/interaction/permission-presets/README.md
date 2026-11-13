@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-permission-presets
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Offer named permission modes that set sandbox and approval together while each enforcement service keeps its own value. Configured presets supply future-session defaults; an explicitly loaded Auto review integration can add one current-session-only option. Clients read selectable entries from a process catalog and the current choice from the Session projection. Unmatched knob combinations appear as `custom`, which users can leave but cannot select. This package owns selection and defaults; the sandbox, approval, and Auto integration own execution.
@@ -108,7 +106,7 @@ The service requires `ctx.sessionProjections` and awaits registration of `permis
 Read these pages when the package-level contract is not enough. They move from the preset vocabulary to the enforcement knobs and the design rationale.
 
 - [Permission presets subsystem reference](../../../docs/subsystems/permission-presets.md) — the preset table, process catalog, current selection, and `ctx.permissionPresets` Cordis API.
-- [historical Sandbox switching design Agent Note](../../../.agents/notes/archived/feature/2026-07-06-sandbox.md) — how sandbox mode and approval policy compose and switch.
+- historical Sandbox switching design Agent Note — how sandbox mode and approval policy compose and switch.
 - [Approval subsystem reference](../../../docs/subsystems/approval.md) — the approval policy knob this service bundles.
 - [Interaction group map](../README.md) — adjacent command, approval, and question packages.
 

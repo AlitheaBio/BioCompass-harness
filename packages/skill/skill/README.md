@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-skill
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use this package to give agents and users one catalog of reusable, task-specific instructions collected from local directories, embedded plugin data, or remote services. It resolves duplicate names predictably, validates entries, tolerates unavailable sources without discarding usable results, and loads the selected skill's full instructions on demand. Mount it when a composition needs skills from multiple or non-filesystem sources; pair it with `dsh-skill-filesystem` for local discovery and `dsh-tool-skill` for model access, because it includes no skill content itself.
@@ -114,7 +112,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [skill-filesystem package](../skill-filesystem/README.md) — the shipped local provider that discovers skills from disk.
 - [tool-skill package](../tool-skill/README.md) — the consumer that renders the session catalog and the `skill` tool.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-skill) — every config field and its source declaration.
-- [historical Skill invocation policy Agent Note](../../../.agents/notes/archived/feature/2026-07-28-skill-invocation-policy.md) — the rationale for the model and user invocation controls.
+- historical Skill invocation policy Agent Note — the rationale for the model and user invocation controls.
 
 -----
 

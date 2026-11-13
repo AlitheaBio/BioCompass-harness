@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tool-workspace-dependencies
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Deployments that ship their own script runtimes (Desktop's primary runtime, or a container image layer) mount this tool so the agent can ask where the bundled Python, Node.js, and pnpm live instead of discovering a system interpreter. The tool returns absolute paths and recorded distribution versions; it changes neither `PATH` nor package-manager settings. The payload is either copied under the Harness home on first use (Desktop) or used where it lies (read-only carriers).
@@ -75,7 +73,7 @@ A container can copy both directories into an immutable image layer and set `DSH
 <a id="further-exploration"></a>
 ## Further Exploration
 
-- [Office skills](../skill-office/README.md) — the workflows that call this tool for their interpreter.
+- Office skills — the workflows that call this tool for their interpreter.
 - [Tool registry](../../core/tools/README.md) — registration and schemas.
 
 -----

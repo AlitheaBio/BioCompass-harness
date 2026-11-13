@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-sandbox-local
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-sandbox-local` confines commands and their descendants on Linux, macOS, and Windows while sharing the host kernel and filesystem. It chooses a supported platform runner automatically and fails with `SANDBOX_UNAVAILABLE` when none is usable, so commands never silently run without confinement. Each execution reports `full` or `partial` enforcement plus denial and runner-failure signatures, allowing callers to distinguish an unavailable or broken sandbox from a policy denial. Choose it for host-local bash or pwsh execution; use a container or remote executor when the process needs an isolated environment.
@@ -74,7 +72,7 @@ Selection is by platform first, probes second: each platform has a runner chain 
 
 ### Platform profiles
 
-The bwrap profile combines a read-only host root, a fresh `/dev`, and `/proc` from a private PID namespace — commands manage their descendants but cannot see host processes, so procfs magic links cannot bypass the mounts; `workspace-write` adds an ephemeral `/tmp` and writable binds for the workspace and each explicit extra root. The [historical private-PID note](../../../.agents/notes/archived/bug-fix/2026-08-06-bwrap-private-pid-namespace.md) records the boundary.
+The bwrap profile combines a read-only host root, a fresh `/dev`, and `/proc` from a private PID namespace — commands manage their descendants but cannot see host processes, so procfs magic links cannot bypass the mounts; `workspace-write` adds an ephemeral `/tmp` and writable binds for the workspace and each explicit extra root. The historical private-PID note records the boundary.
 
 The `@deepseek-ai/node-addon-system/landlock-run` API supplies the platform launcher, functional probe, and grant vocabulary; this provider maps mode to grants only, keeping path resolution and probe parsing with the versioned binary.
 
@@ -110,7 +108,7 @@ Start with the subsystem reference for the shared vocabulary, then the seam cont
 - [Sandbox seam package](../sandbox/README.md) — the service contract this provider implements.
 - [Bash sandbox executor](../../shell/bash-sandbox/README.md) — the confined bash consumer.
 - [Windows ACL restricted-token rung](../sandbox-windows-acl/README.md) — the win32 backend this provider mounts.
-- [The historical subprocess sandbox decision](../../../.agents/notes/archived/feature/2026-07-06-sandbox.md) — capability boundary and runner selection semantics.
+- The historical subprocess sandbox decision — capability boundary and runner selection semantics.
 
 -----
 

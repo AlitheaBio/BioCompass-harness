@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-07-19-model-facing-goal-tools.zh.md)
-
 ## Problem
 
 The persisted goal domain deliberately exposes lifecycle verbs to plugins, not directly to a model. A model still needs a small control API for discovering the current goal, creating one from human intent, and changing its lifecycle. Prompt guidance alone cannot establish who authorized a mutation: a subagent, injected plugin message, stale model turn, or resumed session could all produce the same tool arguments.
@@ -22,7 +20,7 @@ The prompt tells the model that it may infer goal intent from a direct human req
 
 All three tools use exclusive execution so a model-ordered batch observes prior mutations and their new revisions. Results are compact JSON. UI presentation is a pure function of arguments and uses generic read or mutation cards; mutation cards select meaningful action values before the goal id, so accepted fillers cannot blank their input. Activation is reported only as live observation and is never written into replay state.
 
-An autonomous goal round that successfully reports completion or blocking defers one wrap-up instruction onto its tool result so the model still addresses the user before the turn ends through the ordinary no-tool-calls stop; the original conclude-at-result stop is superseded by the [goal-round wrap-up decision](../../archived/bug-fix/2026-08-02-goal-round-wrapup-message.md). Direct-human mutations receive no instruction: the assistant can acknowledge the change, and concurrent human steering remains available to ordinary stopping checks.
+An autonomous goal round that successfully reports completion or blocking defers one wrap-up instruction onto its tool result so the model still addresses the user before the turn ends through the ordinary no-tool-calls stop; the original conclude-at-result stop is superseded by the goal-round wrap-up decision. Direct-human mutations receive no instruction: the assistant can acknowledge the change, and concurrent human steering remains available to ordinary stopping checks.
 
 ### Execution authority
 

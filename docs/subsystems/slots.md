@@ -1,7 +1,5 @@
 # Web Client Slots
 
-English | [中文](slots.zh.md)
-
 Slots are the Web Client's typed React composition system. [`dsh-client-ui-slots`](../../packages/client/ui-slots/README.md) defines the React-free registry and type algebra; [`dsh-client-ui-renderer`](../../packages/client/ui-renderer/README.md) binds observable sources to hooks, renders the tree, and owns React contexts internally. A feature plugin contributes UI through `ctx.slots.register()` and never imports another feature plugin's component.
 
 This page documents slot ownership, component inputs, extension APIs, and the shipped hierarchy. The surrounding boot, Remote, Client model, and Conversation paths are in [Web Client architecture](web-client.md).
@@ -215,7 +213,7 @@ Factory: conversation.chat.reasoning.content [ReasoningContent / MarkdownText]
 
 All four image Slots default to `MessageImages`, which calls `conversation.images.content` with the caller's image references and authorized loader. User and output image replacements are independent. The `conversation.user.text` Factory is shared by user content, Queue, and Goal; its `inline: true` keyed Slot renders span anchors and inline error placeholders rather than block wrappers.
 
-The generated [Client inspect catalog](../../packages/extensions/cordis-client-runner/src/client/slot-catalog.ts) covers all shell branches and is the exhaustive contract for each key: cardinality, scope, owner props, standard props, current occupants, declaration owner, and replacement risk. A running dynamic package can query the live tree and an exact key with `cordis_inspect what:"client"`; the source catalog is generated from `SlotMap` declarations and `slots.register()` call sites by `pnpm run gen-client-catalog`.
+Each Slot declaration in [`packages/client/ui-slots`](../../packages/client/ui-slots/README.md) and its owning UI domain package defines cardinality, scope, owner props, standard props, and replacement semantics.
 
 ## Extension rules
 

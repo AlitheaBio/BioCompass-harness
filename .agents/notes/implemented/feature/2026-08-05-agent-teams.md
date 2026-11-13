@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-08-05-agent-teams.zh.md)
-
 ## Problem
 
 The subagent seam supplies fresh/fork providers, durable child Sessions, FIFO follow-ups, and cold-resumable Activations. Its direct-parent controls do not provide peer communication, a stable named roster, or shared task ownership. A coordinator can create several workers, but workers cannot address one another, durable follow-up intent lives only in target inboxes, and no common compare-and-set board prevents stale assignment updates.
@@ -16,7 +14,7 @@ Team collaboration requires explicit opt-in; [Session selection](../architecture
 
 Every ordinary root and its descendants form the Team identified by the root `SessionId`; durable task state begins with the first task event. [Subagent teammates](../architecture/2026-10-15-agent-teams-as-subagents.md) owns the single agent identity. [Inbox-only waiting](../simplification/2026-10-29-inbox-only-agent-wait.md) keeps task-board changes independent of inbox waiting. An ordinary Session fork leads a new tree and excludes inherited Team authority.
 
-The implementation is split into `@deepseek-ai/dsh-agent-team`, which owns `ctx.agentTeams` and durable semantics, and `@deepseek-ai/dsh-tool-agent-team`, which owns scoped schemas and model guidance. Every Team tool declares its complete result schema and renders that value as compact JSON, so the compiler checks each `execute` against what the model is promised and no result spends tokens on indentation. The base bundle mounts both plugins; Team registers no tool that shares a name with the subagent controls. The shared policy announces Team availability and describes coordination responsibilities. Both packages belong to the [subagent family](../../../../packages/subagent/README.md); the root Session’s saved selection gates the task tools and policy. The [Session-mode upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.2/session-team-mode/guide.md) describes profile migration.
+The implementation is split into `@deepseek-ai/dsh-agent-team`, which owns `ctx.agentTeams` and durable semantics, and `@deepseek-ai/dsh-tool-agent-team`, which owns scoped schemas and model guidance. Every Team tool declares its complete result schema and renders that value as compact JSON, so the compiler checks each `execute` against what the model is promised and no result spends tokens on indentation. The base bundle mounts both plugins; Team registers no tool that shares a name with the subagent controls. The shared policy announces Team availability and describes coordination responsibilities. Both packages belong to the [subagent family](../../../../packages/subagent/README.md); the root Session’s saved selection gates the task tools and policy. The Session-mode upgrade guide describes profile migration.
 
 The Lead must wait for required work before its final answer. Process teardown remains the final lifecycle owner and drains continuation Activations; a Team task owner is durable state and is not automatically released by idle, interruption, or process exit.
 
@@ -46,7 +44,7 @@ Shared tasks are complete snapshots with Team-local ids and monotonic revisions.
 
 Members start in the Lead’s current directory and observe shared filesystem writes immediately. Later directory changes stay local to each Session. The task policy tells members to claim ready tasks, use advisory write scopes and dependencies, and complete tasks after doing the work. A filesystem stale-version rejection requires rereading and rebasing the intended change. No equivalent guarantee is claimed for Bash, formatters, code generation, or direct external writes.
 
-The Team domain does not infer branches, create worktrees, merge changes, or silently change cwd. A deployment or caller can use [explicit worktree creation](2026-09-13-explicit-worktree-creation.md) separately. This preserves the existing same-world subagent and sandbox contracts.
+The Team domain does not infer branches, create worktrees, merge changes, or silently change cwd. A deployment or caller can use explicit worktree creation separately. This preserves the existing same-world subagent and sandbox contracts.
 
 ## Web projection
 

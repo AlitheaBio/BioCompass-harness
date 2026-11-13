@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-host-directory-picker
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 The web GUI lets an operator choose a workspace directory with either an OS chooser or an in-app browser. Use the native option when the operator can reach the host display; use the browser option for remote clients or when directory listing and creation must stay in the app. Consumers receive the interaction kind and can present the matching workflow. Directory picking is limited to the GUI host and never affects the agent loop. The browser workflow exposes one directory tree at a time; multiple roots are unsupported.
@@ -74,7 +72,7 @@ The seam is built on one separation: the interaction shape a backend provides is
 
 Read these when the seam contract is not enough: the decision record first, then the two backends and the adaptive chooser that compose it.
 
-- [Directory-picker capability seam decision](../../../.agents/notes/archived/architecture/2026-07-28-directory-picker-capability-seam.md) — design rationale, the `ctx.fs` separation, and the policy decisions.
+- Directory-picker capability seam decision — design rationale, the `ctx.fs` separation, and the policy decisions.
 - [Native backend](../directory-picker-native/README.md) — the OS-chooser interaction and its platform tooling.
 - [Browse backend](../directory-picker-browse/README.md) — the in-app listing and creation interaction for remote clients.
 - [Adaptive chooser](../directory-picker-auto/README.md) — boot-time resolution between the two backends.

@@ -1,26 +1,6 @@
 # Product telemetry
 
-English | [中文](product-telemetry.zh.md)
-
-The [product telemetry plugin](../../packages/host/product-telemetry-otel/README.md) sends explicitly selected analytics events through OTLP/HTTP. Its `productTelemetry` service owns submission only; product consumers own when an event occurs and which fields are approved. The exporter collects no Session data or identifiers automatically. The [Desktop analytics consumer](../../packages/client/product-analytics/README.md) selects interaction and live compaction events, adds cached static environment and available login identity, and follows the Desktop launch-time collection switch. Ordinary Web clients do not collect product events.
-
-`ProductTelemetryRecord` requires an event name, string body, and Unix-millisecond timestamp. Attributes accept scalar strings, numbers, booleans, and one-level objects of those values (`ProductTelemetryScalar`). Optional severity uses OTel severity numbers and defaults to INFO. Observation time is assigned when the record is enqueued.
-
-Enqueue is synchronous and does not acknowledge delivery. The SDK owns batching and retry; local diagnostics report export failures. See the package README for configuration, shutdown, and loss limits.
-
-## Record types
-
-```ts type-equiv
-/** Scalar values accepted in product attributes. */
-type ProductTelemetryScalar = OTelEventScalar
-```
-
-```ts type-equiv
-/** Caller-selected ordinary analytics record. */
-type ProductTelemetryRecord = OTelEventRecord
-```
-
-Source: [`packages/host/product-telemetry-otel/src/index.ts`](../../packages/host/product-telemetry-otel/src/index.ts)
+The [Desktop analytics seam](../../packages/client/product-analytics/README.md) provides an inert local no-op intake (`ctx.productAnalytics`) so Desktop and client UI consumers can invoke `track` and read collection policy without transmitting any telemetry externally. Ordinary Web clients do not mount the service.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

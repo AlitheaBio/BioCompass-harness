@@ -2,11 +2,9 @@
 
 Status: implemented
 
-English | [中文](2026-08-10-host-plane-ownership-after-presets.zh.md)
-
 ## Problem
 
-[Per-session agent presets](2026-09-18-declarative-agent-presets.md) moved every model-facing row onto the agent plane, and each later fix has been one reader that assumed the world before the move. `tasks` came back to the host because a preset row outside its realm resolved it; `goals` never left for the same reason; a child agent's `toolFilter` was repaired once every model-facing tool became an ancestor contribution rather than a global one ([historical child agents join their parent's preset](../../archived/bug-fix/2026-08-10-child-agents-join-their-parent-preset.md)).
+[Per-session agent presets](2026-09-18-declarative-agent-presets.md) moved every model-facing row onto the agent plane, and each later fix has been one reader that assumed the world before the move. `tasks` came back to the host because a preset row outside its realm resolved it; `goals` never left for the same reason; a child agent's `toolFilter` was repaired once every model-facing tool became an ancestor contribution rather than a global one (historical child agents join their parent's preset).
 
 Two more readers were still on the wrong side of that line.
 
@@ -20,7 +18,7 @@ Nothing named an agent that joined no preset. The join is a scope-parent link; w
 
 **Entry points join Agents explicitly.** No runtime check rejects an unjoined Agent, because a bare Agent can legally be bound later through `recompose`.
 
-Projection key presence is not a per-session capability signal ([session projection](../../../../packages/session/session-projection/README.md)). Temporary plugins mounted through `cordis_mount` belong to the composition rather than the invoking session ([tool Cordis](../../../../packages/extensions/tool-cordis/README.md)). [Declarative presets](2026-09-18-declarative-agent-presets.md) own revision retention and reclaim retired trees after their final reference releases.
+Projection key presence is not a per-session capability signal ([session projection](../../../../packages/session/session-projection/README.md)). Temporary plugins mounted through `cordis_mount` belong to the composition rather than the invoking session (tool Cordis). [Declarative presets](2026-09-18-declarative-agent-presets.md) own revision retention and reclaim retired trees after their final reference releases.
 
 ## Testing
 

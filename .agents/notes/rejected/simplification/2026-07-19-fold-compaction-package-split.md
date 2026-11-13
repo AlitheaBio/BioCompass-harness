@@ -2,13 +2,11 @@
 
 Status: rejected — More compaction backends are planned, so the Service Definition and basic provider packages remain separate.
 
-English | [中文](2026-07-19-fold-compaction-package-split.zh.md)
-
 ## Problem
 
 Compaction is split between `@deepseek-ai/dsh-compaction`, which owns an abstract two-method service and shared types, and `@deepseek-ai/dsh-compaction-basic`, which owns the only complete provider. Shipped configurations load only the basic package, and no production package independently consumes the Service Definition package except that provider.
 
-The split adds a package manifest, README, project boundary, dependency edge, abstract forwarding class, generated catalog entries, and composition wiring without demonstrating backend substitution. The [capability-seam decision](../../implemented/architecture/2026-06-13-capability-seams.md) requires a real interface, implementation, and consumer rather than a preemptive split; the [historical compaction decision](../../archived/feature/2026-06-18-compaction-capability-seam.md) records that its independent consumer was deferred.
+The split adds a package manifest, README, project boundary, dependency edge, abstract forwarding class, generated catalog entries, and composition wiring without demonstrating backend substitution. The [capability-seam decision](../../implemented/architecture/2026-06-13-capability-seams.md) requires a real interface, implementation, and consumer rather than a preemptive split; the historical compaction decision records that its independent consumer was deferred.
 
 ## Proposal
 
@@ -16,7 +14,7 @@ Move the basic implementation into `@deepseek-ai/dsh-compaction` and remove `@de
 
 Preserve `summarize()` as a protected customization hook. A deployment-specific summarizer can subclass or intercept the existing LLM call without requiring a second capability package. Reintroduce a separate Service Definition package only when a second complete backend and an independent Consumer need substitution.
 
-Amend the implemented compaction decision and the [recallable-compaction proposal](../../proposed/feature/2026-07-06-recallable-compaction.md) if this proposal is accepted so package ownership has one durable description.
+Amend the implemented compaction decision and the recallable-compaction proposal if this proposal is accepted so package ownership has one durable description.
 
 ## Alternatives considered
 

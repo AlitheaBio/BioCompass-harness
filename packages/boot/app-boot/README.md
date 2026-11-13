@@ -5,8 +5,6 @@ kind: "package-library"
 
 # @deepseek-ai/dsh-app-boot
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-app-boot` is the shared Loader boot library behind `dsh` profiles, including the CLI packaged by the Python runtime wheel. It loads environment layers, composes profile bundles and patches, boots every plugin, and returns the running app or identifies the failed plugin and cause. Product applications use the `dsh` launcher instead of publishing separate bins; direct-config helpers remain only for lower-level embedders and tests. You can preview the effective configuration before booting, configure HMR through profile YAML, and let a terminal-owning app restore its terminal before a fatal exit.
@@ -27,7 +25,7 @@ English | [中文](README.zh.md)
 
 Starting an app with this package is a small, explicit entry point: you give it a config file and it runs the whole boot. This section covers what you can do and what you get; the helper calls behind each outcome are documented in the folded implementation section.
 
-Profile loading removes retired installation-bundle selections from `dsh.profile.bundles` and rewrites the manifest only when needed, preserving other fields. [Team migration](../../../docs/upgrade-guide/v0.2.1-rc.2/session-team-mode/guide.md) describes the default composition and retained row overrides.
+Profile loading removes retired installation-bundle selections from `dsh.profile.bundles` and rewrites the manifest only when needed, preserving other fields. Team migration describes the default composition and retained row overrides.
 
 ### When to use it
 

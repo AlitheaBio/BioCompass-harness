@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-07-16-persistent-pty-sessions.zh.md)
-
 ## Problem
 
 The harness can run foreground and background commands, edit files, and delegate work, but it cannot continue an interactive terminal conversation across tool calls. Each `bash` foreground run starts a fresh shell, so shell-local cwd, exported variables, virtual-environment activation, functions, job-control state, and interactive child processes end with that call.
@@ -36,7 +34,7 @@ There are no plugin-load auto-start sessions. `terminal_open` creates a session 
 
 Agent-scope disposal closes registrations first, then awaits quiescent teardown of every owned PTY. Unpublished backend setup is a tracked lifecycle operation: owner or service disposal aborts its service-owned signal, waits for backend settlement and rollback, and only then returns. Caller cancellation retains its exact `AbortSignal.reason` even when the backend rejects or returns a session whose rollback close fails; that cleanup failure remains tracked for later owner or service disposal instead of replacing the caller reason. A lifecycle-triggered rollback close failure rejects both the spawn and the disposing lifecycle, while `TerminalBackendCleanupError` lets a backend preserve its own failed startup cleanup for the disposing lifecycle without replacing a caller cancellation. When caller cancellation settles before disposal, the cleanup failure remains tracked owner activity until later owner or service disposal consumes and reports it, so sandbox-mode policy cannot mistake failed cleanup for quiescence. Backend or tool-plugin reload does not orphan sessions: ownership lives in `TerminalSessionService` until the agent ends, following the same service-owned-record pattern as [`ctx.jobs`](../../../../packages/jobs/jobs/README.md). The service reserves the session synchronously for one active send before returning its operation, including before a background job id becomes visible; a second send fails with `SEND_ACTIVE`, so output and cancellation cannot cross operation ownership.
 
-The [cleanup dependency proposal](../../proposed/architecture/2026-10-09-cordis-cleanup-dependency-lifetimes.md) distinguishes early admission or optional-notification closure from releasing required completion observers. PTY ownership and quiescent teardown remain required.
+The cleanup dependency proposal distinguishes early admission or optional-notification closure from releasing required completion observers. PTY ownership and quiescent teardown remain required.
 
 ### Security and process boundary
 
@@ -138,7 +136,7 @@ The package ships concise tool guidance explaining persistent state, owner isola
 - Declarative per-agent startup requires an agent-setup composition point; plugin-load global sessions remain prohibited.
 - Session restoration across harness-process loss requires an out-of-process owner and a versioned protocol.
 - Network-egress policy and rollback of external side effects are broader than PTY and remain separate security work.
-- Windows/ConPTY sessions run through the subprocess-local Windows inspector (Toolhelp32 identities, pseudo foreground groups, taskkill teardown) and the `pty-local` pwsh dialect; see the [pwsh persistent tool note](../../archived/architecture/2026-08-11-pwsh-persistent-pty.md).
+- Windows/ConPTY sessions run through the subprocess-local Windows inspector (Toolhelp32 identities, pseudo foreground groups, taskkill teardown) and the `pty-local` pwsh dialect; see the pwsh persistent tool note.
 
 ## Alternatives considered
 

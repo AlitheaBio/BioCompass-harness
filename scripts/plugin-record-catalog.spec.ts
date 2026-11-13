@@ -142,7 +142,7 @@ describe('plugin record catalogue output', () => {
     const english = renderPluginRecordCatalog([])
     const chinese = renderPluginRecordCatalog([], 'zh')
     expect(english).toContain('# Experimental Plugin Record Catalog')
-    expect(english).toContain('English | [中文](experimental-persistence-catalog.zh.md)')
+    expect(english).not.toContain('experimental-persistence-catalog.zh.md')
     expect(english).toContain('No production package currently declares a plugin record.')
     expect(english).toContain('[Session persistence event catalog](persistence-catalog.md)')
     expect(chinese).toContain('[English](experimental-persistence-catalog.md) | 中文')

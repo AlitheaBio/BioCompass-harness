@@ -15,7 +15,6 @@ const root = resolve(import.meta.dirname, '..')
  * are reviewable policy: a new group cannot silently inherit an exemption.
  */
 export const GROUPS_WITHOUT_SUBSYSTEM_PAGE: Readonly<Record<string, string>> = {
-  acp: 'Protocol transport entry point; the server package README owns its interoperability contract.',
   bundle: 'Composition patch carriers whose mounted packages own all runtime contracts.',
   sdk: 'Out-of-process protocol and client packages whose package READMEs own the SDK contracts.',
   'test-support': 'Repository test harnesses; docs/testing.md owns the testing policy they serve.',

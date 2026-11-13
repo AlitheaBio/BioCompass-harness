@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tool-workflow
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-tool-workflow` lets a model run JavaScript orchestration that delegates to many subagents and returns a final JSON value. Use it only when the user explicitly requests a workflow or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Foreground execution waits for all work; cancellation or abnormal completion returns an error rather than partial success. `run_in_background: true` returns an owned job id immediately and exposes live output. Deployments can rename the tool with `toolName` and cap rendered results with `maxResultChars`.
@@ -105,7 +103,7 @@ Read these pages when the tool-level contract is not enough. They move from the 
 - [PTC workflow engine](../workflow-ptc/README.md) — the engine that executes the scripts.
 - [subagent tool](../../subagent/tool-subagent/README.md) — the plain-delegation alternative for one or two children.
 - [Group map](../README.md) — the workflow capability family and its packages.
-- [historical Dynamic workflows Agent Note](../../../.agents/notes/archived/feature/2026-07-05-dynamic-workflows.md) — the seam design and its decisions.
+- historical Dynamic workflows Agent Note — the seam design and its decisions.
 
 -----
 

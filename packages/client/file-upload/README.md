@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-file-upload
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 This package lets browser features store a `Blob`, exact bytes, or a `ReadableStream<Uint8Array>` for one Session and receive an opaque receipt for a later prompt. Served pages send Blob and stream bodies without aggregating their bytes on the page thread; pages whose Host runs in another execution context supply a Fetch-shaped carrier before Cordis boots. Callers can observe consumed bytes and cancel an active operation. A stream body is consumed once and transfers ownership when it crosses a Worker boundary. An image upload stages a normalized prompt image that a later prompt cites by receipt.
@@ -65,7 +63,7 @@ Each upload receipt belongs to one exact Session, and each request uses one sele
 
 - [Connection](../connection/README.md) — authenticated RPC, exact Host routes, and connection generations.
 - [Session Controller](../../api/session-controller/README.md) — prompt admission that consumes staged receipts.
-- [Web Worker runtime](../../experimental/webworker-runtime/README.md) — the page-to-Host Worker request tunnel.
+- Web Worker runtime — the page-to-Host Worker request tunnel.
 - [Client group map](../README.md) — browser services and UI feature packages.
 
 -----

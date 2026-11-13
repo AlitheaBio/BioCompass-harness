@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-08-02-typert-remote-method-calls.zh.md)
-
 ## Problem
 
 The Host API Proxy handled direct method calls, stateful interactions, and Session event streams in one package. These concerns have different lifecycles, routing semantics, and client programming interfaces. Continuing to export all business operations through one package would couple business Services, transport protocols, state machines, and client types.
@@ -91,7 +89,7 @@ A decorator states Remote participation, an optional export name, and stream del
 
 In SRC mode, the decorator records the method name and invocation mode in a versioned descriptor on the Service prototype. The descriptor uses a stable string property name, so `remoteMethods()` can read markers produced by another installed copy of `dsh-typert-protocol`; it writes nothing to the Service instance, constructor, or method function.
 
-Ordinary artifacts construct a lazy Remote info instance from one static method spec per endpoint. Its direct `TypertRemoteMethod` objects retain descriptor fields and add named `input(options?)` and `invoke`. Consumers select matching strict parsing and projection with `input({ strict: true })`; `input()` preserves normal handling. Host parameter codecs and the single normal `result` codec are unchanged. Existing Registry queries retain those objects, while `TYPERT_REMOTE.methods` supplies exact static types. Strict source startup prebuilds and loads ordinary Typert artifacts; fallback cannot recover erased schemas. The [unified metadata note](../../proposed/architecture/2026-09-20-unified-typert-remote-metadata.md) records this delivery mechanism and the incomplete consumer adaptation.
+Ordinary artifacts construct a lazy Remote info instance from one static method spec per endpoint. Its direct `TypertRemoteMethod` objects retain descriptor fields and add named `input(options?)` and `invoke`. Consumers select matching strict parsing and projection with `input({ strict: true })`; `input()` preserves normal handling. Host parameter codecs and the single normal `result` codec are unchanged. Existing Registry queries retain those objects, while `TYPERT_REMOTE.methods` supplies exact static types. Strict source startup prebuilds and loads ordinary Typert artifacts; fallback cannot recover erased schemas. The unified metadata note records this delivery mechanism and the incomplete consumer adaptation.
 
 In LIB mode, the Typert compiler performs strict method discovery, type resolution, and descriptor generation. It accepts a literal service key in `TypertRemoteService`'s direct `super()` call or the explicit binding fallback; generation neither rewrites business source nor injects hidden registration metadata.
 

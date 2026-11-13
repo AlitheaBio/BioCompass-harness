@@ -2,11 +2,9 @@
 
 Status: implemented
 
-English | [中文](2026-10-16-separate-instruction-chain-budgets.zh.md)
-
 ## Problem
 
-`dsh-agent-instructions` rendered the user-global and project files as one chain under one `maxBytes`, the rule of the [original workspace-context decision](../../archived/feature/2026-06-24-workspace-context.md). Rendering omits the broadest files first, and user-global files are the broadest, so a large project chain removed them: under the shipped 65,536-byte budget, 20 KiB user-global, 30 KiB project root, and 20 KiB nested files rendered without the user-global file.
+`dsh-agent-instructions` rendered the user-global and project files as one chain under one `maxBytes`, the rule of the original workspace-context decision. Rendering omits the broadest files first, and user-global files are the broadest, so a large project chain removed them: under the shipped 65,536-byte budget, 20 KiB user-global, 30 KiB project root, and 20 KiB nested files rendered without the user-global file.
 
 ## Decision
 
@@ -28,7 +26,7 @@ The `maxBytes` key and the baseline identity are unchanged, so a resumed session
 
 ## Consequences
 
-- A baseline or batch holding both chains can reach twice `maxBytes`; deployments that sized `maxBytes` as a total budget halve it, per the [upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.1/agent-instructions-chain-budgets/guide.md).
+- A baseline or batch holding both chains can reach twice `maxBytes`; deployments that sized `maxBytes` as a total budget halve it, per the upgrade guide.
 - User-global instructions survive a large project chain.
 - The `agent-instructions-budget` snapshot shows a truncated user-global file beside the whole project file; `agent-instructions-budget-chains` shows two chains that fit only separately.
 - The package README, `Config.maxBytes` JSDoc, and configuration catalog state the per-chain bound.

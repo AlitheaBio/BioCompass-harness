@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-storage-json
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-storage-json` stores domain data as readable JSON under a configured root and registers as backend `json`. Its default `single` layout keeps one complete `<unit>.json` file per unit; its `per-record` layout keeps one version-stamped document per record. Both layouts publish each changed file atomically, while the domain layer orders calls. Choose it when operators need inspectable files and the selected layout fits the write volume; choose SQLite for larger, frequently updated units. The backend is host-side only and contributes no prompt, tool, or schema.
@@ -111,7 +109,7 @@ Read these pages when this backend's view is not enough: the subsystem reference
 - [Storage subsystem](../../../docs/subsystems/storage.md) — the backend contract, domain semantics, and generated API.
 - [Storage package map](../README.md) — the family's packages and their repository position.
 - [SQLite storage backend](../storage-sqlite/README.md) — the point-update medium for high-frequency data.
-- [domain KV storage Agent Note](../../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.md) — the design behind the backend family and its deferred work.
+- domain KV storage Agent Note — the design behind the backend family and its deferred work.
 
 -----
 

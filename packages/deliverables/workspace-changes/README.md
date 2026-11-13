@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-workspace-changes
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 This plugin summarizes which files each top-level turn changed, with per-file line counts, and serves each listed file's turn-start and turn-end comparison. Git snapshots of the working tree at turn start and turn end are diffed; every file a file tool edits is copied whole before its first edit and again at turn end, covering the files git does not. Without a repository or git, only file-tool edits are listed. The Session log receives one `workspace/changes` event naming the turn; summaries and comparisons stay on the Host until the Session is disposed. The Web changed-files card renders them.
@@ -70,7 +68,7 @@ Git runs through the `subprocess` capability with a scrubbed environment, `GIT_C
 
 - [Web deliverables](../../client/ui-deliverables/README.md) — the changed-files card that reads the served summary and opens its files.
 - [Subprocess capability](../../subprocess/README.md) — the seam git runs through.
-- [historical Turn changed-files card decision](../../../.agents/notes/archived/feature/2026-09-11-turn-changed-files-card.md) — snapshot design, coverage rules, the deferred shadow repository, and rejected alternatives.
+- historical Turn changed-files card decision — snapshot design, coverage rules, the deferred shadow repository, and rejected alternatives.
 
 <a id="model-experience"></a>
 ## Model Experience

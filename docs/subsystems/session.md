@@ -1,7 +1,5 @@
 # Sessions
 
-English | [中文](session.zh.md)
-
 The in-memory, event-sourced model of [dsh-session](../../packages/core/session). A `Session` is an **append-only log** of typed `SessionEvent`s — the single source of truth for an agent's whole interaction history. The LLM message history is *derived* from the log, never stored separately; replay is re-derivation from the same events. How the log is made **durable** (the persistence seam, backends, crash recovery) is the sibling concern on [persistence.md](persistence.md).
 
 Source: [`packages/core/session/src/types.ts`](../../packages/core/session/src/types.ts)
@@ -538,8 +536,6 @@ declare class Session {
     ): Session;
   /**
    * Return the immutable event stored at one exact sequence number.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param seq - event sequence number.
    * @returns the accepted event, or undefined when the log does not contain it.
    */
@@ -548,8 +544,6 @@ declare class Session {
    * Materialize an immutable snapshot of a half-open event sequence range.
    * A full current snapshot is reused until the next append; every previously
    * returned snapshot remains stable after later appends.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @param fromSeq - non-negative inclusive sequence number; defaults to the log start.
    * @param toSeqExclusive - non-negative exclusive sequence number; defaults to the current end.
    * @returns a frozen array of the selected deeply frozen events.
@@ -560,8 +554,6 @@ declare class Session {
     ): readonly SessionEvent[];
   /**
    * Return this Session's events after its fork-inherited prefix.
-   * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
-   * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
    * @returns a fresh array containing child-owned events in log order.
    */
   ownEvents(): readonly SessionEvent[];
@@ -816,29 +808,6 @@ The backends that consume this contract are on [persistence.md](persistence.md).
 `SessionOpenWorkspacePathRequest` carries an absolute or workspace-resolved `path`; optional `action: "reveal"` selects file-manager navigation instead of default-application opening. `SessionOpenWorkspacePathValue` confirms that the Host accepted the native handoff. A Session-aware Client resolves relative paths against its current Session cwd when known; the controller hands the path to the opener unchanged and reports invalid requests, cancellation, and opener failures through the Session Remote error vocabulary.
 
 The optional `application` selects a registered file handler without changing the system default; `workspacePathApplications({ path })` returns current handlers, names, icons, and default selection after Host path verification.
-
-## Session-log upload exclusions
-
-`ctx.sessionLogDeepSeek.registerExclusion()` registers a caller-owned predicate over `SessionLogUploadRequest`. Any match omits the log contribution and its acceptance callback before reading Session events. No match preserves normal upload eligibility. The [package README](../../packages/session/session-log-deepseek/README.md#upload-exclusions) defines failure and disposal behavior.
-
-```ts type-equiv
-/** Request identity inspected before preparing a Session-log contribution. */
-interface SessionLogUploadRequest {
-  /** Live Session whose canonical log would be contributed. */
-  readonly sessionId: SessionId
-  /** Auxiliary request classification; absent for ordinary conversation requests. */
-  readonly purpose?: string
-}
-```
-
-```ts type-equiv
-/**
- * Synchronous, side-effect-free upload exclusion owned by its registering plugin.
- * @param request - request identity; the predicate must not mutate it.
- * @returns `true` to omit the log field and acceptance callback, or `false` to keep checking eligibility.
- */
-type SessionLogUploadExclusion = (request: SessionLogUploadRequest) => boolean
-```
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

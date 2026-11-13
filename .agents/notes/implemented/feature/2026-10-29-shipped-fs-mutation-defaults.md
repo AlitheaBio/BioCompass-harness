@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-29-shipped-fs-mutation-defaults.zh.md)
-
 ## Problem
 
 [Apply patch file editing](2026-09-28-apply-patch-file-editing.md) shipped `apply_patch` opt-in and kept `dsh-fs-observation-policy` mounted, so every base-backed profile refused `write`, `edit`, and `apply_patch` on a file the model had not read or that had changed since the read. Benchmark runs of the shipped compositions with the tool enabled and with the policy disabled were compared against the baseline, and the shipped defaults were decided from those results in discussion between the maintainers.
@@ -25,7 +23,7 @@ English | [中文](2026-10-29-shipped-fs-mutation-defaults.zh.md)
 
 ## Consequences
 
-Default model requests in base-backed profiles carry the `apply_patch` schema and guidance, so every recorded request expectation outside the fixed-budget compaction scenarios changed. A model can overwrite or edit a file it never read; the [upgrade guide](../../../../docs/upgrade-guide/v0.2.2-alpha.2/fs-observation-policy-default-off/guide.md) names the one-line patches that restore the guard or drop the tool. Sandbox confinement, Review capture, and `fs/observed` events are unchanged.
+Default model requests in base-backed profiles carry the `apply_patch` schema and guidance, so every recorded request expectation outside the fixed-budget compaction scenarios changed. A model can overwrite or edit a file it never read; the upgrade guide names the one-line patches that restore the guard or drop the tool. Sandbox confinement, Review capture, and `fs/observed` events are unchanged.
 
 ## Testing
 

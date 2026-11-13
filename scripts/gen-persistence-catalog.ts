@@ -104,10 +104,7 @@ export function renderPluginRecordCatalog(records: readonly PluginRecordEntry[],
     '',
     `# ${text.pluginRecords}`,
     '',
-    locale === 'en'
-      ? 'English | [中文](experimental-persistence-catalog.zh.md)'
-      : '[English](experimental-persistence-catalog.md) | 中文',
-    '',
+    ...(locale === 'zh' ? ['[English](experimental-persistence-catalog.md) | 中文', ''] : []),
     text.pluginRecordsIntro,
     '',
     text.pluginRecordsGeneration,

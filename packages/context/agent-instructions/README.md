@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-agent-instructions
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-agent-instructions` gives agents workspace guidance from user-global and project-level `AGENTS.md`-compatible files. It loads the applicable chain for the first request. It does not watch external edits continuously: successful filesystem operations discover newly relevant nested files and make later changes or removals visible, while session resume reconciles the baseline. `dsh-base` enables this behavior by default, while profiles can disable it. A byte budget bounds the user-global chain and the project chain separately: within each chain, broader files are omitted before the most specific file is truncated, and an empty chain adds nothing.
@@ -39,7 +37,7 @@ The defaults suit a typical checkout: `.git` marks the project root, `AGENTS.md`
 
 The harness home holding the user-global `AGENTS.md` is process policy rather than row configuration: the plugin resolves `$DSH_HOME`, or `~/.dsh`, through `@deepseek-ai/dsh-home-paths`, so instruction loading always reads the process home. The shared agents root resolves the same way, from `$DSH_AGENTS_HOME` or `~/.agents`. Stray `dshHome` and `agentsHome` row keys are ignored.
 
-Root discovery climbs only when a marker probe confirms that the marker is absent. A permission or I/O failure stops discovery and surfaces the host or filesystem-provider error instead of selecting an ancestor project. The [historical root-marker metadata decision](../../../.agents/notes/archived/bug-fix/2026-09-03-root-marker-metadata-failures.md) records why discovery fails instead of substituting another root.
+Root discovery climbs only when a marker probe confirms that the marker is absent. A permission or I/O failure stops discovery and surfaces the host or filesystem-provider error instead of selecting an ancestor project. The historical root-marker metadata decision records why discovery fails instead of substituting another root.
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-instructions'
@@ -118,7 +116,7 @@ Every injected message carries a typed source with its change list; a complete b
 Read these pages when the package-level contract is not enough. They move from the instruction-file format to the design decision and the exhaustive configuration.
 
 - [Documentation standard](../../../docs/AGENTS.md) — what `AGENTS.md` instruction files contain and how they are maintained.
-- [Workspace-context decision record](../../../.agents/notes/archived/feature/2026-06-24-workspace-context.md) — per-agent/session isolation and lifecycle rationale.
+- Workspace-context decision record — per-agent/session isolation and lifecycle rationale.
 - [Context group map](../README.md) — sibling request-context packages.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-instructions) — every accepted config field and its source declaration.
 

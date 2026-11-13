@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-system-prompt
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-system-prompt` lets agents receive one ordered system prompt and the available tool schemas for each model step. Use it to add prompt sections, dynamic runtime facts, reusable variables, or tool schemas, or to control the fixed harness identity, deployment persona, runtime context, and model-facing tool order. Agent-scoped contributions override same-named global defaults without affecting other agents. Invalid complete-prompt combinations and unresolved variables fail assembly instead of sending a malformed prompt.
@@ -127,7 +125,7 @@ The package-level contract is enough for most consumers; read these when you nee
 - [System-prompt subsystem](../../../docs/subsystems/system-prompt.md) — the exact cross-package types and generated service API.
 - [tools package](../tools/README.md) — the tool registry whose schemas flow into assembly.
 - [Prompt variables Agent Note](../../../.agents/notes/implemented/architecture/2026-07-05-prompt-variables-and-tool-guidance-ownership.md) — who owns which prompt facts.
-- [First-party prompt order Agent Note](../../../.agents/notes/archived/architecture/2026-08-25-sparse-first-party-prompt-section-orders.md) — the sparse named order allocation.
+- First-party prompt order Agent Note — the sparse named order allocation.
 - [Core group map](../README.md) — how the core packages compose.
 
 -----

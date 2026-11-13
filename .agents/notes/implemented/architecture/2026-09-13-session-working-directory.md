@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-13-session-working-directory.zh.md)
-
 ## Problem
 
 A fixed Session creation directory cannot represent a task that changes checkout during its conversation. Independent tools resolving paths from different sources can read and write different projects, while changing the process directory also affects unrelated Sessions. Putting mutable directory information in the system prompt changes the reusable prompt prefix.
@@ -26,7 +24,7 @@ Playwright MCP and Chrome DevTools MCP validate the effective directory when acq
 
 File links and command directory labels use result metadata captured when each operation runs, so historical rows remain correct after later directory changes.
 
-The [prompt-variables note](2026-07-05-prompt-variables-and-tool-guidance-ownership.md) retains strict interpolation, route-variable ownership, and tool-guidance ownership. The [environment-suffix note](../../archived/bug-fix/2026-09-06-environment-prompt-suffix.md) retains ordered prefix/suffix placement for deployment, Harness source, and Web guidance. This decision owns directory state and placement in user context.
+The [prompt-variables note](2026-07-05-prompt-variables-and-tool-guidance-ownership.md) retains strict interpolation, route-variable ownership, and tool-guidance ownership. The environment-suffix note retains ordered prefix/suffix placement for deployment, Harness source, and Web guidance. This decision owns directory state and placement in user context.
 
 ## Alternatives considered
 

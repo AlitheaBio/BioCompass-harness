@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-17-persistence-attribution-policy.zh.md)
-
 ## Problem
 
 A producer-owned message source appears transitively in several persisted event types. A new attribution kind changes their union fingerprints even when existing readers preserve its fields without the producer. Request-only prompts need no durable identity, but constructing them as Session messages adds unnecessary source alternatives to that union.
@@ -16,7 +14,7 @@ The tmux-context producer qualifies its location attribution. Its own projection
 
 `RequestMessage` accepts a durable `Message` or a user-only `RequestUserInput` with content and no `id` or `source`. The LLM service and provider serializers accept both; Session writes, Agent delivery, and persisted title-request inputs require durable messages. Auto Review's outer prompt and the compaction summarizer's final instruction use request-only inputs and retain their content and freezing. The caller receives no implicit durable conversion. Assistant replay metadata and tool-result correlation retain their existing requirements.
 
-The finalized V4 acknowledgement records the user-source policy and removes the two request-only source registrations. Its original predecessors and header transition remain intact. This does not grant a general exception for removing accepted variants: the [producer-source migration](2026-09-09-producer-owned-message-sources.md) preserves its producer mappings and extension namespaces, including historical request-only kinds, independently of active source declarations. Catalog generation and comparison remain owned by the [persistence reference](../../../../docs/persistence-changes/README.md#compatibility-rules).
+The finalized V4 acknowledgement records the user-source policy and removes the two request-only source registrations. Its original predecessors and header transition remain intact. This does not grant a general exception for removing accepted variants: the [producer-source migration](2026-09-09-producer-owned-message-sources.md) preserves its producer mappings and extension namespaces, including historical request-only kinds, independently of active source declarations. Catalog generation and comparison remain owned by the persistence reference.
 
 ## Alternatives considered
 

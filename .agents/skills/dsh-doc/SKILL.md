@@ -18,7 +18,6 @@ The DeepSeek Harness documentation standard: make every page searchable, newcome
 - [Quality criteria](#quality-criteria)
 - [Audit the corpus](#audit-the-corpus)
 - [Wordcount budgets](#wordcount-budgets)
-- [Website publication](#website-publication)
 - [Detailed references](#detailed-references)
 - [Validation](#validation)
 - [Dev Note](#dev-note)
@@ -54,10 +53,6 @@ The `kind` frontmatter field selects exactly one README template. Every kind in 
 - `package-reference` → [templates/package-reference.md](templates/package-reference.md): a Cordis plugin or service package — mount configuration, the config table, folded implementation, Model Experience and Known Limitations in the gate-owned forms.
 - `package-library` → [templates/package-library.md](templates/package-library.md): a package with no plugin surface — consumer entry points, no profile-install path, no mount configuration.
 - `package-bundle` → [templates/package-bundle.md](templates/package-bundle.md): a package declaring `dsh.bundle.patch` — the verified `dsh plugin` install path, layer semantics, patch document.
-- `persistence-change` → [templates/persistence-change.md](templates/persistence-change.md): a dated record in `docs/persistence-changes/` — acknowledge a detected type transition with per-root predecessors and generated after schemas.
-- `persistence-release` → [templates/persistence-release.md](templates/persistence-release.md): a pinned tag in `docs/persistence-changes/releases/` — compare reconstructed historical types without claiming compatibility acknowledgement.
-- `persistence-format` → [templates/persistence-format.md](templates/persistence-format.md): a historical Session format checkpoint in `docs/persistence-changes/historical-formats/`, with complete schemas; the current writer uses the existing catalog.
-- `upgrade-guide` → [templates/upgrade-guide.md](templates/upgrade-guide.md): `docs/upgrade-guide/v<version>/<item>/guide.md` and its Chinese sibling — migration steps for one externally perceptible break, owned by [dsh-create-upgrade-guide](../dsh-create-upgrade-guide/SKILL.md).
 
 Open the template before writing and follow its skeleton and rules; it states what the kind is, how the page is structured, and the fact checks each section owes. Add a new kind only together with a distinct template file, a documented repository position or declared owner, and a focused check that maps documents to it.
 
@@ -96,10 +91,6 @@ After the structural pass, hunt the slop checklist with the cheapest probes firs
 
 `pnpm run verify-doc-budgets` compares standing documents against ceilings in [scripts/doc-budgets.manifest.json](../../../scripts/doc-budgets.manifest.json); a red gate follows the ordered relocate-condense-raise policy in [docs/AGENTS.md](../../../docs/AGENTS.md#wordcount-budgets). Ceilings are guardrails, not reduction targets: at or below target, retain at least 5% headroom; raise a ceiling only when the words need the space, and justify the manifest diff in the PR.
 
-## Website publication
-
-The website is a tested projection, never a second copy: [website/docs.ts](../../../website/docs.ts) is the explicit public allowlist mapping canonical `docs/` sources into route trees, [scripts/project-doc-site.ts](../../../scripts/project-doc-site.ts) rewrites them into the disposable `website/.generated/` tree, and VitePress builds that tree. Repository Markdown stays the only editable content source; translations stay sibling pairs (`foo.md`, `foo.zh.md`, `foo.i18n.yaml`), never locale directories. Edit an already published page in its canonical source only; add one manifest entry for a new page; update source, manifest entry, and inbound links atomically for a move or removal; never edit `website/.generated/`, `website/.cache/`, or `website/.dist/`. Set every `DocsPage` field deliberately and honor the projector's link rules; see [references/website-sync.md](references/website-sync.md) for the fields, sidebar collections, and preview commands. Synchronizing content into the build does not publish it: deployment stays a separate, explicitly requested step.
-
 ## Detailed references
 
 Load only the reference needed for the task. Each reference links directly from this file so the skill has no deep reference chain.
@@ -108,11 +99,10 @@ Load only the reference needed for the task. Each reference links directly from 
 - [Page structure and hierarchy](references/structure-hierarchy.md): mandatory section order, section summaries, user-to-developer progression, docs tree placement, small rule files, Further Exploration, and Dev Note ownership.
 - [Page style](references/style.md): short Summary, `-----` section separators, foldable content sections, and emphasis discipline.
 - [Review criteria](references/review.md): newcomer test, evidence checks, package README review, the reference example, and verification commands.
-- [Website publication](references/website-sync.md): manifest fields, projector link rules, preview and validation, and deployment separation.
 
 The templates in [`templates/`](templates/) provide one working skeleton per `kind`; open the one your document's kind names before writing.
 
-Use [dsh-prose-standard](../dsh-prose-standard/SKILL.md) for sentence-level contract coverage and editorial judgment. The `session-persistence-jsonl` README pair ([English](../../../packages/session/session-persistence-jsonl/README.md), [Chinese](../../../packages/session/session-persistence-jsonl/README.zh.md)) is the reference example: searchable YAML, Summary and Table of Contents, user-to-developer progression with a folded developer section, Further Exploration, canonical Model Experience and Known Limitations sections, and a final Dev Note.
+Use [dsh-prose-standard](../dsh-prose-standard/SKILL.md) for sentence-level contract coverage and editorial judgment. The [`session-persistence-jsonl` README](../../../packages/session/session-persistence-jsonl/README.md) is the reference example: searchable YAML, Summary and Table of Contents, user-to-developer progression with a folded developer section, Further Exploration, canonical Model Experience and Known Limitations sections, and a final Dev Note.
 
 ## Validation
 

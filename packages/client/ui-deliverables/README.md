@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-client-ui-deliverables
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 This package renders the changed-files card a finished turn ends with — the files the turn changed, with the Host's line counts, each opening the turn's review tab on that file — plus cards for explicitly delivered files, and links matching inline-code references in the closing prose so a mentioned file opens in the right Sidebar. Listed and linked paths come from the recorded summary, successful mutations, and explicit deliveries, never from the prose. Only the shipped Web patch loads this package; removing its cordis.yml entry removes the guidance, cards, and prose links together.
@@ -79,9 +77,9 @@ Read these pages when the deliverables surface is not enough. They move from the
 
 - [workspace-changes](../../deliverables/workspace-changes/README.md) — the Host plugin that records and serves the summary the card renders.
 - [ui-chat](../ui-chat/README.md) — declares the `conversation.chat.turnTail` hole and renders the closing prose.
-- [historical Turn changed-files card](../../../.agents/notes/archived/feature/2026-09-11-turn-changed-files-card.md) — the decision behind git-recorded summaries replacing the mutation-call row.
-- [historical Workspace file links](../../../.agents/notes/archived/feature/2026-07-31-web-workspace-file-links.md) — the decision behind the earlier produced-files row; its Host open path is superseded by the [right Sidebar](../../../.agents/notes/implemented/feature/2026-09-04-right-sidebar-docking-infrastructure.md).
-- [Inline file mentions](../../../.agents/notes/archived/feature/2026-08-07-web-inline-file-mentions.md) — the decision behind clickable mentions in the closing prose.
+- historical Turn changed-files card — the decision behind git-recorded summaries replacing the mutation-call row.
+- historical Workspace file links — the decision behind the earlier produced-files row; its Host open path is superseded by the [right Sidebar](../../../.agents/notes/implemented/feature/2026-09-04-right-sidebar-docking-infrastructure.md).
+- Inline file mentions — the decision behind clickable mentions in the closing prose.
 - [Client package map](../README.md) — adjacent browser UI packages.
 
 -----

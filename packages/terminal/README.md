@@ -5,8 +5,6 @@ kind: "package-group"
 
 # terminal/ — persistent PTY capability family
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 The `terminal/` family lets agents keep interactive shell and REPL sessions alive across tool calls, including the working directory, environment variables, and running child processes. Use `terminal/` for owner-isolated session management, `terminal-bash/` for sandboxed interactive bash or pwsh sessions. Choose this family when a task needs interactive input or state that a one-shot bash command cannot retain. Sessions remain local to one harness process and do not survive a restart.
@@ -40,7 +38,7 @@ Start with the subsystem reference for the shared types and the service surface,
 - [Persistent PTY Agent Note](../../.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md) — the design decision, alternatives, and deferred work.
 - [Capability seams](../../docs/capability-seams.md) — the Service Definition / Service Provider / Consumer split this family follows.
 
-See [`tool-terminal`](../experimental/tool-terminal/README.md) for the experimental optional capability.
+See `tool-terminal` for the experimental optional capability.
 
 <a id="dev-note"></a>
 ## Dev Note

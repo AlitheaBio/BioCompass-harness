@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-tool-bash-persistent
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 This package gives an agent a `bash` tool whose cwd, exported variables, functions, and background jobs persist across calls. Each agent receives an isolated shell, and its commands run sequentially. Choose it for workflows that depend on cross-call state; use `dsh-tool-bash` when every command should start clean. Configure the PTY backend and per-command timeout; `exit`, timeout, or cancellation resets the shell, while interactive commands that wait for stdin may run until timeout.
@@ -99,7 +97,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [terminal package map](../../terminal/README.md) — the persistent PTY capability family.
 - [terminal seam](../../terminal/terminal/README.md) — the `ctx.terminals` service behind the tool.
 - [terminal-bash backend](../../terminal/terminal-bash/README.md) — the default `shell` backend.
-- [tool-terminal](../../experimental/tool-terminal/README.md) — six model-facing terminal tools for interactive work.
+- tool-terminal — six model-facing terminal tools for interactive work.
 - [Persistent PTY sessions Agent Note](../../../.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md) — the owner-scoped session design and its rationale.
 - [Generated tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash-persistent) — the exact `bash` argument schema.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-bash-persistent) — every accepted config field and its source declaration.

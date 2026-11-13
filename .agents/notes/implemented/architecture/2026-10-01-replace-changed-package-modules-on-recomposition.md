@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-01-replace-changed-package-modules-on-recomposition.zh.md)
-
 ## Problem
 
 Node caches an evaluated module by file URL. A profile installs packages with pnpm's hoisted layout, so a package lives at `node_modules/<name>` whatever its version. Overwriting, upgrading or reinstalling it keeps every file URL, and a later import or Loader entry restart returns the cached module of the previous version. The [package-refresh Note](2026-09-30-profile-package-refresh-and-manifest-invalidation.md) refreshes runtime resolution and package configuration but leaves this module cache; Plugin Manager therefore reported overwrites as `restart-required`, and a reinstall at the same path after removal reported `applied` while the previous version kept running. A `link:` development package hits the same cache whenever its build output changes, unless its directory is listed in HMR's source watch roots.
@@ -31,7 +29,7 @@ A stale module whose importer closure reaches the process entry point's static g
 
 `reconcileProfile()` returns `pending`, each stale module that loads only after a restart with its reason (`host-module`, `unmanaged-plugin`, or `module-comparison` when planning failed). Pending modules stay stale, including modules first loaded after the last recording, so the next recomposition retries them. A module first loaded during a recomposition whose file was modified after the comparison also stays stale: activation may have evaluated it before that write. A failure while listing or comparing modules keeps the previous records and sets the profile-wide `restartReason: module-comparison`, even without known module URLs. Neither prevents recomposition. An activation failure, including a replacement that fails to import, is thrown with the Loader's import error; an unchanged failure is returned as a warning by later recompositions. Plugin Manager reports a thrown failure as `failed` with that diagnostic, and turns `pending` into `restart-required` with its `restartReason`, unless the operation reports `overridden`. The Web page localizes the reason, and the agent tool derives a `nextStep` sentence from it, so no surface parses a diagnostic string.
 
-The [packed worker loader](../../../../packages/experimental/webworker-runtime/src/module-system/module-loader.ts) stores evaluated modules in a private map and its `require` exposes no cache. HMR cannot replace them through Node APIs and reports a restart requirement. Native Node still exposes its caches when using asynchronous module hooks.
+The packed worker loader stores evaluated modules in a private map and its `require` exposes no cache. HMR cannot replace them through Node APIs and reports a restart requirement. Native Node still exposes its caches when using asynchronous module hooks.
 
 ### Plugin Manager and runtime resolution
 

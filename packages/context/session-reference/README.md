@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-session-reference
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-session-reference` lets a conversation reference other sessions: a host turns a `@label` mention into a canonical URI, and the service prepares a bounded, read-only snapshot of each referenced session as durable, untrusted background context for the model. Candidate discovery ranks other sessions by working-directory affinity and labels them with their latest titles. Snapshots are immutable after capture and carry a fixed warning that forbids following instructions, permission claims, or tool requests inside them. It is an opt-in service for hosts that support cross-session mentions; it consumes `ctx.sessionQuery` and needs no SQLite FTS.
@@ -98,7 +96,7 @@ The outer `agent/pre-step` listener accepts the step, parses canonical mentions 
 Read these pages when the package-level contract is not enough. They move from the shared reference surface to the design decision and the read service behind it.
 
 - [Session-reference subsystem](../../../docs/subsystems/session-reference.md) — canonical URIs, projection rules, and the stable error taxonomy.
-- [historical Session-reference spill reuse](../../../.agents/notes/archived/bug-fix/2026-09-05-session-reference-spill-reuse.md) — snapshot identity, omission notices, storage ownership, and alternatives.
+- historical Session-reference spill reuse — snapshot identity, omission notices, storage ownership, and alternatives.
 - [Session-query subsystem](../../../docs/subsystems/session-query.md) — the read service that supplies session surfaces.
 - [Context group map](../README.md) — sibling request-context packages.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-session-reference) — every accepted config field and its source declaration.

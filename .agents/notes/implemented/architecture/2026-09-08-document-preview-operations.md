@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-08-document-preview-operations.zh.md)
-
 ## Problem
 
 File viewers need different loading policies and may offer several implementations for one extension. A change stream cannot also express an on-demand read without mixing live data with callable capabilities. HTML dependencies additionally need the Host's filesystem authorization and path resolution, not the browser's current directory.
@@ -42,4 +40,4 @@ PDF.js's official TextLayerBuilder owns selection boundaries and copy normalizat
 
 ## Consequences
 
-Renderers can be replaced without changing the tab or file protocol. Full-file formats pay bounded whole-file memory and PDF adds bundled Worker/font/decoder bytes. Format selection and view state are page-local, not durable Session data. Preview owns RPC cancellation and native buffers independently of metadata observation. A tab retains its read version and the observation version captured at read start; refreshing it neither discards another tab's content nor clears its change notice. File reads remain non-transactional, and opaque versions are compared for equality, not ordering. The [recorded browser scenario](../../../../apps/web/tests/document-preview.e2e.ts) exercises the shared toolbar, incremental text, isolated HTML dependencies, width-fitted raster and SVG rendering, inert SVG scripts, and lazy continuous PDF Worker rendering.
+Renderers can be replaced without changing the tab or file protocol. Full-file formats pay bounded whole-file memory and PDF adds bundled Worker/font/decoder bytes. Format selection and view state are page-local, not durable Session data. Preview owns RPC cancellation and native buffers independently of metadata observation. A tab retains its read version and the observation version captured at read start; refreshing it neither discards another tab's content nor clears its change notice. File reads remain non-transactional, and opaque versions are compared for equality, not ordering. The recorded browser scenario exercises the shared toolbar, incremental text, isolated HTML dependencies, width-fitted raster and SVG rendering, inert SVG scripts, and lazy continuous PDF Worker rendering.

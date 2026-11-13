@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-ptc-runtime-python
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Run model-generated Python in a fresh CPython 3.10+ process on macOS or Linux under the same file policy as TypeScript PTC. Programs can use top-level `await` and `return`, call configured bindings, and write normal stdout/stderr. Direct file operations follow the selected sandbox policy; resource budgets and process-group teardown bound execution. No state persists across runs, and no shipped profile enables this experimental runtime.
@@ -103,7 +101,7 @@ Read these when the runtime contract is not enough. They move from the seam defi
 
 - [PTC runtime seam](../ptc-runtime/README.md) — the abstract contract this backend implements.
 - [fd-3 protocol Agent Note](../../../.agents/notes/implemented/architecture/2026-07-31-ptc-runtime-python-fd3-protocol.md) — design rationale and wire contract.
-- [Settlement-fixes Agent Note](../../../.agents/notes/archived/bug-fix/2026-07-31-code-runtime-python-settlement-fixes.md) — settlement, metering, and containment fixes and their regression cases.
+- Settlement-fixes Agent Note — settlement, metering, and containment fixes and their regression cases.
 - [Node process backend](../ptc-runtime-node/README.md) — the released TypeScript sibling.
 - [PTC runtime subsystem reference](../../../docs/subsystems/ptc-runtime.md) — request/result vocabulary, bindings, and failure taxonomy.
 

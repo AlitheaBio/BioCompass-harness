@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-host-open-in-app
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use `dsh-host-open-in-app` with its [browser companion](../../client/ui-open-in-app/README.md) to let users open a workspace directory in an installed editor, Git GUI, terminal, or file manager. It offers a fixed application catalog and shows only entries that the host can verify; newly installed applications appear after restart, while missing launchers are removed when detected. Requests require the deployment's browser authentication and host-origin trust checks. Detection and launch commands use configurable deadlines and do not pass inherited credentials to launched applications.
@@ -120,6 +118,6 @@ None; the package never assembles or sends provider requests.
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-The promotion decisions — the host/`ui-` package split, why raw webServer routes instead of a Typert Remote, why the catalog stays compile-time fixed, the resolver redesign (verified launchers, one resolution pass, no per-click re-detection), the three-deadline configuration, and the per-platform icon strategies with their rejected alternatives — are recorded in the [historical promotion Agent Note](../../../.agents/notes/archived/feature/2026-08-25-promote-open-anywhere-plugin.md).
+The promotion decisions — the host/`ui-` package split, why raw webServer routes instead of a Typert Remote, why the catalog stays compile-time fixed, the resolver redesign (verified launchers, one resolution pass, no per-click re-detection), the three-deadline configuration, and the per-platform icon strategies with their rejected alternatives — are recorded in the historical promotion Agent Note.
 
 </details>

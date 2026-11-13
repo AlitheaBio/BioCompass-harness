@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-plan-mode
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Plan mode asks an agent to explore and design before execution, then presents the finished plan for your approval. Enter it with `/plan`, optionally with a message or ordered image and file attachments; leave with `/plan off`, approve the review to continue, or return feedback for more planning. Deployment-defined guidance controls planning behavior, but every tool remains available, so use sandbox mode and approval prompts for enforced limits. The active state survives session resume and forks. Choose it when you want a reviewed plan before the agent acts.
@@ -121,7 +119,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [plan/ package map](../README.md) — the group and its single package.
 - [exit_plan_mode tool catalog entry](../../../docs/tool-catalog.md#deepseek-aidsh-plan-mode) — the exact schema the model receives.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-plan-mode) — every accepted config field and its meaning.
-- [archived Plan-specific collaboration state](../../../.agents/notes/archived/simplification/2026-07-22-plan-specific-collaboration-state.md) — the design decision behind plan mode.
+- archived Plan-specific collaboration state — the design decision behind plan mode.
 
 -----
 

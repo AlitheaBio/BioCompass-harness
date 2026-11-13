@@ -5,8 +5,6 @@ kind: "package-group"
 
 # packages/storage
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 The storage group keeps non-session application data across restarts, including workspace records and session sidecars. Choose `storage-json` for human-readable files or `storage-sqlite` for point updates in one database; `storage-domain` adds schema-validated typed records and change notifications, while `storage` selects the configured backend. These packages are optional and host-side: they do not expose tools, prompt content, or session events to the model. Use the group when application state must outlive a process, and omit it when the composition has no such data.
@@ -35,7 +33,7 @@ The storage group keeps non-session application data across restarts, including 
 ## Related documentation
 
 - [Storage subsystem](../../docs/subsystems/storage.md) — the authoritative contract: the backend contract, domain declaration, change events, and generated API.
-- [domain KV storage Agent Note](../../.agents/notes/proposed/architecture/2026-07-24-domain-kv-storage-and-workspace.md) — the design behind the family, the workspace consumer, and the deferred session-backend migration.
+- domain KV storage Agent Note — the design behind the family, the workspace consumer, and the deferred session-backend migration.
 - [Workspace subsystem](../../docs/subsystems/workspace.md) — the first consumer of the domain data form.
 
 -----

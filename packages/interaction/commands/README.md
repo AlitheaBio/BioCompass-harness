@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-commands
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 `dsh-commands` lets users run `/command [input]` actions in interactive Harness UIs without turning the command or its result into a model message. Commands can advertise input hints, accept attachments, and target one agent while preserving a global command with the same name for other agents. Every admitted run is recorded in the receiving agent's session log, while the UI renders the settled result outside model history. Use it for direct human controls in the `dsh` CLI or Web client; UI-less demos and ACP automation do not provide this command surface.
@@ -108,7 +106,7 @@ Attachment enforcement happens in the executor: images are committed through `ad
 Read these pages when the package-level contract is not enough. They move from the shared command vocabulary to the design evidence and adjacent surfaces.
 
 - [Commands subsystem reference](../../../docs/subsystems/commands.md) — registry semantics, input metadata, and the `ctx.commands` Cordis surface.
-- [historical Command registration Agent Note](../../../.agents/notes/archived/feature/2026-07-19-plugin-command-registration.md) — the boundary and dispatch contract behind this service.
+- historical Command registration Agent Note — the boundary and dispatch contract behind this service.
 - [Interaction group map](../README.md) — adjacent approval, permission, and question packages.
 - [Plan mode package](../../plan/plan-mode/README.md) — a shipped command producer that drives model-visible work.
 

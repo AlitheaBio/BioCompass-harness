@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-10-20-session-team-mode.zh.md)
-
 ## Problem
 
 A plugin-level Team switch requires users to change the shared profile before choosing collaboration for one conversation. It can disable another Session’s capability and leaves a second control beside the Session selection. Ordinary tasks still need their existing tool catalog, and disabling collaboration must not discard task history or children.
@@ -28,6 +26,6 @@ This supersedes the explicit-composition choice in [Agent Teams](../feature/2026
 
 ## Consequences
 
-Default profiles carry the Team implementation while exposing no task tools until enabled. The removed package names require custom compositions to migrate; durable event names and task data remain unchanged. [The upgrade guide](../../../../docs/upgrade-guide/v0.2.1-rc.2/session-team-mode/guide.md) owns those steps.
+Default profiles carry the Team implementation while exposing no task tools until enabled. The removed package names require custom compositions to migrate; durable event names and task data remain unchanged. The upgrade guide owns those steps.
 
 Verification covers default startup, new-Session opt-in, independent roots, persisted selections, retained tasks, old profile migration, and absence of the plugin switch. Product-isolation checks retain an unrelated experimental plugin as their negative control.

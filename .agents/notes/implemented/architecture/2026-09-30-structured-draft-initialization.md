@@ -2,8 +2,6 @@
 
 Status: implemented
 
-English | [中文](2026-09-30-structured-draft-initialization.zh.md)
-
 ## Problem
 
 New-task entry points need to place unsent content in the composer. A draft contains not only text but also file, folder, and Session references the user has selected. Saving only their text projection loses the chips' source, target, and presentation fields when the input object is disposed. Filling the composer after mounting also cannot guarantee that the first input-model read contains the complete document.
@@ -85,4 +83,4 @@ The [browser e2e](../../../../apps/web/tests/draft-initialization.e2e.ts) observ
 
 Missing reference information in legacy strings cannot be reconstructed losslessly, so they restore as plain text without searching and guessing files. Attachment File objects, upload state, cross-browser synchronization, multiple independent editors, and persistent Undo history are outside this change.
 
-This decision shares input ownership with the [editor-isolation proposal](../../proposed/architecture/2026-09-14-composer-model-and-draft-editor.md) without implementing its multi-editor goal. [Reference previews](../../../../packages/client/ui-input-trigger/README.md) and [Session reference lifetimes](2026-09-15-client-session-references.md) continue to govern source routing and generation cleanup independently; neither is superseded.
+This decision shares input ownership with the editor-isolation proposal without implementing its multi-editor goal. [Reference previews](../../../../packages/client/ui-input-trigger/README.md) and [Session reference lifetimes](2026-09-15-client-session-references.md) continue to govern source routing and generation cleanup independently; neither is superseded.

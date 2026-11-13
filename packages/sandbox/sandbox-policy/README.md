@@ -5,8 +5,6 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-sandbox-policy
 
-English | [中文](README.zh.md)
-
 ## Summary
 
 Use this package to apply one file-effect policy to every confined bash, filesystem, and terminal call. Deployments choose a default mode and fallback workspace root, while each session can switch modes independently. Session choices survive restart, and all enforcing capabilities use the same mode and workspace for a call. Before each model request, the model receives the effective policy and workspace without an inventory of mounted capabilities.
@@ -100,7 +98,7 @@ Start with the subsystem reference for the shared vocabulary, then the seam cont
 
 - [Process sandbox subsystem](../../../docs/subsystems/sandbox.md) — modes, per-call policy, and enforcement semantics.
 - [Sandbox seam package](../sandbox/README.md) — the confinement contract every enforcing capability implements.
-- [historical Cross-family file sandbox decision](../../../.agents/notes/archived/feature/2026-07-14-cross-family-fs-sandbox.md) — why one shared policy home exists.
+- historical Cross-family file sandbox decision — why one shared policy home exists.
 
 -----
 
@@ -156,7 +154,7 @@ These limits define the policy surface this package provides. They are current p
 - **File-effect modes only** — `SandboxMode` governs file effects; network and process policy are outside its vocabulary, so no knob here restricts them.
 - **Temporary areas are deliberately summarized** — enforcing backends grant different platform temporary areas, which are selected after policy resolution and therefore cannot be enumerated truthfully in the current context.
 
-Policy-context replacements must be counter-tested on denied-then-escalatable tasks to verify that the model still attempts the initial tool call. The [historical five-of-twelve zero-tool-call measurement](../../../.agents/notes/archived/feature/2026-07-06-sandbox.md) records the failure this check prevents.
+Policy-context replacements must be counter-tested on denied-then-escalatable tasks to verify that the model still attempts the initial tool call. The historical five-of-twelve zero-tool-call measurement records the failure this check prevents.
 
 <a id="dev-note"></a>
 ### Dev Note

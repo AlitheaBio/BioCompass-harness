@@ -39,10 +39,6 @@ const KIND_TEMPLATES: Readonly<Record<string, string>> = {
   'package-reference': '.agents/skills/dsh-doc/templates/package-reference.md',
   'package-library': '.agents/skills/dsh-doc/templates/package-library.md',
   'package-bundle': '.agents/skills/dsh-doc/templates/package-bundle.md',
-  'persistence-change': '.agents/skills/dsh-doc/templates/persistence-change.md',
-  'persistence-release': '.agents/skills/dsh-doc/templates/persistence-release.md',
-  'persistence-format': '.agents/skills/dsh-doc/templates/persistence-format.md',
-  'upgrade-guide': '.agents/skills/dsh-doc/templates/upgrade-guide.md',
 }
 
 /**
@@ -302,7 +298,6 @@ describe('dsh-doc skill consolidation', () => {
       '.agents/skills/dsh-doc/references/structure-hierarchy.md',
       '.agents/skills/dsh-doc/references/style.md',
       '.agents/skills/dsh-doc/references/review.md',
-      '.agents/skills/dsh-doc/references/website-sync.md',
     ]
     for (const file of files) {
       const source = readFileSync(resolve(root, file), 'utf8')
@@ -310,16 +305,9 @@ describe('dsh-doc skill consolidation', () => {
     }
   })
 
-  it('copies no stale website sidebar or section-owner values', () => {
-    const source = readFileSync(resolve(root, '.agents/skills/dsh-doc/references/website-sync.md'), 'utf8')
-    expect(source).not.toContain('en-docs')
-    expect(source).not.toContain('sectionOrder')
-  })
-
   it('keeps the reference example linked from the skill', () => {
     const skill = readFileSync(resolve(root, '.agents/skills/dsh-doc/SKILL.md'), 'utf8')
     expect(skill).toContain('session-persistence-jsonl/README.md')
-    expect(skill).toContain('session-persistence-jsonl/README.zh.md')
   })
 
   it('defines controlled English as a precision-preserving review discipline', () => {
