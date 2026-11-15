@@ -1,3 +1,0 @@
-- insert:
-    - id: in-history-series-start
-      name: '../../../packages/test-support/session-snapshot/tests/fixtures/in-history-series-start.ts'

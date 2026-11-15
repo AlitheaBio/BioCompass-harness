@@ -1,58 +1,50 @@
-# BioCompass Harness
+# BioCompass
 
-BioCompass Harness (`dsh`) is an open-source, local-first scientific agent harness built by [Alithea Bio](https://github.com/AlitheaBio/BioCompass-harness) on the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis) ([_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)).
+**BioCompass** is Alithea Bio's cloud-agnostic computational biology agent, data catalog explorer, and OCI container execution harness powered by the [Froglet](https://github.com/armanas/froglet) verifiable compute protocol.
 
-All cloud telemetry, session-log uploaders, proprietary Office conversion binaries, and unprompted registry pings have been stripped so the Web UI, Electron Desktop app, headless CLI, TypeScript SDK, and Python SDK run cleanly with zero external phone-home dependencies.
+Every scientific module or pipeline in BioCompass is **one standard OCI container** (`/in/params.json` + `/in/data/*.parquet` → `Dockerfile` → `/out/result.json` + `/out/artifacts/*`) paired with an optional sandboxed Vite 8 UI (`@biocompass/plugin-sdk`). Every run produces an offline-verifiable **Froglet BIP340 Schnorr `Receipt`** binding input parameters, SHA-256 dataset digests, container digest, and result hashes.
 
-Review the [safety notice](SAFETY.md) before running the project.
+## Architecture
 
-## Run from source
+```text
+BioCompass-harness/
+├── Cargo.toml                  # Rust 2024 workspace
+├── crates/
+│   ├── core-traits/            # 5 cloud-agnostic traits (SessionStore, BlobStore, OciRegistryClient, RunDispatcher, PaymentGateway) + SQLite & POSIX impls
+│   ├── plugin-spec/            # plugin.toml manifest parser, SKILL.md loader, JSON Schema validator, 4 starter generators
+│   ├── data-engine/            # Embedded DuckDB over immutable Parquet + catalog.json SHA-256 + Grant row/*** sequence masking SQL views
+│   ├── oci-runner/             # Rootless Podman (Linux) & Docker/Podman VM (macOS/Windows) hardened /in:ro -> /out:rw supervisor
+│   ├── node-runtime/           # Embeddable Froglet execution engine + Stage-In/Out + 5-artifact Schnorr chain signer & verifier
+│   └── agent-core/             # Streaming Rust LLM SSE loop, SKILL.md injection, >12k-token output spill, durable session events
+├── bins/
+│   └── biocompass/             # Single CLI binary (`biocompass up`, `run`, `init-plugin`, `verify-receipt`, `--mode cloud-web`)
+├── packages/
+│   └── plugin-sdk/             # @biocompass/plugin-sdk (<iframe sandbox="allow-scripts"> postMessage JSON-RPC 2.0 bridge)
+├── web/                        # Single Vite 8 + React 19 SPA (Workbench, Grant-Masked Catalog Explorer, Sandboxed Plugin Host, Builder Studio)
+└── templates/                  # Reference starter plugins (python-uv, r-bioc, nextflow, rust-cli)
+```
 
-Install Node.js (`>=24.9.0`) and `pnpm`, then build and launch the Web UI:
+## Quick Start
 
 ```sh
-git clone https://github.com/AlitheaBio/BioCompass-harness.git
-cd BioCompass-harness
-pnpm install
-pnpm run build
-pnpm dsh web
+# 1. Build @biocompass/plugin-sdk and the Vite 8 + React 19 SPA
+npm install
+npm run build
+
+# 2. Run the Rust workspace test suite & build the single embedded binary
+cargo test --workspace
+cargo build --bin biocompass
+
+# 3. Launch BioCompass locally on http://127.0.0.1:8080
+cargo run --bin biocompass -- up --port 8080
 ```
 
-`pnpm run build` prepares the repository artifacts. `pnpm dsh web` starts the Web UI at `http://127.0.0.1:3080` by default and opens it in the browser (`--no-open` skips opening a browser). See the [Web UI guide](docs/user/guide/index.md).
+## Cloud-Agnostic Deployment
 
-### Model providers and API keys
-
-Model access runs through `packages/llm/llm-pi-ai` (`anthropic`, `openai`, `google`, `deepseek`, and `openrouter`), defaulting to `anthropic` (`claude-sonnet-4-5`). Configure credentials in **Settings → Models** or via environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`) and optional `*_BASE_URL` overrides (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL`, `OPENROUTER_BASE_URL`).
-
-### Other surfaces
-
-- **Web development watch mode:** `pnpm run dev:web` builds artifacts, serves the Web UI, and rebuilds client bundles on source edits.
-- **Desktop app:** `pnpm run dev:desktop` builds and launches the Electron Desktop app.
-- **Headless CLI:** `pnpm dsh --profile headless "task"` runs one task from source.
-- **SDKs:** TypeScript (`packages/sdk`) and Python (`python/sdk` + `python/sdk-runtime`) drive the same `dsh` profiles over JSON-RPC.
-
-## Development
-
-Start with the [development guide](docs/development.md), [architecture documentation](docs/architecture.md), and [package map](packages/README.md).
-
-For agents, follow [AGENTS.md](AGENTS.md).
-
-## Upstream attribution
-
-Derived from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) by DeepSeek AI:
-
-```bibtex
-@misc{deepseek-harness2026,
-  title={DeepSeek Harness: Everything is a Plugin},
-  author={DeepSeek-AI},
-  year={2026},
-  publisher={GitHub},
-  howpublished={\url{https://github.com/deepseek-ai/deepseek-harness}},
-}
-```
+Domain crates depend exclusively on the 5 traits in `biocompass-core-traits` (`SessionStore`, `BlobStore`, `OciRegistryClient`, `RunDispatcher`, `PaymentGateway`) and speak 100% standard open protocols:
+- **Local Mode (`biocompass up`):** SQLite WAL (`state.sqlite`), POSIX filesystem (`~/.biocompass/store`), local Podman/Docker, and embedded in-process `NodeRuntime`.
+- **Cloud Mode (`biocompass --mode cloud-web` + `compass-hub`):** PostgreSQL 16, S3 REST v4 (MinIO, Ceph, Scaleway, Exoscale, Hetzner, OVH), OCI Distribution v1.1 (`/v2/`), and remote rootless Podman `froglet-node` pools.
 
 ## License
 
-[MIT](LICENSE)
-
-Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Licensed under the [MIT License](LICENSE).

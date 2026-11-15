@@ -1,8 +1,0 @@
-BioCompass
-BioCompass
-Add an API key to get started
-Configure official DeepSeek models to start using BioCompass
-Enter API key [password]
-Save and continue [disabled]
-Set up later
-Back to sign in

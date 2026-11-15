@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 100 100" fill="none">
+
+<circle cx="50.00" cy="50.00" r="42.00" fill="none" stroke="#4B4196" stroke-width="1.85"/>
+<path d="M 8.00 50.00 A 42.00 33.60 0 0 1 92.00 50.00" fill="none" stroke="#4B4196" stroke-width="1.51" stroke-linecap="round" stroke-opacity="0.95"/>
+<path d="M 8.00 50.00 A 42.00 25.20 0 0 1 92.00 50.00" fill="none" stroke="#6E64BC" stroke-width="1.39" stroke-linecap="round" stroke-opacity="0.77"/>
+<path d="M 8.00 50.00 A 42.00 16.80 0 0 1 92.00 50.00" fill="none" stroke="#6E64BC" stroke-width="1.35" stroke-linecap="round" stroke-opacity="0.69"/>
+<path d="M 8.00 50.00 A 42.00 8.40 0 0 1 92.00 50.00" fill="none" stroke="#A9A2DC" stroke-width="1.30" stroke-linecap="round" stroke-opacity="0.68"/>
+<path d="M 8.00 50.00 A 42.00 3.57 0 0 1 92.00 50.00" fill="none" stroke="#F3AE92" stroke-width="1.26" stroke-linecap="round" stroke-opacity="0.82"/>
+<path d="M 8.00 50.00 A 42.00 8.40 0 0 0 92.00 50.00" fill="none" stroke="#6E64BC" stroke-width="1.50" stroke-linecap="round" stroke-opacity="0.86"/>
+<path d="M 8.00 50.00 A 42.00 16.80 0 0 0 92.00 50.00" fill="none" stroke="#4B4196" stroke-width="1.56" stroke-linecap="round" stroke-opacity="0.91"/>
+<path d="M 8.00 50.00 A 42.00 25.20 0 0 0 92.00 50.00" fill="none" stroke="#4B4196" stroke-width="1.61" stroke-linecap="round" stroke-opacity="0.95"/>
+<path d="M 8.00 50.00 A 42.00 33.60 0 0 0 92.00 50.00" fill="none" stroke="#4B4196" stroke-width="1.66" stroke-linecap="round"/>
+<path d="M 8.00 50.00 A 42.00 3.86 0 0 0 92.00 50.00" fill="none" stroke="#F56E3D" stroke-width="2.60" stroke-linecap="round"/>
+<g transform="translate(50.00 50.00) rotate(38.0)">
+<polygon points="0,-28.90 8.11,0 0,28.90 -8.11,0" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="1.05" stroke-linejoin="round"/>
+<polygon points="0,-26.88 6.09,0 -6.09,0" fill="#F56E3D"/>
+<polygon points="0,26.88 6.09,0 -6.09,0" fill="#4B4196"/>
+<circle cx="0" cy="0" r="2.18" fill="#FFFFFF"/>
+</g>
+</svg>

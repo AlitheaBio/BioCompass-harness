@@ -1,0 +1,84 @@
+[workspace]
+members = [
+    "crates/core-traits",
+]
+exclude = [
+    "crates/plugin-spec",
+    "crates/data-engine",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+authors = ["Alithea Bio <engineering@alithea.bio>"]
+repository = "https://github.com/AlitheaBio/BioCompass-harness"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+# Internal crates
+biocompass-core-traits = { path = "crates/core-traits" }
+biocompass-plugin-spec = { path = "crates/plugin-spec" }
+biocompass-data-engine = { path = "crates/data-engine" }
+biocompass-oci-runner = { path = "crates/oci-runner" }
+biocompass-node-runtime = { path = "crates/node-runtime" }
+biocompass-agent-core = { path = "crates/agent-core" }
+
+# Pinned Froglet protocol & offline verifier by immutable commit SHA
+froglet-protocol = { git = "https://github.com/AlitheaBio/froglet.git", rev = "c6c5dc53f38a2c485f95cd6776f32f4e7b33785b" }
+froglet-verify = { git = "https://github.com/AlitheaBio/froglet.git", rev = "c6c5dc53f38a2c485f95cd6776f32f4e7b33785b", default-features = false }
+
+# Async & HTTP
+tokio = { version = "1.51.6", features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+async-trait = "0.1"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = { version = "0.7", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+    "tracing",
+] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "set-header"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Serialization, schemas & config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+jsonschema = { version = "0.58.1", default-features = false }
+
+# Databases & Embedded Analytics
+rusqlite = { version = "0.38", features = ["bundled"] }
+duckdb = { version = "1.4", features = ["bundled"] }
+
+# Crypto, IDs, Time & CLI
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
+mime_guess = "2.0"
+
+# Diagnostics & Testing
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"

@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "adaptación del modelo pi-ai",
-    "description": "Proporciona un adaptador LLM multiprovedor basado en pi-ai para BioCompass."
-  }
-}

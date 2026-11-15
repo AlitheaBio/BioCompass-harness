@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "pi-ai モデルアダプター",
-    "description": "pi-ai を基盤としたマルチプロバイダー LLM アダプターを BioCompass に提供します。"
-  }
-}

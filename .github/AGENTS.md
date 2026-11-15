@@ -1,3 +1,0 @@
-# AGENTS.md — GitHub Actions
-
-Run jobs on Windows runners (`windows-*` labels) under native `pwsh`. Native Windows pull-request jobs live in `ci-windows.yml` and Python pull-request jobs in `ci-python.yml`, so each PR workflow can be re-run independently; their checks feed the `windows checks passed` and `python checks passed` verdicts, while Linux jobs in `ci.yml` feed `all checks passed`. Wine runs Windows Node on hosted Linux in `ci-master.yml`. Python runtime CI checks Linux/Windows x64 on pull requests and Linux ARM64 plus both macOS architectures on default-branch pushes; releases retain all five targets ([platform policy](workflows/ci-master.yml)).

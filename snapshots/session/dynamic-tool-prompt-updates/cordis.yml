@@ -1,3 +1,0 @@
-- insert:
-    - id: dynamic-tool-prompt-updates
-      name: '../../../packages/test-support/session-snapshot/tests/fixtures/dynamic-tool-prompt-updates.ts'
