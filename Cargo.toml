@@ -3,6 +3,7 @@ members = [
     "crates/core-traits",
     "crates/plugin-spec",
     "crates/data-engine",
+    "crates/oci-runner",
 ]
 resolver = "2"
 

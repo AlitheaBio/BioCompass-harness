@@ -1,0 +1,70 @@
+id = "alithea/hla-motif-enrichment"
+name = "HLA Class I Motif & Cohort Enrichment"
+version = "1.0.0"
+description = "Quantifies strong-binder IC50 distributions, 8-14mer length histograms, and organ-by-condition HLA presentation over pre-masked DuckDB Parquet cohorts."
+category = "Immunopeptidomics"
+image = "127.0.0.1:5500/alithea/hla-motif-enrichment@sha256:8159a58f7dfff38a43af6aad331e5eaf8eed33d1c503741df25ee9f8ace55191"
+network = "none"
+price_milli_act = 5000
+
+[resources]
+cpus = 2
+memory_mb = 2048
+gpu = 0
+timeout_sec = 120
+pids_limit = 256
+
+[inputs.schema]
+type = "object"
+required = ["alleles", "min_length", "max_length"]
+
+[inputs.schema.properties.alleles]
+type = "array"
+title = "Target HLA Class I Alleles"
+default = ["HLA-A*02:01", "HLA-A*03:01", "HLA-B*07:02", "HLA-B*44:02", "HLA-C*07:02"]
+items = { type = "string" }
+
+[inputs.schema.properties.min_length]
+type = "integer"
+title = "Minimum Peptide Length (aa)"
+minimum = 8
+maximum = 15
+default = 8
+
+[inputs.schema.properties.max_length]
+type = "integer"
+title = "Maximum Peptide Length (aa)"
+minimum = 8
+maximum = 25
+default = 12
+
+[inputs.schema.properties.strong_binder_cutoff_nm]
+type = "number"
+title = "Strong Binder IC50 Cutoff (nM)"
+minimum = 1.0
+maximum = 500.0
+default = 50.0
+
+[[views]]
+id = "summary-metrics"
+kind = "metric_cards"
+title = "Cohort Presentation Metrics"
+data_pointer = "/summary_cards"
+
+[[views]]
+id = "length-dist"
+kind = "length_distribution"
+title = "Eluted Peptide Length Distribution"
+data_pointer = "/length_distribution"
+
+[[views]]
+id = "allele-enrichment"
+kind = "bar"
+title = "Strong Binders (<=50 nM) by HLA Allele"
+data_pointer = "/allele_counts"
+
+[[views]]
+id = "top-candidates"
+kind = "table"
+title = "Top Ranked Candidate Ligands"
+data_pointer = "/top_candidates"
