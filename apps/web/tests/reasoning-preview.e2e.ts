@@ -12,8 +12,8 @@ import { connectFreshWorkspace, expandOwningTurnProcess, newEnglishPage, writeCo
 const SUMMARY = `Next paragraph: ${'inspect the loaded context and pending tools '.repeat(8).trim()}`
 const DELTAS = ['First paragraph', `\nDetails\n\n\n${SUMMARY}`, '\nMore detail', '\n\nExpanded update']
 const UI_EXPECTED = fileURLToPath(new URL('./expected/reasoning-preview/running.expected.md', import.meta.url))
-/** Computed mask of the animated whale: the ui-chat package asset URL, whose `@` is percent-encoded. */
-const WHALE_MASK = /^url\("([^"]*\/plugins\/@deepseek-ai\/dsh-client-ui-chat\/assets\/running-whale%402x-[0-9a-f]{12}\.png)"\)$/
+/** Computed mask of the animated compass: the ui-chat package asset URL, whose `@` is percent-encoded. */
+const COMPASS_MASK = /^url\("([^"]*\/plugins\/@deepseek-ai\/dsh-client-ui-chat\/assets\/running-compass%402x-[0-9a-f]{12}\.png)"\)$/
 
 class PausedReasoningAdapter extends LlmAdapter {
   constructor(private readonly prefix: string) { super() }
@@ -71,16 +71,16 @@ it.each(['plain', 'signature'])('shows completed paragraph first lines with a ri
       const reasoning = page.locator('[data-variant="think"][data-state="running"]')
       await expandOwningTurnProcess(page, reasoning)
       await reasoning.waitFor()
-      const whale = page.locator('[data-chat-running] span[aria-hidden="true"]:has(> svg)')
-      const animatedWhale = whale.locator(':scope > span')
-      const restingWhale = whale.locator(':scope > svg')
-      await whale.waitFor()
-      expect(await whale.locator('animate').count()).toBe(0)
-      const expectStaticWhale = async () => {
-        await expect.poll(() => animatedWhale.isVisible()).toBe(false)
-        await expect.poll(() => restingWhale.isVisible()).toBe(true)
-        expect(await animatedWhale.evaluate(element => getComputedStyle(element).maskImage)).toBe('none')
-        const colors = await restingWhale.locator('path').evaluate((path) => {
+      const compass = page.locator('[data-chat-running] span[aria-hidden="true"]:has(> svg)')
+      const animatedCompass = compass.locator(':scope > span')
+      const restingCompass = compass.locator(':scope > svg')
+      await compass.waitFor()
+      expect(await compass.locator('animate').count()).toBe(0)
+      const expectStaticCompass = async () => {
+        await expect.poll(() => animatedCompass.isVisible()).toBe(false)
+        await expect.poll(() => restingCompass.isVisible()).toBe(true)
+        expect(await animatedCompass.evaluate(element => getComputedStyle(element).maskImage)).toBe('none')
+        const colors = await restingCompass.locator('path').evaluate((path) => {
           const probe = document.createElement('span')
           probe.style.cssText = 'color: Canvas; forced-color-adjust: none'
           document.body.append(probe)
@@ -100,26 +100,26 @@ it.each(['plain', 'signature'])('shows completed paragraph first lines with a ri
       }
       try {
         await page.emulateMedia({ reducedMotion: 'no-preference', forcedColors: 'none' })
-        await expect.poll(() => animatedWhale.isVisible()).toBe(true)
-        expect(await animatedWhale.evaluate(element => getComputedStyle(element).maskMode)).toBe('alpha')
-        const imageSize = await animatedWhale.evaluate(async (element, mask) => {
+        await expect.poll(() => animatedCompass.isVisible()).toBe(true)
+        expect(await animatedCompass.evaluate(element => getComputedStyle(element).maskMode)).toBe('alpha')
+        const imageSize = await animatedCompass.evaluate(async (element, mask) => {
           const source = getComputedStyle(element).maskImage.match(new RegExp(mask))?.[1]
-          if (source === undefined) throw new Error('Running whale mask must use the ui-chat package asset URL')
+          if (source === undefined) throw new Error('Running compass mask must use the ui-chat package asset URL')
           const image = new Image()
           image.src = source
           await image.decode()
           return [image.naturalWidth, image.naturalHeight]
-        }, WHALE_MASK.source)
+        }, COMPASS_MASK.source)
         expect(imageSize).toEqual([28, 28])
-        expect(await restingWhale.isVisible()).toBe(false)
-        const firstWhaleFrame = await whale.screenshot({ animations: 'allow' })
-        await expect.poll(async () => !(await whale.screenshot({ animations: 'allow' })).equals(firstWhaleFrame), {
+        expect(await restingCompass.isVisible()).toBe(false)
+        const firstCompassFrame = await compass.screenshot({ animations: 'allow' })
+        await expect.poll(async () => !(await compass.screenshot({ animations: 'allow' })).equals(firstCompassFrame), {
           timeout: 5000,
         }).toBe(true)
         await page.emulateMedia({ reducedMotion: 'reduce' })
-        await expectStaticWhale()
+        await expectStaticCompass()
         await page.emulateMedia({ reducedMotion: 'no-preference', forcedColors: 'active' })
-        await expectStaticWhale()
+        await expectStaticCompass()
       } finally {
         await page.emulateMedia({ reducedMotion: null, forcedColors: null })
       }
@@ -153,7 +153,7 @@ it.each(['plain', 'signature'])('shows completed paragraph first lines with a ri
       fourth.proceed.resolve(undefined)
       await settled
       await page.getByText('Done', { exact: true }).waitFor()
-      await whale.waitFor({ state: 'detached' })
+      await compass.waitFor({ state: 'detached' })
       expect(console.pageErrors).toEqual([])
       expect(console.warnings).toEqual([])
     } finally {
