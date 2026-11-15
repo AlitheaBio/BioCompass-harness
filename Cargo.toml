@@ -1,8 +1,6 @@
 [workspace]
 members = [
     "crates/core-traits",
-]
-exclude = [
     "crates/plugin-spec",
     "crates/data-engine",
 ]

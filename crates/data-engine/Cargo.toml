@@ -1,0 +1,21 @@
+[package]
+name = "biocompass-data-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Embedded DuckDB engine over immutable Parquet catalogs with SHA-256 verification and Grant row/*** sequence masking"
+
+[lints]
+workspace = true
+
+[dependencies]
+biocompass-core-traits.workspace = true
+duckdb.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
