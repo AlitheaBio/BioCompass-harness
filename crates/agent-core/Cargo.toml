@@ -1,0 +1,29 @@
+[package]
+name = "biocompass-agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+biocompass-core-traits.workspace = true
+biocompass-data-engine.workspace = true
+biocompass-node-runtime.workspace = true
+biocompass-plugin-spec.workspace = true
+chrono.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+biocompass-oci-runner.workspace = true
+tempfile.workspace = true

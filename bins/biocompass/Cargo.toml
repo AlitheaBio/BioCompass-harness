@@ -1,0 +1,41 @@
+[package]
+name = "biocompass"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "biocompass"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+biocompass-agent-core.workspace = true
+biocompass-core-traits.workspace = true
+biocompass-data-engine.workspace = true
+biocompass-node-runtime.workspace = true
+biocompass-oci-runner.workspace = true
+biocompass-plugin-spec.workspace = true
+chrono.workspace = true
+clap.workspace = true
+froglet-verify.workspace = true
+futures.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true

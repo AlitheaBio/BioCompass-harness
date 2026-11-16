@@ -149,11 +149,12 @@ Invoke `{plugin_id}` when the scientist asks to evaluate HLA class I presentatio
             files.insert(
                 "Dockerfile".into(),
                 r#"FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+ENV HOME=/tmp UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml main.py ./
-RUN uv sync --no-dev
+RUN uv sync --no-dev && chmod -R a+rX /app
 USER 65532:65532
-ENTRYPOINT ["uv", "run", "--offline", "python", "/app/main.py"]
+ENTRYPOINT ["/app/.venv/bin/python", "/app/main.py"]
 "#
                 .into(),
             );
@@ -174,26 +175,33 @@ dependencies = ["duckdb>=1.1.0"]
 from pathlib import Path
 import duckdb
 
-params = json.loads(Path("/in/params.json").read_text())
+params = json.loads(Path("/in/params.json").read_text(encoding="utf-8"))
 cohort_path = Path("/in/data/cohort.parquet")
-con = duckdb.connect()
+con = duckdb.connect(":memory:")
 
 min_len = int(params.get("min_length", 8))
 max_len = int(params.get("max_length", 12))
 
-rows = con.execute(
+allele_rows = con.execute(
     "SELECT hla_allele, COUNT(*) AS n FROM read_parquet(?) WHERE peptide_length BETWEEN ? AND ? GROUP BY 1 ORDER BY 2 DESC",
-    [str(cohort_path), min_len, max_len],
+    [cohort_path.as_posix(), min_len, max_len],
+).fetchall()
+
+len_rows = con.execute(
+    "SELECT peptide_length, COUNT(*) AS n FROM read_parquet(?) WHERE peptide_length BETWEEN ? AND ? GROUP BY 1 ORDER BY 1 ASC",
+    [cohort_path.as_posix(), min_len, max_len],
 ).fetchall()
 
 result = {
     "summary_cards": [
-        {"label": "Matched Peptides", "value": sum(r[1] for r in rows)},
-        {"label": "Alleles Observed", "value": len(rows)},
+        {"label": "Matched Peptides", "value": int(sum(r[1] for r in allele_rows))},
+        {"label": "Alleles Observed", "value": len(allele_rows)},
     ],
-    "allele_counts": [{"label": r[0], "value": r[1]} for r in rows],
+    "length_distribution": [{"label": f"{int(r[0])} aa", "length": int(r[0]), "value": int(r[1])} for r in len_rows],
+    "allele_counts": [{"label": str(r[0]), "value": int(r[1])} for r in allele_rows],
 }
-Path("/out/result.json").write_text(json.dumps(result, indent=2))
+Path("/out/result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+print(f"[python-uv] Wrote /out/result.json ({len(allele_rows)} alleles)", flush=True)
 "#
                 .into(),
             );
