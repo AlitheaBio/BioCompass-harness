@@ -47,9 +47,11 @@ function getBarValue(item: BarItem): number {
 export function ScientificViews({
   resultJson,
   views,
+  exposeTestIds = true,
 }: {
   resultJson: Record<string, unknown>;
   views: DeclarativeViewSpec[];
+  exposeTestIds?: boolean;
 }) {
   const effectiveViews: DeclarativeViewSpec[] =
     views.length > 0
@@ -82,7 +84,10 @@ export function ScientificViews({
         ];
 
   return (
-    <div className="sci-views-grid" data-testid="scientific-views">
+    <div
+      className="sci-views-grid"
+      data-testid={exposeTestIds ? "scientific-views" : undefined}
+    >
       {effectiveViews.map((view) => {
         const raw = resolveJsonPointer(resultJson, view.data_pointer);
         if (!Array.isArray(raw) || raw.length === 0) {
@@ -92,7 +97,11 @@ export function ScientificViews({
         if (view.kind === "metric_cards") {
           const cards = raw as MetricCardItem[];
           return (
-            <div key={view.id} className="sci-card sci-card-wide" data-testid={`view-${view.id}`}>
+            <div
+              key={view.id}
+              className="sci-card sci-card-wide"
+              data-testid={exposeTestIds ? `view-${view.id}` : undefined}
+            >
               <div className="sci-card-title">{view.title}</div>
               <div className="metric-strip">
                 {cards.map((c, idx) => (
@@ -114,7 +123,11 @@ export function ScientificViews({
           const svgHeight = bars.length * rowHeight + 16;
 
           return (
-            <div key={view.id} className="sci-card" data-testid={`view-${view.id}`}>
+            <div
+              key={view.id}
+              className="sci-card"
+              data-testid={exposeTestIds ? `view-${view.id}` : undefined}
+            >
               <div className="sci-card-title">{view.title}</div>
               <svg
                 viewBox={`0 0 ${svgWidth} ${svgHeight}`}
@@ -129,15 +142,15 @@ export function ScientificViews({
                   const barMaxW = 240;
                   const w = Math.max(3, (val / maxVal) * barMaxW);
                   const fill =
-                    view.kind === "length_distribution" ? "#4176e6" : "#f56e3d";
+                    view.kind === "length_distribution" ? "#3B6FD8" : "#E8612D";
                   return (
                     <g key={`${label}-${idx}`} transform={`translate(0, ${y})`}>
                       <text
                         x={4}
                         y={15}
-                        fill="var(--dsw-alias-label-secondary)"
+                        fill="var(--bc-text-muted)"
                         fontSize="11"
-                        fontFamily="var(--ds-font-family-code, ui-monospace, monospace)"
+                        fontFamily="var(--bc-font-mono)"
                       >
                         {label}
                       </text>
@@ -147,7 +160,7 @@ export function ScientificViews({
                         width={barMaxW}
                         height={14}
                         rx={4}
-                        fill="var(--dsw-alias-interactive-bg-hover)"
+                        fill="var(--bc-bg-subtle)"
                       />
                       <rect
                         x={135}
@@ -160,7 +173,7 @@ export function ScientificViews({
                       <text
                         x={135 + barMaxW + 10}
                         y={15}
-                        fill="var(--dsw-alias-label-primary)"
+                        fill="var(--bc-text)"
                         fontSize="11"
                         fontWeight="600"
                       >
@@ -180,7 +193,11 @@ export function ScientificViews({
           if (!firstRow) return null;
           const cols = Object.keys(firstRow);
           return (
-            <div key={view.id} className="sci-card sci-card-wide" data-testid={`view-${view.id}`}>
+            <div
+              key={view.id}
+              className="sci-card sci-card-wide"
+              data-testid={exposeTestIds ? `view-${view.id}` : undefined}
+            >
               <div className="sci-card-title">{view.title}</div>
               <div className="table-scroll">
                 <table className="data-table">

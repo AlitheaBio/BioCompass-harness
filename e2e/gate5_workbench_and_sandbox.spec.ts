@@ -134,6 +134,18 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await expect(page.getByTestId("receipt-verified-badge")).toHaveText(
       "SCHNORR CHAIN VALID",
     );
+    await expect(
+      page.getByTestId("module-window-alithea/hla-motif-enrichment"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("toolbar", { name: "Open module windows" }),
+    ).toBeVisible();
+
+    // 3b. Settings Menu: verify Appearance / Data Governance / Compute & Credits / Developer Studio modal
+    await page.getByTestId("nav-settings").click();
+    await expect(page.getByTestId("settings-modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("settings-modal")).toBeHidden();
 
     // 4. Sandboxed Custom Vite Plugin UI (<iframe sandbox="allow-scripts">) Exploit & SDK RPC Suite
     // Activate Partner Masked Grant to prove the sandboxed iframe also receives masked sequences
@@ -142,6 +154,9 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await page
       .getByTestId("plugin-card-alithea/hla-interactive-explorer")
       .click();
+    await expect(
+      page.getByTestId("module-window-alithea/hla-interactive-explorer"),
+    ).toBeVisible();
 
     const iframeEl = page.getByTestId("plugin-sandbox-iframe");
     await expect(iframeEl).toBeVisible();

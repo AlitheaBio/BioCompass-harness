@@ -128,13 +128,14 @@ impl AppState {
         // Extract embedded first-party plugins (`plugin.toml`, `SKILL.md`, `ui/dist/*`) into `data_dir/bundled-plugins`.
         let bundled_dir = root.join("bundled-plugins");
         extract_bundled_plugins(&bundled_dir)?;
-        load_plugins_from_parent(&bundled_dir, allow_local_dev_tags, &runtime).await?;
+        load_plugins_from_parent(&bundled_dir, allow_local_dev_tags, true, &runtime).await?;
 
         // Load user-created or scaffolded plugins from `data_dir/plugins`.
+        // Unpinned `:dev` skeletons are skipped with a warning unless `--allow-local-dev-tags` is set.
         let user_plugins_dir = root.join("plugins");
         std::fs::create_dir_all(&user_plugins_dir)
             .map_err(|e| CompassError::Storage(format!("create user plugins dir: {e}")))?;
-        load_plugins_from_parent(&user_plugins_dir, true, &runtime).await?;
+        load_plugins_from_parent(&user_plugins_dir, allow_local_dev_tags, false, &runtime).await?;
 
         let agent_cfg = AgentConfig {
             scaffold_root_dir: user_plugins_dir.clone(),
@@ -238,6 +239,7 @@ fn extract_bundled_plugins(dest_root: &Path) -> CompassResult<()> {
 async fn load_plugins_from_parent(
     parent: &Path,
     allow_local_dev_tags: bool,
+    fail_on_invalid: bool,
     runtime: &InProcessNodeRuntime,
 ) -> CompassResult<()> {
     if !parent.is_dir() {
@@ -251,9 +253,17 @@ async fn load_plugins_from_parent(
         if dir.is_dir() && dir.join("plugin.toml").is_file() {
             match LoadedPlugin::load_from_dir(&dir, allow_local_dev_tags) {
                 Ok(plugin) => {
-                    runtime.register_plugin(plugin).await?;
+                    if let Err(err) = runtime.register_plugin(plugin).await {
+                        if fail_on_invalid {
+                            return Err(err);
+                        }
+                        tracing::warn!("Skipping draft plugin {}: {}", dir.display(), err);
+                    }
                 }
                 Err(err) => {
+                    if fail_on_invalid {
+                        return Err(err);
+                    }
                     tracing::warn!("Skipping plugin directory {}: {}", dir.display(), err);
                 }
             }

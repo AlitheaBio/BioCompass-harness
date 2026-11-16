@@ -28,12 +28,14 @@ export function SandboxedPluginFrame({
   activeGrant,
   defaultCatalogId,
   latestPluginRun,
+  isFocused = true,
   onQuotePrepared,
 }: {
   plugin: PluginSummary;
   activeGrant: DatasetGrant;
   defaultCatalogId: string;
   latestPluginRun: RunRecord | null;
+  isFocused?: boolean;
   onQuotePrepared: (quote: RunQuote) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -113,16 +115,13 @@ export function SandboxedPluginFrame({
 
   return (
     <div className="sandbox-frame-shell">
-      <div className="sandbox-frame-bar">
-        <span className="dsw-tag dsw-tag-info">
-          &lt;iframe sandbox=&quot;allow-scripts&quot;&gt; · origin=&quot;null&quot;
-        </span>
-        <span className="dsw-tag">CSP: connect-src &apos;none&apos;</span>
-        <span className="mono dsw-caption">{plugin.ui_entry_url}</span>
-      </div>
       <iframe
         ref={iframeRef}
-        data-testid="plugin-sandbox-iframe"
+        data-testid={
+          isFocused
+            ? "plugin-sandbox-iframe"
+            : `plugin-sandbox-iframe-${plugin.manifest.id}`
+        }
         title={`${plugin.manifest.name} Sandboxed UI`}
         src={plugin.ui_entry_url}
         sandbox="allow-scripts"

@@ -20,28 +20,25 @@ import {
 } from "./api";
 import { BrandWordmark } from "./components/BrandWordmark";
 import {
-  FishLogo,
-  HeroFish,
-  IconChatLines,
-  IconCheckCircle,
+  FloatingWindowsLayer,
+  type ModuleWindowState,
+  type WindowTab,
+} from "./components/FloatingWindows";
+import {
+  CompassMark,
+  HeroCompass,
+  IconChat,
   IconClose,
-  IconCodeBrackets,
-  IconFolderOpen,
-  IconLayers,
-  IconMoon,
-  IconNewChat,
-  IconPanelLeft,
-  IconPanelRight,
-  IconPluginPinwheel,
+  IconDatabase,
+  IconModules,
   IconPlus,
-  IconSendArrow,
-  IconShield,
-  IconSun,
-  IconWarning,
+  IconSend,
+  IconSettings,
+  IconSidebar,
+  IconWindowOpen,
   RunningCompass,
-} from "./components/DswIcons";
-import { SandboxedPluginFrame } from "./components/SandboxedPluginFrame";
-import { ScientificViews } from "./components/ScientificViews";
+} from "./components/Icons";
+import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
 import {
   formatMilliAct,
   type CatalogManifest,
@@ -58,9 +55,7 @@ import {
   type SessionRecord,
 } from "./types";
 
-type ActiveTab = "workbench" | "catalogs" | "plugins" | "studio";
-
-const FROGLET_STAGE_NAMES = ["Descriptor", "Offer", "Quote", "Deal", "Receipt"] as const;
+type WorkspacePage = "workbench" | "plugins" | "catalogs";
 
 function defaultParamsForPlugin(plugin: PluginSummary): Record<string, unknown> {
   const props =
@@ -76,20 +71,32 @@ function defaultParamsForPlugin(plugin: PluginSummary): Record<string, unknown> 
   return out;
 }
 
+const SUGGESTED_PROMPTS = [
+  "Summarize strong HLA-A*02:01 binders across lung cohorts",
+  "Compare motif length distributions in tumor vs healthy tissue",
+  "Which modules are available in this workspace?",
+];
+
 export function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("workbench");
+  const [activePage, setActivePage] = useState<WorkspacePage>("workbench");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
-  const [rightbarOpen, setRightbarOpen] = useState<boolean>(false);
   const [heroHovering, setHeroHovering] = useState<boolean>(false);
-  const [heroForcedBlank, setHeroForcedBlank] = useState<boolean>(false);
+  const [moduleSearch, setModuleSearch] = useState<string>("");
+
   const [darkTheme, setDarkTheme] = useState<boolean>(() => {
     try {
-      return window.localStorage.getItem("biocompass-dsw-dark") === "1";
+      return window.localStorage.getItem("biocompass-theme") === "dark";
     } catch {
       return false;
     }
   });
 
+  // Settings modal state
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  const [scaffoldOutput, setScaffoldOutput] = useState<ScaffoldResult | null>(null);
+
+  // Core data & node state
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [grants, setGrants] = useState<DatasetGrant[]>([]);
   const [activeGrantId, setActiveGrantId] = useState<string>("");
@@ -97,19 +104,21 @@ export function App() {
   const [catalogResult, setCatalogResult] = useState<CatalogQueryResult | null>(null);
   const [catalogMaxIc50, setCatalogMaxIc50] = useState<number>(500);
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
-  const [selectedPluginId, setSelectedPluginId] = useState<string>("");
   const [ledger, setLedger] = useState<LedgerState | null>(null);
 
+  // Runs & verification state
   const [runs, setRuns] = useState<RunRecord[]>([]);
-  const [selectedRunId, setSelectedRunId] = useState<string>("");
-  const [selectedArtifactIdx, setSelectedArtifactIdx] = useState<number>(4);
   const [pendingQuote, setPendingQuote] = useState<RunQuote | null>(null);
   const [isConfirmingRun, setIsConfirmingRun] = useState<boolean>(false);
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
   const [verifyReport, setVerifyReport] = useState<FrogletVerifyReport | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
-  // Agent session state
+  // Floating module windows state (HLA-Compass window manager)
+  const [windows, setWindows] = useState<ModuleWindowState[]>([]);
+  const [zCounter, setZCounter] = useState<number>(10);
+
+  // Conversational session state
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>([]);
@@ -117,22 +126,28 @@ export function App() {
   const [streamingText, setStreamingText] = useState<string>("");
   const [chatBusy, setChatBusy] = useState<boolean>(false);
 
-  // Plugin Builder Studio state
-  const [studioTemplate, setStudioTemplate] = useState<string>("python-uv");
-  const [studioPluginId, setStudioPluginId] = useState<string>("alithea/custom-neoantigen-scorer");
-  const [studioName, setStudioName] = useState<string>("Custom Neoantigen Scorer");
-  const [studioIncludeUi, setStudioIncludeUi] = useState<boolean>(true);
-  const [scaffoldOutput, setScaffoldOutput] = useState<ScaffoldResult | null>(null);
-
-  // Sync DeepSeek Harness dark-theme attribute on <body>
+  // Sync theme attribute
   useEffect(() => {
-    document.body.toggleAttribute("data-ds-dark-theme", darkTheme);
+    document.body.setAttribute("data-theme", darkTheme ? "dark" : "light");
     try {
-      window.localStorage.setItem("biocompass-dsw-dark", darkTheme ? "1" : "0");
+      window.localStorage.setItem("biocompass-theme", darkTheme ? "dark" : "light");
     } catch {
-      // ignore storage quota errors
+      // ignore storage errors
     }
   }, [darkTheme]);
+
+  // Cmd/Ctrl + , shortcut to open Settings
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsSection("general");
+        setSettingsOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const activeGrant = useMemo<DatasetGrant | null>(() => {
     if (grants.length === 0) return null;
@@ -141,29 +156,71 @@ export function App() {
 
   const defaultCatalogId = catalogs[0]?.id ?? "alithea/hla-atlas-v2026.1";
 
-  const selectedRun = useMemo<RunRecord | null>(() => {
-    if (runs.length === 0) return null;
-    return runs.find((r) => r.run_id === selectedRunId) ?? runs[0] ?? null;
-  }, [runs, selectedRunId]);
+  const openOrFocusModuleWindow = useCallback(
+    (plugin: PluginSummary, preferredTab?: WindowTab) => {
+      setZCounter((prevZ) => {
+        const nextZ = prevZ + 1;
+        setWindows((prev) => {
+          const existing = prev.find((w) => w.pluginId === plugin.manifest.id);
+          if (existing) {
+            return prev.map((w) =>
+              w.id === existing.id
+                ? {
+                    ...w,
+                    minimized: false,
+                    z: nextZ,
+                    activeTab: preferredTab ?? w.activeTab,
+                  }
+                : w,
+            );
+          }
 
-  const selectedPlugin = useMemo<PluginSummary | null>(() => {
-    if (plugins.length === 0) return null;
-    return plugins.find((p) => p.manifest.id === selectedPluginId) ?? plugins[0] ?? null;
-  }, [plugins, selectedPluginId]);
+          const sidebarW = sidebarCollapsed ? 60 : 232;
+          const cascade = (prev.length % 4) * 24;
+          const w = Math.min(820, Math.max(540, window.innerWidth - sidebarW - 56));
+          const h = Math.min(560, Math.max(410, window.innerHeight - 130));
+          const baseX = Math.max(
+            sidebarW + 18,
+            Math.round(sidebarW + (window.innerWidth - sidebarW - w) / 2),
+          );
+          const baseY = 64;
 
-  const latestRunForSelectedPlugin = useMemo<RunRecord | null>(() => {
-    if (!selectedPlugin) return null;
-    return (
-      runs.find(
-        (r) => r.plugin_id === selectedPlugin.manifest.id && r.status === "succeeded",
-      ) ?? null
-    );
-  }, [runs, selectedPlugin]);
-
-  const selectedRunPlugin = useMemo(
-    () => plugins.find((p) => p.manifest.id === selectedRun?.plugin_id) ?? null,
-    [plugins, selectedRun],
+          const created: ModuleWindowState = {
+            id: `win-${plugin.manifest.id}`,
+            pluginId: plugin.manifest.id,
+            x: Math.min(window.innerWidth - w - 16, baseX + cascade),
+            y: Math.min(window.innerHeight - h - 56, baseY + cascade),
+            w,
+            h,
+            z: nextZ,
+            minimized: false,
+            maximized: false,
+            activeTab: preferredTab ?? (plugin.has_custom_ui ? "ui" : "run"),
+            params: defaultParamsForPlugin(plugin),
+          };
+          return [...prev, created];
+        });
+        return nextZ;
+      });
+    },
+    [sidebarCollapsed],
   );
+
+  const navigateToPage = (page: WorkspacePage) => {
+    setActivePage(page);
+    // Minimize open module windows into the bottom tray when switching top-level pages
+    // so the destination page (Chat, Modules grid, or Data table) is cleanly visible.
+    setWindows((prev) =>
+      prev.some((w) => !w.minimized)
+        ? prev.map((w) => ({ ...w, minimized: true }))
+        : prev,
+    );
+  };
+
+  const openSettings = (section: SettingsSection = "general") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  };
 
   // Initial bootstrap
   useEffect(() => {
@@ -184,21 +241,16 @@ export function App() {
         setActiveGrantId(initialGrant);
         setCatalogs(cList);
         setPlugins(pList);
-        const explorer = pList.find((p) => p.has_custom_ui) ?? pList[0];
-        if (explorer) {
-          setSelectedPluginId(explorer.manifest.id);
-        }
         setLedger(lState);
         setRuns(rList);
-        if (rList[0]) {
-          setSelectedRunId(rList[0].run_id);
-          setRightbarOpen(true);
-        }
 
         let currentSessions = sList;
         let activeSession = sList[0];
         if (!activeSession && initialGrant) {
-          activeSession = await createSession("Immunopeptidomics Exploration", initialGrant);
+          activeSession = await createSession(
+            "Immunopeptidomics Exploration",
+            initialGrant,
+          );
           currentSessions = [activeSession];
         }
         setSessions(currentSessions);
@@ -213,7 +265,7 @@ export function App() {
     })();
   }, []);
 
-  // Re-query catalog automatically whenever activeGrant or catalogMaxIc50 changes
+  // Re-query catalog whenever activeGrant or IC50 threshold changes
   useEffect(() => {
     if (!activeGrant || catalogs.length === 0) return;
     const catId = catalogs[0]?.id;
@@ -241,8 +293,7 @@ export function App() {
       setSession(created);
       setSessionEvents([]);
       setStreamingText("");
-      setHeroForcedBlank(true);
-      setActiveTab("workbench");
+      navigateToPage("workbench");
     } catch (err: unknown) {
       setErrorBanner(err instanceof Error ? err.message : String(err));
     }
@@ -251,10 +302,9 @@ export function App() {
   const handleSelectSession = async (target: SessionRecord): Promise<void> => {
     try {
       setSession(target);
-      setActiveTab("workbench");
+      navigateToPage("workbench");
       const evs = await fetchSessionEvents(target.session_id);
       setSessionEvents(evs);
-      setHeroForcedBlank(evs.length === 0);
     } catch (err: unknown) {
       setErrorBanner(err instanceof Error ? err.message : String(err));
     }
@@ -272,18 +322,29 @@ export function App() {
     }
   };
 
-  const handleQuotePrepared = useCallback((quote: RunQuote) => {
-    setPendingQuote(quote);
-    setVerifyReport(null);
-    setErrorBanner(null);
-  }, []);
+  const handleQuotePrepared = useCallback(
+    (quote: RunQuote) => {
+      setPendingQuote(quote);
+      setVerifyReport(null);
+      setErrorBanner(null);
+      const targetPlugin = plugins.find((p) => p.manifest.id === quote.plugin_id);
+      if (targetPlugin) {
+        openOrFocusModuleWindow(targetPlugin);
+      }
+    },
+    [plugins, openOrFocusModuleWindow],
+  );
 
-  const handleQuickPrepare = async (plugin: PluginSummary): Promise<void> => {
+  const handlePreparePluginRun = async (
+    plugin: PluginSummary,
+    params?: Record<string, unknown>,
+  ): Promise<void> => {
     try {
       setErrorBanner(null);
+      openOrFocusModuleWindow(plugin);
       const quote = await prepareRun({
         plugin_id: plugin.manifest.id,
-        params: defaultParamsForPlugin(plugin),
+        params: params ?? defaultParamsForPlugin(plugin),
         grant_id: activeGrant?.grant_id,
         session_id: session?.session_id,
       });
@@ -297,13 +358,21 @@ export function App() {
     if (!pendingQuote || isConfirmingRun) return;
     const quoteToRun = pendingQuote;
     setIsConfirmingRun(true);
-    setHeroForcedBlank(false);
-    setRightbarOpen(true);
     setErrorBanner(null);
     setVerifyReport(null);
     setLiveLogs([
-      `[host] Confirming Froglet Quote ${quoteToRun.run_id} and dispatching hardened OCI container...`,
+      `[host] Dispatching OCI container for ${quoteToRun.plugin_id} (${quoteToRun.run_id})...`,
     ]);
+
+    // Switch standard parameter windows directly to Results so live logs & charts appear seamlessly;
+    // keep custom interactive UI windows on their "ui" tab so postMessage updates stay live.
+    setWindows((prev) =>
+      prev.map((w) =>
+        w.pluginId === quoteToRun.plugin_id && w.activeTab !== "ui"
+          ? { ...w, minimized: false, activeTab: "results" }
+          : w,
+      ),
+    );
 
     const unsubscribe = subscribeRunLogs(quoteToRun.run_id, (ev) => {
       setLiveLogs((prev) => [...prev, `[${ev.stream}] ${ev.line}`]);
@@ -317,8 +386,6 @@ export function App() {
         fetchLedger(),
       ]);
       setRuns(updatedRuns);
-      setSelectedRunId(completed.run_id);
-      setSelectedArtifactIdx(Math.max(0, completed.froglet_chain.length - 1));
       setLedger(updatedLedger);
       if (completed.logs.length > 0) {
         setLiveLogs(completed.logs);
@@ -335,16 +402,21 @@ export function App() {
     }
   };
 
-  const handleReverifyReceipt = async (tamperOneByte: boolean): Promise<void> => {
-    if (!selectedRun || selectedRun.froglet_chain.length === 0) return;
+  const handleReverifyReceipt = async (
+    run: RunRecord,
+    tamperOneByte: boolean,
+  ): Promise<void> => {
+    if (run.froglet_chain.length === 0) return;
     const chainCopy = JSON.parse(
-      JSON.stringify(selectedRun.froglet_chain),
+      JSON.stringify(run.froglet_chain),
     ) as Record<string, unknown>[];
 
     if (tamperOneByte) {
       const receiptDoc = chainCopy[chainCopy.length - 1];
       const payload =
-        receiptDoc && typeof receiptDoc["payload"] === "object" && receiptDoc["payload"] !== null
+        receiptDoc &&
+        typeof receiptDoc["payload"] === "object" &&
+        receiptDoc["payload"] !== null
           ? (receiptDoc["payload"] as Record<string, unknown>)
           : null;
       if (payload && typeof payload["result_hash"] === "string") {
@@ -352,7 +424,8 @@ export function App() {
         payload["result_hash"] = (orig.startsWith("0") ? "f" : "0") + orig.slice(1);
       } else if (receiptDoc && typeof receiptDoc["signature"] === "string") {
         const origSig = receiptDoc["signature"];
-        receiptDoc["signature"] = (origSig.startsWith("0") ? "f" : "0") + origSig.slice(1);
+        receiptDoc["signature"] =
+          (origSig.startsWith("0") ? "f" : "0") + origSig.slice(1);
       }
     }
     const report = await verifyFrogletChain(chainCopy);
@@ -363,7 +436,6 @@ export function App() {
     const msg = rawMsg.trim();
     if (!session || !msg || chatBusy) return;
     setChatInput("");
-    setHeroForcedBlank(false);
     setChatBusy(true);
     setStreamingText("");
     setErrorBanner(null);
@@ -373,7 +445,7 @@ export function App() {
         if (ev.type === "text_delta" && typeof ev.data === "string") {
           setStreamingText((prev) => prev + ev.data);
         } else if (ev.type === "run_prepared" && ev.data) {
-          setPendingQuote(ev.data as RunQuote);
+          handleQuotePrepared(ev.data as RunQuote);
         } else if (ev.type === "error" && typeof ev.data === "string") {
           setErrorBanner(ev.data);
         }
@@ -388,21 +460,15 @@ export function App() {
     }
   };
 
-  const handleChatSubmit = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
-    await submitChatPrompt(chatInput);
-  };
-
-  const handleScaffoldSubmit = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
+  const handleScaffoldModule = async (payload: {
+    template: string;
+    plugin_id: string;
+    display_name: string;
+    include_vite_ui: boolean;
+  }): Promise<void> => {
     try {
       setErrorBanner(null);
-      const res = await scaffoldPlugin({
-        template: studioTemplate,
-        plugin_id: studioPluginId,
-        display_name: studioName,
-        include_vite_ui: studioIncludeUi,
-      });
+      const res = await scaffoldPlugin(payload);
       setScaffoldOutput(res);
       const updatedPlugins = await fetchPlugins();
       setPlugins(updatedPlugins);
@@ -411,77 +477,109 @@ export function App() {
     }
   };
 
-  const isHeroPhase =
-    activeTab === "workbench" &&
-    sessionEvents.length === 0 &&
-    !streamingText &&
-    !chatBusy &&
-    (runs.length === 0 || heroForcedBlank);
+  // Window manager callbacks
+  const handleFocusWindow = useCallback((winId: string) => {
+    setZCounter((prevZ) => {
+      const nextZ = prevZ + 1;
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === winId ? { ...w, minimized: false, z: nextZ } : w,
+        ),
+      );
+      return nextZ;
+    });
+  }, []);
 
-  const headerTitle = useMemo(() => {
-    if (activeTab === "plugins") return "Plugins";
-    if (activeTab === "catalogs") return "Data Catalogs";
-    if (activeTab === "studio") return "Plugin Studio";
-    if (isHeroPhase) return "";
-    return session?.title ?? "Immunopeptidomics Exploration";
-  }, [activeTab, isHeroPhase, session]);
+  const handleMoveResizeWindow = useCallback(
+    (
+      winId: string,
+      patch: Partial<Pick<ModuleWindowState, "x" | "y" | "w" | "h">>,
+    ) => {
+      setWindows((prev) =>
+        prev.map((w) => (w.id === winId ? { ...w, ...patch } : w)),
+      );
+    },
+    [],
+  );
 
-  const renderApprovalPanel = () => {
-    if (!pendingQuote) return null;
-    return (
-      <section className="dsh-approval-panel" data-testid="pending-quote-banner">
-        <div className="dsh-approval-strip">
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <IconWarning size={15} />
-            Two-Step Froglet Run Consent Required
-          </span>
-          <span className="mono">{formatMilliAct(pendingQuote.estimated_cost_act)}</span>
-        </div>
-        <div className="dsh-approval-body">
-          <div className="dsh-approval-headline">
-            Execute <span className="mono">{pendingQuote.plugin_id}</span>@{pendingQuote.plugin_version}
-          </div>
-          <div className="dsh-approval-meta">
-            Run <span className="mono">{pendingQuote.run_id}</span> · Image{" "}
-            <span className="mono">{pendingQuote.image_ref.slice(0, 68)}...</span>
-          </div>
-          <div className="dsh-approval-meta">
-            Grant: <strong>{pendingQuote.dataset_grant_summary ?? "None"}</strong> · workload_hash{" "}
-            <span className="mono">{pendingQuote.workload_hash.slice(0, 18)}...</span>
-          </div>
-        </div>
-        <div className="dsh-approval-actions">
-          <button
-            type="button"
-            data-testid="cancel-quote-btn"
-            className="dsw-btn"
-            disabled={isConfirmingRun}
-            onClick={() => setPendingQuote(null)}
-          >
-            Dismiss
-          </button>
-          <button
-            type="button"
-            data-testid="confirm-run-btn"
-            className="dsw-btn dsw-btn-primary"
-            disabled={isConfirmingRun}
-            onClick={() => void handleConfirmPendingRun()}
-          >
-            {isConfirmingRun
-              ? "Running Hardened OCI Container..."
-              : `Approve & Run (${formatMilliAct(pendingQuote.estimated_cost_act)})`}
-          </button>
-        </div>
-      </section>
+  const handleToggleMinimize = useCallback((winId: string) => {
+    setZCounter((prevZ) => {
+      const nextZ = prevZ + 1;
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === winId
+            ? { ...w, minimized: !w.minimized, z: w.minimized ? nextZ : w.z }
+            : w,
+        ),
+      );
+      return nextZ;
+    });
+  }, []);
+
+  const handleToggleMaximize = useCallback((winId: string) => {
+    setWindows((prev) =>
+      prev.map((w) =>
+        w.id === winId ? { ...w, maximized: !w.maximized, minimized: false } : w,
+      ),
     );
-  };
+  }, []);
 
-  const renderInputCard = () => (
-    <form className="dsh-input-card" onSubmit={(e) => void handleChatSubmit(e)}>
+  const handleCloseWindow = useCallback((winId: string) => {
+    setWindows((prev) => prev.filter((w) => w.id !== winId));
+  }, []);
+
+  const handleChangeWindowTab = useCallback((winId: string, tab: WindowTab) => {
+    setWindows((prev) =>
+      prev.map((w) => (w.id === winId ? { ...w, activeTab: tab } : w)),
+    );
+  }, []);
+
+  const handleUpdateWindowParam = useCallback(
+    (winId: string, key: string, value: unknown) => {
+      setWindows((prev) =>
+        prev.map((w) =>
+          w.id === winId
+            ? { ...w, params: { ...w.params, [key]: value } }
+            : w,
+        ),
+      );
+    },
+    [],
+  );
+
+  const filteredPlugins = useMemo(() => {
+    const q = moduleSearch.trim().toLowerCase();
+    if (!q) return plugins;
+    return plugins.filter(
+      (p) =>
+        p.manifest.name.toLowerCase().includes(q) ||
+        p.manifest.description.toLowerCase().includes(q) ||
+        p.manifest.category.toLowerCase().includes(q),
+    );
+  }, [plugins, moduleSearch]);
+
+  const isEmptyChat =
+    sessionEvents.length === 0 && !streamingText && !chatBusy && runs.length === 0;
+
+  const pageTitle =
+    activePage === "plugins"
+      ? "Modules"
+      : activePage === "catalogs"
+        ? "Data"
+        : session?.title ?? "Chat";
+
+  const renderComposer = () => (
+    <form
+      className="bc-composer"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submitChatPrompt(chatInput);
+      }}
+    >
       <textarea
-        className="dsh-textarea"
-        rows={isHeroPhase ? 2 : 1}
-        placeholder="Ask BioCompass to explore HLA cohorts, query DuckDB catalogs, or prepare an OCI plugin run..."
+        className="bc-composer-textarea"
+        rows={2}
+        placeholder="Ask about HLA cohorts, peptide motifs, or launch an analysis module..."
         value={chatInput}
         onChange={(e) => setChatInput(e.target.value)}
         onKeyDown={(e) => {
@@ -491,300 +589,235 @@ export function App() {
           }
         }}
       />
-      <div className="dsh-input-toolbar">
-        <div className="dsh-input-tools">
-          <button
-            type="button"
-            className="dsh-plus-btn"
-            title="Browse OCI Bio Plugins"
-            onClick={() => setActiveTab("plugins")}
-          >
-            <IconPlus size={14} />
-          </button>
-          <button
-            type="button"
-            className="dsh-mode-chip"
-            onClick={() => setActiveTab("catalogs")}
-          >
-            <IconLayers size={14} />
-            <span>{defaultCatalogId}</span>
-          </button>
-          <span className="dsw-tag">
-            {activeGrant?.mask_peptide_sequences ? "Masked ('***')" : "Unmasked IUPAC"}
-          </span>
-        </div>
-
-        <div className="dsh-input-trailing">
-          <span className="dsh-model-label">
-            {health?.llm_configured ? health.llm_model ?? "LLM Connected" : "SKILL.md Agent"}
-          </span>
-          <button
-            type="submit"
-            className="dsh-send-circle"
-            aria-label="Send message"
-            disabled={chatBusy || !chatInput.trim()}
-          >
-            <IconSendArrow size={15} />
-          </button>
-        </div>
+      <div className="bc-composer-bar">
+        <button
+          type="button"
+          className="bc-btn bc-btn-ghost"
+          onClick={() => navigateToPage("plugins")}
+        >
+          <IconModules size={14} />
+          <span>Browse Modules ({plugins.length})</span>
+        </button>
+        <button
+          type="submit"
+          className="bc-send-btn"
+          aria-label="Send message"
+          disabled={chatBusy || !chatInput.trim()}
+        >
+          {chatBusy ? <RunningCompass size={16} /> : <IconSend size={15} />}
+        </button>
       </div>
     </form>
   );
 
-  const inspectedChainDoc = useMemo(() => {
-    if (!selectedRun || selectedRun.froglet_chain.length === 0) return null;
-    const clampedIdx = Math.min(
-      Math.max(0, selectedArtifactIdx),
-      selectedRun.froglet_chain.length - 1,
-    );
-    return selectedRun.froglet_chain[clampedIdx] ?? selectedRun.froglet_receipt;
-  }, [selectedRun, selectedArtifactIdx]);
-
   return (
-    <div
-      className="dsh-frame"
-      data-sidebar-collapsed={String(sidebarCollapsed)}
-      data-rightbar-open={String(rightbarOpen)}
-    >
-      {/* ====================================================================
-          Column 1: Left Collapsible Sidebar (DeepSeek Harness SidebarRoot)
-         ==================================================================== */}
-      <aside className="dsh-sidebar" data-collapsed={String(sidebarCollapsed)}>
-        <div className="dsh-sidebar-top">
-          {!sidebarCollapsed ? (
-            <BrandWordmark size={23} />
-          ) : (
-            <span data-testid="brand-wordmark" style={{ display: "inline-flex" }}>
-              <FishLogo size={24} />
-            </span>
-          )}
+    <div className="bc-shell">
+      {/* ==================== LEFT SIDEBAR ==================== */}
+      <aside className="bc-sidebar" data-collapsed={String(sidebarCollapsed)}>
+        <div className="bc-sidebar-top">
           <button
             type="button"
-            className="dsh-icon-btn"
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setSidebarCollapsed((v) => !v)}
+            className="bc-brand-btn"
+            onClick={() => navigateToPage("workbench")}
+            title="BioCompass Home"
           >
-            <IconPanelLeft size={16} />
+            {sidebarCollapsed ? <CompassMark size={24} /> : <BrandWordmark size={22} />}
           </button>
+
+          {!sidebarCollapsed && (
+            <button
+              type="button"
+              className="bc-icon-btn"
+              aria-label="Collapse sidebar"
+              onClick={() => setSidebarCollapsed(true)}
+            >
+              <IconSidebar size={16} />
+            </button>
+          )}
         </div>
 
         <button
           type="button"
-          className="dsh-new-session-btn"
-          title="New Session"
+          className="bc-new-chat-btn"
           onClick={() => void handleNewSession()}
+          title="New Chat"
         >
-          <IconNewChat size={16} />
-          {!sidebarCollapsed && <span>New Session</span>}
+          <IconPlus size={15} />
+          {!sidebarCollapsed && <span>New Chat</span>}
         </button>
 
-        <nav className="dsh-panel-list" aria-label="Primary navigation">
+        <nav className="bc-nav-list" aria-label="Workspace navigation">
           <button
             type="button"
             data-testid="nav-workbench"
-            className="dsh-panel-row"
-            data-active={String(activeTab === "workbench")}
-            title="Conversation & Workbench"
-            onClick={() => setActiveTab("workbench")}
+            className="bc-nav-item"
+            data-active={String(activePage === "workbench")}
+            onClick={() => navigateToPage("workbench")}
+            title="Chat"
           >
-            <IconChatLines size={16} />
-            {!sidebarCollapsed && <span>Conversation</span>}
+            <span className="bc-nav-item-left">
+              <IconChat size={16} />
+              {!sidebarCollapsed && <span>Chat</span>}
+            </span>
           </button>
 
           <button
             type="button"
             data-testid="nav-plugins"
-            className="dsh-panel-row"
-            data-active={String(activeTab === "plugins")}
-            title="Plugins"
-            onClick={() => setActiveTab("plugins")}
+            className="bc-nav-item"
+            data-active={String(activePage === "plugins")}
+            onClick={() => navigateToPage("plugins")}
+            title="Modules"
           >
-            <IconPluginPinwheel size={16} />
+            <span className="bc-nav-item-left">
+              <IconModules size={16} />
+              {!sidebarCollapsed && <span>Modules</span>}
+            </span>
             {!sidebarCollapsed && (
-              <>
-                <span>Plugins</span>
-                <span className="dsh-panel-badge">{plugins.length}</span>
-              </>
+              <span className="bc-caption">{plugins.length}</span>
             )}
           </button>
 
           <button
             type="button"
             data-testid="nav-catalogs"
-            className="dsh-panel-row"
-            data-active={String(activeTab === "catalogs")}
-            title="Data Catalogs (DuckDB)"
-            onClick={() => setActiveTab("catalogs")}
+            className="bc-nav-item"
+            data-active={String(activePage === "catalogs")}
+            onClick={() => navigateToPage("catalogs")}
+            title="Data"
           >
-            <IconLayers size={16} />
-            {!sidebarCollapsed && <span>Data Catalogs</span>}
-          </button>
-
-          <button
-            type="button"
-            data-testid="nav-studio"
-            className="dsh-panel-row"
-            data-active={String(activeTab === "studio")}
-            title="Plugin Studio"
-            onClick={() => setActiveTab("studio")}
-          >
-            <IconCodeBrackets size={16} />
-            {!sidebarCollapsed && <span>Plugin Studio</span>}
+            <span className="bc-nav-item-left">
+              <IconDatabase size={16} />
+              {!sidebarCollapsed && <span>Data</span>}
+            </span>
           </button>
         </nav>
 
         {!sidebarCollapsed && (
-          <div className="dsh-sidebar-scroll">
-            <div>
-              <div className="dsh-section-label">
-                <IconFolderOpen size={14} />
-                <span>Immunopeptidomics Atlas</span>
-              </div>
-              <div className="dsh-tree-list">
-                {sessions.map((s) => (
-                  <button
-                    key={s.session_id}
-                    type="button"
-                    className="dsh-tree-row"
-                    data-active={String(
-                      activeTab === "workbench" && session?.session_id === s.session_id,
-                    )}
-                    onClick={() => void handleSelectSession(s)}
-                  >
-                    <IconChatLines size={14} />
-                    <span className="dsh-tree-row-label">{s.title}</span>
-                  </button>
-                ))}
-              </div>
+          <>
+            <div className="bc-section-label">Recent Chats</div>
+            <div className="bc-sessions-scroll">
+              {sessions.map((s) => (
+                <button
+                  key={s.session_id}
+                  type="button"
+                  className="bc-session-btn"
+                  data-active={String(
+                    activePage === "workbench" && session?.session_id === s.session_id,
+                  )}
+                  onClick={() => void handleSelectSession(s)}
+                >
+                  {s.title}
+                </button>
+              ))}
             </div>
-
-            {runs.length > 0 && (
-              <div>
-                <div className="dsh-section-label">
-                  <span>Verifiable OCI Runs</span>
-                </div>
-                <div className="dsh-tree-list">
-                  {runs.slice(0, 6).map((r) => (
-                    <button
-                      key={r.run_id}
-                      type="button"
-                      className="dsh-tree-row"
-                      data-active={String(selectedRun?.run_id === r.run_id && rightbarOpen)}
-                      onClick={() => {
-                        setSelectedRunId(r.run_id);
-                        setVerifyReport(null);
-                        setRightbarOpen(true);
-                      }}
-                    >
-                      <span
-                        className={`dsh-dot ${r.receipt_verified ? "" : "dsh-dot-warn"}`}
-                      />
-                      <span className="dsh-tree-row-label">
-                        {r.plugin_id.replace("alithea/", "")}
-                      </span>
-                      <span className="dsw-caption mono">
-                        {formatMilliAct(r.quote.estimated_cost_act)}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+          </>
         )}
 
-        <div className="dsh-sidebar-footer">
+        <div className="bc-sidebar-footer">
           <div
-            className="dsh-health-pill"
+            className="bc-health-row"
             data-testid="health-pill"
-            title={health ? `${health.container_engine} · ${health.node_id}` : "Checking node"}
+            title={
+              health
+                ? `Engine: ${health.container_engine} · Node: ${health.node_id}`
+                : "Connecting..."
+            }
           >
-            <span className="dsh-dot" />
-            {!sidebarCollapsed ? (
-              <span>
-                {health ? `${health.container_engine} · ${health.node_id}` : "connecting..."}
-              </span>
-            ) : (
-              <span style={{ fontSize: 10 }}>
-                {health ? health.container_engine : "..."}
+            <span className="bc-status-dot" />
+            {!sidebarCollapsed && (
+              <span className="mono">
+                {health ? `Local · ${health.container_engine}` : "Connecting..."}
               </span>
             )}
           </div>
 
           <button
             type="button"
-            className="dsh-icon-btn"
-            title={darkTheme ? "Switch to Light theme" : "Switch to Dark theme"}
-            onClick={() => setDarkTheme((d) => !d)}
+            data-testid="nav-settings"
+            className="bc-nav-item"
+            onClick={() => openSettings("general")}
+            title="Settings (⌘,)"
           >
-            {darkTheme ? <IconSun size={16} /> : <IconMoon size={16} />}
+            <span className="bc-nav-item-left">
+              <IconSettings size={16} />
+              {!sidebarCollapsed && <span>Settings</span>}
+            </span>
           </button>
         </div>
       </aside>
 
-      {/* ====================================================================
-          Column 2: Center Surface (Conversation Hero / Stream / Entry Pages)
-         ==================================================================== */}
-      <main className="dsh-center">
-        <header className="dsh-header" data-blank={String(isHeroPhase)}>
-          <div className="dsh-header-leading">
-            {headerTitle && <span className="dsh-header-title">{headerTitle}</span>}
+      {/* ==================== MAIN WORKSPACE ==================== */}
+      <main className="bc-main">
+        {/* Slim Logical Top Header */}
+        <header className="bc-topbar">
+          <div className="bc-topbar-left">
+            {sidebarCollapsed && (
+              <button
+                type="button"
+                className="bc-icon-btn"
+                aria-label="Expand sidebar"
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <IconSidebar size={16} />
+              </button>
+            )}
+            <div className="bc-breadcrumb">
+              <span className="bc-breadcrumb-root">Workspace</span>
+              <span className="bc-breadcrumb-sep">/</span>
+              <span className="bc-breadcrumb-current">{pageTitle}</span>
+            </div>
           </div>
 
-          <div className="dsh-header-utilities">
-            <div className="dsh-grant-chip" title="Active DuckDB DatasetGrant">
-              <IconShield size={14} />
-              <select
-                data-testid="grant-select"
-                className="dsh-grant-select"
-                aria-label="Data Grant"
-                value={activeGrant?.grant_id ?? ""}
-                onChange={(e) => void handleGrantChange(e.target.value)}
-              >
-                {grants.map((g) => (
-                  <option key={g.grant_id} value={g.grant_id}>
-                    {g.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="dsh-act-pill" data-testid="act-balance">
-              {ledger ? ledger.available_display : "— ACT"}
-            </div>
+          <div className="bc-topbar-right">
+            {grants.length > 0 && (
+              <div className="bc-grant-pill-wrap" title="Active Data Access Grant">
+                <IconDatabase size={13} />
+                <select
+                  aria-label="Active Data Grant"
+                  data-testid="grant-select"
+                  className="bc-grant-select"
+                  value={activeGrant?.grant_id ?? ""}
+                  onChange={(e) => void handleGrantChange(e.target.value)}
+                >
+                  {grants.map((g) => (
+                    <option key={g.grant_id} value={g.grant_id}>
+                      {g.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <button
               type="button"
-              className="dsh-inspector-toggle"
-              data-active={String(rightbarOpen)}
-              onClick={() => setRightbarOpen((o) => !o)}
+              className="bc-credit-pill mono"
+              data-testid="act-balance"
+              onClick={() => openSettings("compute")}
+              title="View ACT Credit Ledger"
             >
-              <IconPanelRight size={15} />
-              <span>Inspector</span>
-              {runs.length > 0 && <span className="dsh-dot" />}
+              {ledger?.available_display ?? "0.00 ACT"}
+            </button>
+
+            <button
+              type="button"
+              className="bc-icon-btn"
+              aria-label="Open Settings"
+              onClick={() => openSettings("general")}
+              title="Settings (⌘,)"
+            >
+              <IconSettings size={16} />
             </button>
           </div>
         </header>
 
         {errorBanner && (
-          <div
-            data-testid="error-banner"
-            style={{
-              margin: "8px 24px 0",
-              padding: "10px 14px",
-              borderRadius: 12,
-              background: "var(--dsw-alias-state-error-tertiary)",
-              color: "var(--dsw-alias-state-error-primary)",
-              fontSize: 13,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
+          <div className="bc-error-banner" role="alert">
             <span>{errorBanner}</span>
             <button
               type="button"
-              className="dsh-icon-btn"
+              className="bc-icon-btn"
+              aria-label="Dismiss error"
               onClick={() => setErrorBanner(null)}
             >
               <IconClose size={14} />
@@ -792,365 +825,267 @@ export function App() {
           </div>
         )}
 
-        {/* ------------------ CONVERSATION / WORKBENCH VIEW ------------------ */}
-        {activeTab === "workbench" && (
-          <>
-            <div className="dsh-conversation-scroll" data-hero={String(isHeroPhase)}>
-              {isHeroPhase ? (
-                <div className="dsh-hero-stack">
-                  <div className="dsh-hero-headline">
-                    <span
-                      className="dsh-hero-fish-hitbox"
-                      onPointerEnter={() => setHeroHovering(true)}
-                      onPointerLeave={() => setHeroHovering(false)}
-                    >
-                      <HeroFish hovering={heroHovering} />
-                    </span>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      <span>What would you like to explore?</span>
-                      <span className="dsh-preview-badge">froglet/v1</span>
-                    </span>
+        {/* ------------------ PAGE 1: CHAT ------------------ */}
+        {activePage === "workbench" && (
+          <div className="bc-chat-layout">
+            <div className="bc-chat-scroll">
+              {isEmptyChat ? (
+                <div className="bc-hero">
+                  <div
+                    className="bc-hero-heading"
+                    onMouseEnter={() => setHeroHovering(true)}
+                    onMouseLeave={() => setHeroHovering(false)}
+                  >
+                    <HeroCompass hovering={heroHovering} />
+                    <h1 className="bc-hero-title">What would you like to explore?</h1>
+                    <p className="bc-hero-sub">
+                      Query governed HLA immunopeptidomics cohorts or open a computational
+                      module in a floating window.
+                    </p>
                   </div>
 
-                  <div className="dsh-hero-workspace-row">
-                    <button
-                      type="button"
-                      className="dsh-workspace-chip"
-                      onClick={() => setActiveTab("catalogs")}
-                    >
-                      <IconFolderOpen size={16} />
-                      <span>{defaultCatalogId}</span>
-                    </button>
-                    <span className="dsw-caption">
-                      Hardened rootless OCI · BIP340 Schnorr receipts
-                    </span>
-                  </div>
+                  <div className="bc-composer-wrap">{renderComposer()}</div>
 
-                  {renderApprovalPanel()}
-                  {renderInputCard()}
+                  {plugins.length > 0 && (
+                    <div className="bc-starter-section">
+                      <div className="bc-section-label" style={{ paddingLeft: 2 }}>
+                        Quick-Launch Modules
+                      </div>
+                      <div className="bc-starter-grid">
+                        {plugins.map((p) => (
+                          <button
+                            key={p.manifest.id}
+                            type="button"
+                            data-testid={`quick-prepare-btn-${p.manifest.id}`}
+                            className="bc-starter-card"
+                            onClick={() => void handlePreparePluginRun(p)}
+                          >
+                            <div>
+                              <div className="bc-starter-title">{p.manifest.name}</div>
+                              <div className="bc-starter-desc">
+                                {p.has_custom_ui
+                                  ? "Interactive window + cohort hot-spots"
+                                  : "Containerized analysis · charts & CSV"}
+                              </div>
+                            </div>
+                            <IconWindowOpen size={16} />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-                  <div className="dsh-starter-pills">
-                    {plugins.map((p) => (
+                  <div className="bc-prompt-pills">
+                    {SUGGESTED_PROMPTS.map((prompt) => (
                       <button
-                        key={p.manifest.id}
+                        key={prompt}
                         type="button"
-                        data-testid={`quick-prepare-btn-${p.manifest.id}`}
-                        className="dsh-starter-pill"
-                        onClick={() => void handleQuickPrepare(p)}
+                        className="bc-prompt-pill"
+                        onClick={() => void submitChatPrompt(prompt)}
                       >
-                        <IconPluginPinwheel size={15} />
-                        <span>Run {p.manifest.name}</span>
-                        <span className="dsh-starter-cost">
-                          {formatMilliAct(p.manifest.price_milli_act)}
-                        </span>
+                        {prompt}
                       </button>
                     ))}
-                    <button
-                      type="button"
-                      className="dsh-starter-pill"
-                      onClick={() =>
-                        void submitChatPrompt(
-                          "Query strong HLA-A*02:01 peptide binders in our active cohort.",
-                        )
-                      }
-                    >
-                      <span>Explore HLA-A*02:01 binders</span>
-                    </button>
                   </div>
                 </div>
               ) : (
-                <div className="dsh-chat-stream" data-testid="chat-feed">
-                  <div className="dsh-quick-bar">
-                    <span className="dsw-caption" style={{ marginRight: 4 }}>
-                      Quick Prepare OCI Plugin:
-                    </span>
-                    {plugins.map((p) => (
-                      <button
-                        key={p.manifest.id}
-                        type="button"
-                        data-testid={`quick-prepare-btn-${p.manifest.id}`}
-                        className="dsh-starter-pill"
-                        style={{ height: 30, padding: "0 12px", fontSize: 12.5 }}
-                        onClick={() => void handleQuickPrepare(p)}
-                      >
-                        <IconPluginPinwheel size={14} />
-                        <span>{p.manifest.name}</span>
-                        <span className="dsh-starter-cost">
-                          {formatMilliAct(p.manifest.price_milli_act)}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-
+                <div className="bc-chat-column">
                   {sessionEvents.map((ev) =>
                     ev.kind === "user" ? (
-                      <div key={ev.event_id} className="dsh-user-row">
-                        <div className="dsh-user-bubble">{ev.content}</div>
+                      <div key={ev.event_id} className="bc-msg-user">
+                        {ev.content}
                       </div>
                     ) : (
-                      <div key={ev.event_id} className="dsh-assistant-row">
-                        <span className="dsh-assistant-avatar">
-                          <FishLogo size={22} />
+                      <div key={ev.event_id} className="bc-msg-assistant">
+                        <span className="bc-msg-avatar">
+                          <CompassMark size={18} />
                         </span>
-                        <div className="dsh-assistant-body">
-                          {ev.kind !== "assistant" && (
-                            <span className="dsw-tag mono" style={{ marginRight: 6 }}>
-                              {ev.kind}
-                            </span>
-                          )}
-                          {ev.content}
-                        </div>
+                        <div className="bc-msg-body">{ev.content}</div>
                       </div>
                     ),
                   )}
 
                   {(streamingText || chatBusy) && (
-                    <div className="dsh-assistant-row">
-                      <span className="dsh-assistant-avatar">
-                        <RunningCompass size={20} />
+                    <div className="bc-msg-assistant">
+                      <span className="bc-msg-avatar">
+                        <RunningCompass size={18} />
                       </span>
-                      <div className="dsh-assistant-body">
-                        {streamingText || "Thinking..."}
-                      </div>
+                      <div className="bc-msg-body">{streamingText || "Thinking..."}</div>
                     </div>
                   )}
 
-                  {runs.map((r) => (
-                    <div
-                      key={r.run_id}
-                      className="dsh-run-turn-card"
-                      data-selected={String(selectedRun?.run_id === r.run_id)}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            fontWeight: 500,
-                            fontSize: 13.5,
-                          }}
-                        >
-                          <IconCheckCircle size={15} />
-                          <span>{r.plugin_id}</span>
-                          <span className="dsw-tag dsw-tag-success">
-                            {r.receipt_verified ? "Schnorr Verified" : r.status}
-                          </span>
+                  {runs.map((r) => {
+                    const runPlugin = plugins.find((p) => p.manifest.id === r.plugin_id);
+                    return (
+                      <div key={r.run_id} className="bc-run-summary-card">
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <strong>{runPlugin?.manifest.name ?? r.plugin_id}</strong>
+                            <span className="bc-badge bc-badge-success">
+                              {r.receipt_verified ? "Verified" : r.status}
+                            </span>
+                          </div>
+                          <div className="bc-caption mono" style={{ marginTop: 2 }}>
+                            {r.run_id.slice(0, 16)} ·{" "}
+                            {formatMilliAct(r.quote.estimated_cost_act)} ·{" "}
+                            {r.artifacts.length} output file(s)
+                          </div>
                         </div>
-                        <div className="dsw-caption mono" style={{ marginTop: 3 }}>
-                          {r.run_id} · Settled {formatMilliAct(r.quote.estimated_cost_act)} ·{" "}
-                          {r.artifacts.length} artifact(s)
-                        </div>
+                        {runPlugin && (
+                          <button
+                            type="button"
+                            className="bc-btn bc-btn-secondary"
+                            onClick={() => openOrFocusModuleWindow(runPlugin, "results")}
+                          >
+                            <IconWindowOpen size={14} />
+                            <span>Open Results</span>
+                          </button>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        className="dsw-btn"
-                        onClick={() => {
-                          setSelectedRunId(r.run_id);
-                          setRightbarOpen(true);
-                        }}
-                      >
-                        Inspect Output &amp; Receipt
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
 
-            {!isHeroPhase && (
-              <div className="dsh-composer-dock">
-                {renderApprovalPanel()}
-                {renderInputCard()}
-              </div>
+            {!isEmptyChat && (
+              <div className="bc-composer-wrap">{renderComposer()}</div>
             )}
-          </>
+          </div>
         )}
 
-        {/* ------------------ PLUGINS 960PX ENTRY PAGE ------------------ */}
-        {activeTab === "plugins" && (
-          <>
-            <div className="dsh-entry-scroll">
-              <div className="dsh-entry-page">
-                <div className="dsh-entry-header">
-                  <div>
-                    <h1 className="dsh-entry-title">Plugins</h1>
-                    <p className="dsh-entry-subtitle">
-                      Digest-pinned OCI bio containers and sandboxed{" "}
-                      <code>&lt;iframe sandbox=&quot;allow-scripts&quot;&gt;</code> UIs.
-                    </p>
-                  </div>
+        {/* ------------------ PAGE 2: MODULES (FLOATING WINDOW LAUNCHER) ------------------ */}
+        {activePage === "plugins" && (
+          <div className="bc-page-scroll">
+            <div className="bc-page-container">
+              <div className="bc-page-header">
+                <div>
+                  <h1 className="bc-page-title">Modules</h1>
+                  <p className="bc-page-subtitle">
+                    Click any module to open it as a draggable floating window in your
+                    workspace.
+                  </p>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <input
+                    type="search"
+                    className="bc-input"
+                    placeholder="Filter modules..."
+                    value={moduleSearch}
+                    onChange={(e) => setModuleSearch(e.target.value)}
+                  />
                   <button
                     type="button"
-                    className="dsw-btn dsw-btn-pill"
-                    onClick={() => setActiveTab("studio")}
+                    className="bc-btn bc-btn-secondary"
+                    onClick={() => openSettings("developer")}
                   >
                     <IconPlus size={14} />
-                    <span>Create Plugin</span>
+                    <span>New Module</span>
                   </button>
                 </div>
+              </div>
 
-                <div>
-                  <div className="dsh-section-label" style={{ paddingLeft: 2, marginBottom: 6 }}>
-                    INSTALLED ({plugins.length})
-                  </div>
-                  <div className="dsh-group-card">
-                    {plugins.map((p) => (
-                      <div
-                        key={p.manifest.id}
-                        data-testid={`plugin-card-${p.manifest.id}`}
-                        className="dsh-plugin-row"
-                        data-selected={String(selectedPlugin?.manifest.id === p.manifest.id)}
-                        onClick={() => setSelectedPluginId(p.manifest.id)}
-                      >
-                        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                          <span
-                            style={{
-                              display: "grid",
-                              placeItems: "center",
-                              width: 34,
-                              height: 34,
-                              borderRadius: 10,
-                              background: "var(--dsw-alias-interactive-bg-hover)",
-                              flex: "none",
-                              marginTop: 2,
-                            }}
-                          >
-                            <IconPluginPinwheel size={18} />
-                          </span>
-                          <div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                              <strong style={{ fontSize: 14, fontWeight: 500 }}>
-                                {p.manifest.name}
-                              </strong>
-                              <span className="dsw-tag mono">v{p.manifest.version}</span>
-                              {p.has_custom_ui && (
-                                <span className="dsw-tag dsw-tag-info">Vite Sandbox UI</span>
-                              )}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 13,
-                                color: "var(--dsw-alias-label-secondary)",
-                                marginTop: 3,
-                              }}
-                            >
-                              {p.manifest.description}
-                            </div>
-                          </div>
-                        </div>
-
-                        <span className="dsw-tag mono">
-                          {formatMilliAct(p.manifest.price_milli_act)}
+              <div className="bc-modules-grid">
+                {filteredPlugins.map((p) => (
+                  <article
+                    key={p.manifest.id}
+                    data-testid={`plugin-card-${p.manifest.id}`}
+                    className="bc-module-card"
+                    onClick={() =>
+                      openOrFocusModuleWindow(p, p.has_custom_ui ? "ui" : "run")
+                    }
+                  >
+                    <div>
+                      <div className="bc-module-card-top">
+                        <span className="bc-badge bc-badge-neutral">
+                          {p.manifest.category}
                         </span>
+                        {p.has_custom_ui && (
+                          <span className="bc-badge bc-badge-accent">Interactive App</span>
+                        )}
                       </div>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedPlugin && (
-                  <div className="dsh-group-card dsh-card-pad">
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "flex-start",
-                        gap: 12,
-                        marginBottom: 14,
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontSize: 16, fontWeight: 600 }}>
-                          {selectedPlugin.manifest.name}
-                        </div>
-                        <div className="dsw-caption mono" style={{ marginTop: 3 }}>
-                          {selectedPlugin.manifest.image}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        data-testid="plugin-prepare-btn"
-                        className="dsw-btn dsw-btn-primary dsw-btn-pill"
-                        onClick={() => void handleQuickPrepare(selectedPlugin)}
-                      >
-                        Prepare Quote ({formatMilliAct(selectedPlugin.manifest.price_milli_act)})
-                      </button>
+                      <h2 className="bc-module-title">{p.manifest.name}</h2>
+                      <p className="bc-module-desc">{p.manifest.description}</p>
                     </div>
 
-                    {selectedPlugin.has_custom_ui && activeGrant ? (
-                      <SandboxedPluginFrame
-                        plugin={selectedPlugin}
-                        activeGrant={activeGrant}
-                        defaultCatalogId={defaultCatalogId}
-                        latestPluginRun={latestRunForSelectedPlugin}
-                        onQuotePrepared={handleQuotePrepared}
-                      />
-                    ) : (
-                      <div>
-                        <div className="sci-card-title">SKILL.md Agent Contract</div>
-                        <pre className="sql-pre">
-                          {selectedPlugin.skill?.markdown_body ?? "Declarative OCI Plugin"}
-                        </pre>
-                      </div>
-                    )}
-                  </div>
-                )}
+                    <div className="bc-module-card-footer">
+                      <span className="bc-caption mono">
+                        {formatMilliAct(p.manifest.price_milli_act)} / run
+                      </span>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: "var(--bc-accent)",
+                        }}
+                      >
+                        <span>Open Window</span>
+                        <IconWindowOpen size={14} />
+                      </span>
+                    </div>
+                  </article>
+                ))}
               </div>
             </div>
-
-            {pendingQuote && <div className="dsh-composer-dock">{renderApprovalPanel()}</div>}
-          </>
+          </div>
         )}
 
-        {/* ------------------ DATA CATALOGS 960PX ENTRY PAGE ------------------ */}
-        {activeTab === "catalogs" && (
-          <>
-            <div className="dsh-entry-scroll">
-              <div className="dsh-entry-page">
-                <div className="dsh-entry-header">
-                  <div>
-                    <h1 className="dsh-entry-title">Data Catalogs</h1>
-                    <p className="dsh-entry-subtitle">
-                      SHA-256 verified Parquet shards queried via DuckDB Grant-compiled{" "}
-                      <code>TEMP VIEW</code>s · <span className="mono">{defaultCatalogId}</span>
-                    </p>
-                  </div>
-
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <label style={{ fontSize: 13, color: "var(--dsw-alias-label-secondary)" }}>
-                      Max IC50 (nM):{" "}
-                      <input
-                        type="number"
-                        className="dsw-input"
-                        style={{ width: 90, marginLeft: 6 }}
-                        value={catalogMaxIc50}
-                        onChange={(e) => setCatalogMaxIc50(Number(e.target.value) || 500)}
-                      />
-                    </label>
-                    {catalogResult && (
-                      <span
-                        data-testid="catalog-mask-indicator"
-                        className={`dsw-tag ${
-                          catalogResult.sequence_masked ? "dsw-tag-warn" : "dsw-tag-success"
-                        }`}
-                      >
-                        {catalogResult.sequence_masked
-                          ? "Sequences Masked ('***')"
-                          : "Unmasked Amino-Acid Sequences"}
-                      </span>
-                    )}
-                  </div>
+        {/* ------------------ PAGE 3: DATA CATALOGS ------------------ */}
+        {activePage === "catalogs" && (
+          <div className="bc-page-scroll">
+            <div className="bc-page-container">
+              <div className="bc-page-header">
+                <div>
+                  <h1 className="bc-page-title">Data</h1>
+                  <p className="bc-page-subtitle">
+                    Cohort preview for <span className="mono">{defaultCatalogId}</span>{" "}
+                    governed by your active access grant.
+                  </p>
                 </div>
 
-                {catalogResult && (
-                  <div className="dsh-group-card dsh-card-pad">
-                    <div className="sci-card-title">Compiled DuckDB Grant SQL View</div>
-                    <pre className="sql-pre" data-testid="catalog-sql-view">
-                      {catalogResult.compiled_view_sql}
-                    </pre>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <label className="bc-caption" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>Max IC50 (nM)</span>
+                    <input
+                      type="number"
+                      className="bc-input"
+                      style={{ width: 88 }}
+                      value={catalogMaxIc50}
+                      onChange={(e) => setCatalogMaxIc50(Number(e.target.value) || 500)}
+                    />
+                  </label>
+                  {catalogResult && (
+                    <span
+                      data-testid="catalog-mask-indicator"
+                      className={`bc-badge ${
+                        catalogResult.sequence_masked
+                          ? "bc-badge-warn"
+                          : "bc-badge-success"
+                      }`}
+                    >
+                      {catalogResult.sequence_masked
+                        ? "Sequences Masked ('***')"
+                        : "Unmasked Amino-Acid Sequences"}
+                    </span>
+                  )}
+                </div>
+              </div>
 
-                    <div className="table-scroll" style={{ marginTop: 14 }}>
+              {catalogResult && (
+                <>
+                  <div className="bc-card">
+                    <div className="bc-card-header">
+                      <span className="bc-card-title">Ligand Cohort Preview</span>
+                      <span className="bc-caption">
+                        Showing {catalogResult.rows.length} of{" "}
+                        {catalogResult.total_in_scope} in-scope ligands
+                      </span>
+                    </div>
+                    <div className="table-scroll">
                       <table className="data-table" data-testid="catalog-table">
                         <thead>
                           <tr>
@@ -1185,273 +1120,67 @@ export function App() {
                       </table>
                     </div>
                   </div>
-                )}
-              </div>
-            </div>
 
-            {pendingQuote && <div className="dsh-composer-dock">{renderApprovalPanel()}</div>}
-          </>
-        )}
-
-        {/* ------------------ PLUGIN STUDIO 960PX ENTRY PAGE ------------------ */}
-        {activeTab === "studio" && (
-          <>
-            <div className="dsh-entry-scroll">
-              <div className="dsh-entry-page">
-                <div className="dsh-entry-header">
-                  <div>
-                    <h1 className="dsh-entry-title">Plugin Studio</h1>
-                    <p className="dsh-entry-subtitle">
-                      Scaffold a Universal OCI Plugin (<code>plugin.toml</code> +{" "}
-                      <code>Dockerfile</code> + <code>SKILL.md</code> + optional Vite Sandbox UI).
-                    </p>
+                  <div className="bc-card">
+                    <div className="bc-card-header">
+                      <span className="bc-card-title">
+                        Enforced DuckDB Governance View
+                      </span>
+                      <span className="bc-caption">
+                        Compiled automatically from active DatasetGrant
+                      </span>
+                    </div>
+                    <pre className="bc-code-pre" data-testid="catalog-sql-view">
+                      {catalogResult.compiled_view_sql}
+                    </pre>
                   </div>
-                </div>
-
-                <div className="dsh-group-card dsh-card-pad">
-                  <form
-                    onSubmit={(e) => void handleScaffoldSubmit(e)}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                      gap: 14,
-                      alignItems: "end",
-                    }}
-                  >
-                    <div>
-                      <div className="sci-card-title">Runtime Template</div>
-                      <select
-                        className="dsw-input"
-                        style={{ width: "100%" }}
-                        value={studioTemplate}
-                        onChange={(e) => setStudioTemplate(e.target.value)}
-                      >
-                        <option value="python-uv">Python 3.12 + uv + Polars/PyArrow</option>
-                        <option value="r-rocker">R 4.4 Rocker + arrow</option>
-                        <option value="rust-cli">Rust 2024 Static Binary</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <div className="sci-card-title">Plugin ID (namespace/slug)</div>
-                      <input
-                        type="text"
-                        data-testid="studio-plugin-id-input"
-                        className="dsw-input"
-                        style={{ width: "100%" }}
-                        value={studioPluginId}
-                        onChange={(e) => setStudioPluginId(e.target.value)}
-                      />
-                    </div>
-
-                    <div>
-                      <div className="sci-card-title">Display Name</div>
-                      <input
-                        type="text"
-                        className="dsw-input"
-                        style={{ width: "100%" }}
-                        value={studioName}
-                        onChange={(e) => setStudioName(e.target.value)}
-                      />
-                    </div>
-
-                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                      <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                        <input
-                          type="checkbox"
-                          checked={studioIncludeUi}
-                          onChange={(e) => setStudioIncludeUi(e.target.checked)}
-                        />
-                        Include Vite Sandbox UI
-                      </label>
-                      <button
-                        type="submit"
-                        data-testid="studio-scaffold-btn"
-                        className="dsw-btn dsw-btn-primary"
-                      >
-                        Generate Plugin
-                      </button>
-                    </div>
-                  </form>
-
-                  {scaffoldOutput && (
-                    <div style={{ marginTop: 18 }} data-testid="scaffold-output">
-                      <div className="sci-card-title">
-                        Scaffolded into{" "}
-                        <span className="mono">{scaffoldOutput.directory}</span>
-                      </div>
-                      <pre className="sql-pre">
-                        {scaffoldOutput.files.map((f) => f.relative_path).join("\n")}
-                      </pre>
-                    </div>
-                  )}
-                </div>
-              </div>
+                </>
+              )}
             </div>
-
-            {pendingQuote && <div className="dsh-composer-dock">{renderApprovalPanel()}</div>}
-          </>
+          </div>
         )}
       </main>
 
-      {/* ====================================================================
-          Column 3: Right Collapsible Inspector Dock (SidebarRight)
-         ==================================================================== */}
-      <aside className="dsh-rightbar">
-        <div className="dsh-rightbar-header">
-          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-            <strong style={{ fontSize: 13.5, fontWeight: 600 }}>Execution &amp; Receipt</strong>
-            {runs.length > 0 && (
-              <select
-                className="dsw-input mono"
-                style={{ height: 28, fontSize: 11.5, maxWidth: 190, padding: "0 8px" }}
-                value={selectedRun?.run_id ?? ""}
-                onChange={(e) => {
-                  setSelectedRunId(e.target.value);
-                  setVerifyReport(null);
-                }}
-              >
-                {runs.map((r) => (
-                  <option key={r.run_id} value={r.run_id}>
-                    {r.run_id.slice(0, 14)} · {r.plugin_id.replace("alithea/", "")}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
+      {/* ==================== FLOATING MODULE WINDOWS + TRAY ==================== */}
+      <FloatingWindowsLayer
+        windows={windows}
+        plugins={plugins}
+        runs={runs}
+        activeGrant={activeGrant}
+        defaultCatalogId={defaultCatalogId}
+        pendingQuote={pendingQuote}
+        isConfirmingRun={isConfirmingRun}
+        liveLogs={liveLogs}
+        verifyReport={verifyReport}
+        onFocusWindow={handleFocusWindow}
+        onMoveResizeWindow={handleMoveResizeWindow}
+        onToggleMinimize={handleToggleMinimize}
+        onToggleMaximize={handleToggleMaximize}
+        onCloseWindow={handleCloseWindow}
+        onChangeTab={handleChangeWindowTab}
+        onUpdateParam={handleUpdateWindowParam}
+        onPreparePluginRun={(plugin, params) => void handlePreparePluginRun(plugin, params)}
+        onQuotePrepared={handleQuotePrepared}
+        onConfirmPendingQuote={() => void handleConfirmPendingRun()}
+        onCancelPendingQuote={() => setPendingQuote(null)}
+        onReverifyChain={(run, tamper) => void handleReverifyReceipt(run, tamper)}
+      />
 
-          <button
-            type="button"
-            className="dsh-icon-btn"
-            title="Close Inspector"
-            onClick={() => setRightbarOpen(false)}
-          >
-            <IconClose size={15} />
-          </button>
-        </div>
-
-        <div className="dsh-rightbar-scroll">
-          <div className="dsh-inspector-section">
-            <div className="dsh-inspector-title">
-              <span>Hardened OCI Container Stream</span>
-              {selectedRun && (
-                <span className="dsw-tag mono">{selectedRun.status}</span>
-              )}
-            </div>
-            <pre className="terminal-box" data-testid="live-run-logs">
-              {(liveLogs.length > 0
-                ? liveLogs
-                : selectedRun?.logs ?? [
-                    "Ready. Prepare a Froglet Quote and click 'Approve & Run' to stream real container stdout/stderr over SSE.",
-                  ]
-              ).join("\n")}
-            </pre>
-          </div>
-
-          {selectedRun?.result_json && (
-            <div className="dsh-inspector-section">
-              <div className="dsh-inspector-title">
-                <span>Declarative Scientific Views (`/out/result.json`)</span>
-              </div>
-              <ScientificViews
-                resultJson={selectedRun.result_json}
-                views={selectedRunPlugin?.views ?? []}
-              />
-            </div>
-          )}
-
-          {selectedRun && selectedRun.artifacts.length > 0 && (
-            <div className="dsh-inspector-section" data-testid="run-artifacts">
-              <div className="dsh-inspector-title">
-                <span>Stage-Out BlobStore Artifacts</span>
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {selectedRun.artifacts.map((art) => (
-                  <a
-                    key={art.name}
-                    href={`/api/v1/runs/${encodeURIComponent(selectedRun.run_id)}/artifacts/${art.name}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="dsw-btn mono"
-                    style={{ fontSize: 11.5 }}
-                  >
-                    {art.name} ({art.size_bytes} B · {art.sha256.slice(0, 8)})
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {selectedRun && selectedRun.froglet_chain.length > 0 && (
-            <div className="dsh-inspector-section" data-testid="receipt-inspector">
-              <div className="dsh-inspector-title">
-                <span>Froglet v1 Schnorr 5-Artifact Chain</span>
-                <span
-                  data-testid="receipt-verified-badge"
-                  className={`dsw-tag ${
-                    (verifyReport ? verifyReport.valid : selectedRun.receipt_verified)
-                      ? "dsw-tag-success"
-                      : "dsw-tag-danger"
-                  }`}
-                >
-                  {(verifyReport ? verifyReport.valid : selectedRun.receipt_verified)
-                    ? "SCHNORR CHAIN VALID"
-                    : "TAMPER DETECTED / INVALID"}
-                </span>
-              </div>
-
-              <div className="dsw-caption">
-                RFC 8785 JCS + BIP340 secp256k1 (<code>settlement_method = &quot;none&quot;</code>)
-              </div>
-
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {selectedRun.froglet_chain.map((_, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    className="dsw-btn"
-                    style={{
-                      height: 26,
-                      padding: "0 10px",
-                      fontSize: 11.5,
-                      borderColor:
-                        selectedArtifactIdx === idx
-                          ? "var(--dsw-alias-state-business-primary)"
-                          : undefined,
-                    }}
-                    onClick={() => setSelectedArtifactIdx(idx)}
-                  >
-                    {FROGLET_STAGE_NAMES[idx] ?? `Step ${idx + 1}`}
-                  </button>
-                ))}
-              </div>
-
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  data-testid="reverify-chain-btn"
-                  className="dsw-btn"
-                  onClick={() => void handleReverifyReceipt(false)}
-                >
-                  Re-Verify Chain
-                </button>
-                <button
-                  type="button"
-                  data-testid="tamper-test-btn"
-                  className="dsw-btn"
-                  onClick={() => void handleReverifyReceipt(true)}
-                >
-                  Simulate 1-Byte Tamper
-                </button>
-              </div>
-
-              <pre className="sql-pre" style={{ maxHeight: 220 }}>
-                {JSON.stringify(inspectedChainDoc, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-      </aside>
+      {/* ==================== SETTINGS MODAL ==================== */}
+      <SettingsModal
+        open={settingsOpen}
+        initialSection={settingsSection}
+        darkTheme={darkTheme}
+        onSetDarkTheme={setDarkTheme}
+        health={health}
+        grants={grants}
+        activeGrantId={activeGrant?.grant_id ?? ""}
+        onSelectGrant={(gid) => void handleGrantChange(gid)}
+        ledger={ledger}
+        onScaffoldModule={handleScaffoldModule}
+        scaffoldOutput={scaffoldOutput}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
