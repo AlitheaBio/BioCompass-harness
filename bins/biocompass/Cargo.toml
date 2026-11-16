@@ -16,7 +16,7 @@ workspace = true
 async-trait.workspace = true
 axum.workspace = true
 biocompass-agent-core.workspace = true
-biocompass-core-traits.workspace = true
+biocompass-core-traits = { workspace = true, features = ["local-sqlite"] }
 biocompass-data-engine.workspace = true
 biocompass-node-runtime.workspace = true
 biocompass-oci-runner.workspace = true

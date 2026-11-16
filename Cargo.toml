@@ -20,9 +20,12 @@ repository = "https://github.com/AlitheaBio/BioCompass-harness"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+[profile.dev]
+debug = 0
+
 [workspace.dependencies]
 # Internal crates
-biocompass-core-traits = { path = "crates/core-traits" }
+biocompass-core-traits = { path = "crates/core-traits", default-features = false }
 biocompass-plugin-spec = { path = "crates/plugin-spec" }
 biocompass-data-engine = { path = "crates/data-engine" }
 biocompass-oci-runner = { path = "crates/oci-runner" }

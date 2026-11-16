@@ -2,14 +2,18 @@
 
 pub mod fs_blob_store;
 pub mod ids;
+#[cfg(feature = "local-sqlite")]
 pub mod ledger;
+#[cfg(feature = "local-sqlite")]
 pub mod sqlite_store;
 pub mod traits;
 pub mod types;
 
 pub use fs_blob_store::{LocalFsBlobStore, StandardOciPolicyVerifier};
 pub use ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, RunId, SessionId};
+#[cfg(feature = "local-sqlite")]
 pub use ledger::SqliteActLedger;
+#[cfg(feature = "local-sqlite")]
 pub use sqlite_store::SqliteSessionStore;
 pub use traits::{BlobStore, OciRegistryClient, PaymentGateway, RunDispatcher, SessionStore};
 pub use types::{
@@ -56,6 +60,7 @@ mod tests {
         assert_eq!(local_dev.local_tag.as_deref(), Some("dev"));
     }
 
+    #[cfg(feature = "local-sqlite")]
     #[tokio::test]
     async fn sqlite_session_store_persists_ordered_events_across_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -133,6 +138,7 @@ mod tests {
         assert_eq!(roundtrip, br#"{"ok":true}"#);
     }
 
+    #[cfg(feature = "local-sqlite")]
     #[tokio::test]
     async fn act_ledger_reserves_settles_refunds_and_rejects_idempotency_collision() {
         let ledger =
@@ -213,6 +219,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "local-sqlite")]
     #[tokio::test]
     async fn act_ledger_prevents_overdraft_under_concurrent_reservation_race() {
         let dir = tempfile::tempdir().expect("tempdir");

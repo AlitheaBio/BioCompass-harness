@@ -271,11 +271,12 @@ impl AppState {
 
         let bundled_dir = root.join("bundled-plugins");
         extract_bundled_plugins(&bundled_dir)?;
-        let bundled_ui_roots = collect_bundled_ui_roots(&bundled_dir);
+        let mut bundled_ui_roots = collect_bundled_ui_roots(&bundled_dir);
 
         let user_plugins_dir = root.join("plugins");
         std::fs::create_dir_all(&user_plugins_dir)
             .map_err(|e| CompassError::Storage(format!("create user plugins dir: {e}")))?;
+        bundled_ui_roots.extend(collect_bundled_ui_roots(&user_plugins_dir));
 
         let hub_cfg = CompassHubConfig::from_env(bundled_dir)?;
         let (hub_client, default_org_id, container_engine_label) =
