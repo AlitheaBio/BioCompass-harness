@@ -1,0 +1,30 @@
+[package]
+name = "biocompass-node-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+biocompass-core-traits.workspace = true
+biocompass-data-engine.workspace = true
+biocompass-oci-runner.workspace = true
+biocompass-plugin-spec.workspace = true
+chrono.workspace = true
+froglet-protocol.workspace = true
+froglet-verify.workspace = true
+hex.workspace = true
+mime_guess.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

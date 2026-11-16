@@ -4,6 +4,7 @@ members = [
     "crates/plugin-spec",
     "crates/data-engine",
     "crates/oci-runner",
+    "crates/node-runtime",
 ]
 resolver = "2"
 
