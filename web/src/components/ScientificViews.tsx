@@ -129,15 +129,15 @@ export function ScientificViews({
                   const barMaxW = 240;
                   const w = Math.max(3, (val / maxVal) * barMaxW);
                   const fill =
-                    view.kind === "length_distribution" ? "#38bdf8" : "#f56e3d";
+                    view.kind === "length_distribution" ? "#4176e6" : "#f56e3d";
                   return (
                     <g key={`${label}-${idx}`} transform={`translate(0, ${y})`}>
                       <text
                         x={4}
                         y={15}
-                        fill="#cbd5e1"
+                        fill="var(--dsw-alias-label-secondary)"
                         fontSize="11"
-                        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                        fontFamily="var(--ds-font-family-code, ui-monospace, monospace)"
                       >
                         {label}
                       </text>
@@ -147,7 +147,7 @@ export function ScientificViews({
                         width={barMaxW}
                         height={14}
                         rx={4}
-                        fill="#16202e"
+                        fill="var(--dsw-alias-interactive-bg-hover)"
                       />
                       <rect
                         x={135}
@@ -160,7 +160,7 @@ export function ScientificViews({
                       <text
                         x={135 + barMaxW + 10}
                         y={15}
-                        fill="#f8fafc"
+                        fill="var(--dsw-alias-label-primary)"
                         fontSize="11"
                         fontWeight="600"
                       >

@@ -22,7 +22,9 @@ function InteractiveExplorerApp() {
   const [maxIc50, setMaxIc50] = useState<number>(250);
   const [previewRows, setPreviewRows] = useState<SdkPeptideRecord[]>([]);
   const [preparedQuote, setPreparedQuote] = useState<SdkRunQuote | null>(null);
-  const [statusMsg, setStatusMsg] = useState<string>("Connecting to BioCompass host over postMessage JSON-RPC 2.0...");
+  const [statusMsg, setStatusMsg] = useState<string>(
+    "Connecting to BioCompass host over postMessage JSON-RPC 2.0...",
+  );
 
   useEffect(() => {
     let active = true;
@@ -76,7 +78,7 @@ function InteractiveExplorerApp() {
       });
       setPreparedQuote(quote);
       setStatusMsg(
-        `Quote ${quote.run_id} signed — approve in the BioCompass Host Consent Banner above to execute container.`,
+        `Quote ${quote.run_id} signed — approve in the BioCompass Approval Card below to execute container.`,
       );
     } catch (err: unknown) {
       setStatusMsg(`Prepare RPC error: ${err instanceof Error ? err.message : String(err)}`);
@@ -91,12 +93,13 @@ function InteractiveExplorerApp() {
   return (
     <div
       style={{
-        fontFamily: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif",
-        background: "#0c1117",
-        color: "#e6edf3",
+        fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        background: "#ffffff",
+        color: "#0f1115",
         minHeight: "100vh",
-        padding: "16px 20px",
+        padding: "18px 22px",
         boxSizing: "border-box",
+        WebkitFontSmoothing: "antialiased",
       }}
     >
       <div
@@ -104,7 +107,7 @@ function InteractiveExplorerApp() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          borderBottom: "1px solid #212936",
+          borderBottom: "1px solid rgba(15, 17, 21, 0.08)",
           paddingBottom: 12,
           marginBottom: 14,
           gap: 12,
@@ -112,12 +115,12 @@ function InteractiveExplorerApp() {
         }}
       >
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: "#f8fafc" }}>
-            HLA Antigenic Gene Hotspot Explorer (Custom Vite Sandbox UI)
+          <div style={{ fontSize: 15, fontWeight: 500, color: "#0f1115" }}>
+            HLA Antigenic Gene Hotspot Explorer
           </div>
           <div
             data-testid="sandbox-status"
-            style={{ fontSize: 12, color: "#94a3b8", marginTop: 3 }}
+            style={{ fontSize: 12.5, color: "#60646c", marginTop: 3 }}
           >
             {statusMsg}
           </div>
@@ -126,13 +129,12 @@ function InteractiveExplorerApp() {
           <span
             data-testid="sandbox-origin-badge"
             style={{
-              fontSize: 11,
-              fontFamily: "monospace",
-              padding: "4px 8px",
-              borderRadius: 6,
-              background: "#161f2c",
-              border: "1px solid #2d3a4f",
-              color: "#38bdf8",
+              fontSize: 11.5,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              padding: "3px 9px",
+              borderRadius: 999,
+              background: "#edf3fe",
+              color: "#3459b2",
             }}
           >
             origin={window.origin}
@@ -140,13 +142,12 @@ function InteractiveExplorerApp() {
           <span
             data-testid="sandbox-mask-badge"
             style={{
-              fontSize: 11,
-              fontWeight: 600,
-              padding: "4px 8px",
-              borderRadius: 6,
-              background: context?.sequenceMasked ? "#3b1d16" : "#112b21",
-              color: context?.sequenceMasked ? "#fb923c" : "#34d399",
-              border: "1px solid currentColor",
+              fontSize: 11.5,
+              fontWeight: 500,
+              padding: "3px 9px",
+              borderRadius: 999,
+              background: context?.sequenceMasked ? "rgba(221, 133, 0, 0.12)" : "rgba(0, 148, 86, 0.1)",
+              color: context?.sequenceMasked ? "#b45309" : "#007a47",
             }}
           >
             {context?.sequenceMasked ? "Sequences Masked ('***')" : "Full IUPAC Access"}
@@ -157,17 +158,25 @@ function InteractiveExplorerApp() {
       <div
         style={{
           display: "flex",
-          gap: 12,
+          gap: 10,
           alignItems: "center",
           flexWrap: "wrap",
-          background: "#131b26",
-          padding: "12px 14px",
-          borderRadius: 8,
-          border: "1px solid #222e3f",
+          background: "#f9fafb",
+          padding: "10px 14px",
+          borderRadius: 12,
+          border: "1px solid rgba(15, 17, 21, 0.08)",
           marginBottom: 16,
         }}
       >
-        <label style={{ fontSize: 12, color: "#cbd5e1", display: "flex", alignItems: "center", gap: 8 }}>
+        <label
+          style={{
+            fontSize: 13,
+            color: "#545557",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
           Max IC50 Cutoff (nM):
           <input
             type="number"
@@ -176,12 +185,13 @@ function InteractiveExplorerApp() {
             value={maxIc50}
             onChange={(e) => setMaxIc50(Number(e.target.value) || 250)}
             style={{
-              width: 84,
-              background: "#0c1117",
-              color: "#f8fafc",
-              border: "1px solid #334155",
-              borderRadius: 6,
+              width: 82,
+              background: "#ffffff",
+              color: "#0f1115",
+              border: "1px solid rgba(15, 17, 21, 0.14)",
+              borderRadius: 8,
               padding: "5px 8px",
+              fontSize: 13,
             }}
           />
         </label>
@@ -191,13 +201,13 @@ function InteractiveExplorerApp() {
           data-testid="sdk-query-btn"
           onClick={() => void handlePreviewCohort()}
           style={{
-            background: "#1e293b",
-            color: "#f8fafc",
-            border: "1px solid #38bdf8",
-            borderRadius: 6,
-            padding: "6px 12px",
-            fontSize: 12,
-            fontWeight: 600,
+            background: "#ffffff",
+            color: "#0f1115",
+            border: "1px solid rgba(15, 17, 21, 0.14)",
+            borderRadius: 999,
+            padding: "6px 14px",
+            fontSize: 12.5,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -209,13 +219,13 @@ function InteractiveExplorerApp() {
           data-testid="sdk-prepare-btn"
           onClick={() => void handlePrepareRun()}
           style={{
-            background: "#f56e3d",
+            background: "#4176e6",
             color: "#ffffff",
             border: "none",
-            borderRadius: 6,
-            padding: "7px 14px",
-            fontSize: 12,
-            fontWeight: 600,
+            borderRadius: 999,
+            padding: "6px 14px",
+            fontSize: 12.5,
+            fontWeight: 500,
             cursor: "pointer",
           }}
         >
@@ -227,44 +237,63 @@ function InteractiveExplorerApp() {
         <div
           data-testid="sdk-quote-banner"
           style={{
-            background: "#172334",
-            border: "1px solid #38bdf8",
-            borderRadius: 8,
+            background: "#edf3fe",
+            border: "1px solid rgba(65, 118, 230, 0.25)",
+            borderRadius: 12,
             padding: "10px 14px",
             marginBottom: 16,
-            fontSize: 12,
+            fontSize: 12.5,
+            color: "#1e3a8a",
           }}
         >
           <strong>Signed Froglet Quote Ready:</strong>{" "}
           <code>{preparedQuote.run_id}</code> · workload_hash{" "}
-          <code>{preparedQuote.workload_hash.slice(0, 16)}...</code> · Confirm in host header to run OCI container.
+          <code>{preparedQuote.workload_hash.slice(0, 16)}...</code> · Approve in host panel to run OCI container.
         </div>
       )}
 
       {previewRows.length > 0 && (
         <div style={{ marginBottom: 18 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8", marginBottom: 6 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#60646c", marginBottom: 6 }}>
             Scoped DuckDB Preview via @biocompass/plugin-sdk
           </div>
           <table
             data-testid="sdk-preview-table"
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}
           >
             <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #263244", color: "#94a3b8" }}>
-                <th style={{ padding: "6px 8px" }}>Peptide ID</th>
-                <th style={{ padding: "6px 8px" }}>Sequence</th>
-                <th style={{ padding: "6px 8px" }}>Allele</th>
-                <th style={{ padding: "6px 8px" }}>Gene</th>
-                <th style={{ padding: "6px 8px" }}>Organ</th>
-                <th style={{ padding: "6px 8px" }}>IC50 (nM)</th>
+              <tr
+                style={{
+                  textAlign: "left",
+                  borderBottom: "1px solid rgba(15, 17, 21, 0.1)",
+                  color: "#60646c",
+                }}
+              >
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Peptide ID</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Sequence</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Allele</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Gene</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Organ</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>IC50 (nM)</th>
               </tr>
             </thead>
             <tbody>
               {previewRows.map((row) => (
-                <tr key={row.peptide_id} style={{ borderBottom: "1px solid #1a2330" }}>
-                  <td style={{ padding: "6px 8px", fontFamily: "monospace" }}>{row.peptide_id}</td>
-                  <td style={{ padding: "6px 8px", fontFamily: "monospace", color: "#f56e3d" }}>
+                <tr
+                  key={row.peptide_id}
+                  style={{ borderBottom: "1px solid rgba(15, 17, 21, 0.06)" }}
+                >
+                  <td style={{ padding: "6px 8px", fontFamily: "monospace", color: "#545557" }}>
+                    {row.peptide_id}
+                  </td>
+                  <td
+                    style={{
+                      padding: "6px 8px",
+                      fontFamily: "monospace",
+                      fontWeight: 600,
+                      color: "#e25828",
+                    }}
+                  >
                     {row.sequence}
                   </td>
                   <td style={{ padding: "6px 8px" }}>{row.hla_allele}</td>
@@ -280,28 +309,37 @@ function InteractiveExplorerApp() {
 
       {hotspots.length > 0 && (
         <div>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#34d399", marginBottom: 6 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#007a47", marginBottom: 6 }}>
             Container Output (`/out/result.json`) — Top Antigenic Source Genes
           </div>
           <table
             data-testid="sdk-hotspots-table"
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}
           >
             <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #263244", color: "#94a3b8" }}>
-                <th style={{ padding: "6px 8px" }}>Gene</th>
-                <th style={{ padding: "6px 8px" }}>Total Ligands</th>
-                <th style={{ padding: "6px 8px" }}>Strong Binders (&le;50 nM)</th>
-                <th style={{ padding: "6px 8px" }}>Best IC50 (nM)</th>
-                <th style={{ padding: "6px 8px" }}>Mean MS log2</th>
+              <tr
+                style={{
+                  textAlign: "left",
+                  borderBottom: "1px solid rgba(15, 17, 21, 0.1)",
+                  color: "#60646c",
+                }}
+              >
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Gene</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Total Ligands</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Strong Binders (&le;50 nM)</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Best IC50 (nM)</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Mean MS log2</th>
               </tr>
             </thead>
             <tbody>
               {hotspots.map((g) => (
-                <tr key={g.gene_symbol} style={{ borderBottom: "1px solid #1a2330" }}>
-                  <td style={{ padding: "6px 8px", fontWeight: 700 }}>{g.gene_symbol}</td>
+                <tr
+                  key={g.gene_symbol}
+                  style={{ borderBottom: "1px solid rgba(15, 17, 21, 0.06)" }}
+                >
+                  <td style={{ padding: "6px 8px", fontWeight: 600 }}>{g.gene_symbol}</td>
                   <td style={{ padding: "6px 8px" }}>{g.ligands}</td>
-                  <td style={{ padding: "6px 8px", color: "#34d399", fontWeight: 600 }}>
+                  <td style={{ padding: "6px 8px", color: "#007a47", fontWeight: 600 }}>
                     {g.strong_binders}
                   </td>
                   <td style={{ padding: "6px 8px" }}>{g.best_affinity_nm.toFixed(1)}</td>

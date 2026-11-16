@@ -114,11 +114,11 @@ export function SandboxedPluginFrame({
   return (
     <div className="sandbox-frame-shell">
       <div className="sandbox-frame-bar">
-        <span className="badge badge-cyan">
+        <span className="dsw-tag dsw-tag-info">
           &lt;iframe sandbox=&quot;allow-scripts&quot;&gt; · origin=&quot;null&quot;
         </span>
-        <span className="badge badge-slate">CSP: connect-src &apos;none&apos;</span>
-        <span className="mono muted">{plugin.ui_entry_url}</span>
+        <span className="dsw-tag">CSP: connect-src &apos;none&apos;</span>
+        <span className="mono dsw-caption">{plugin.ui_entry_url}</span>
       </div>
       <iframe
         ref={iframeRef}

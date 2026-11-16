@@ -52,14 +52,14 @@ export function BrandWordmark({
           <g transform="translate(50 50) rotate(38)">
             <polygon
               points="0,-32 10.5,0 0,32 -10.5,0"
-              fill="var(--dsw-alias-bg-base, #0b1017)"
-              stroke="var(--dsw-alias-bg-base, #0b1017)"
+              fill="var(--dsw-alias-bg-base, #ffffff)"
+              stroke="var(--dsw-alias-bg-base, #ffffff)"
               strokeWidth="1.2"
               strokeLinejoin="round"
             />
             <polygon points="0,-29.2 8,0 -8,0" fill="#F56E3D" />
             <polygon points="0,29.2 8,0 -8,0" fill="currentColor" />
-            <circle cx="0" cy="0" r="2.6" fill="var(--dsw-alias-bg-base, #0b1017)" />
+            <circle cx="0" cy="0" r="2.6" fill="var(--dsw-alias-bg-base, #ffffff)" />
           </g>
         </g>
       )}
