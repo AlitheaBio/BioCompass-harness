@@ -1,0 +1,60 @@
+id = "alithea/hla-interactive-explorer"
+name = "HLA Antigenic Gene Hotspot Explorer"
+version = "1.0.0"
+description = "Interactive source-gene hotspot profiler and IC50 binding tier explorer with a custom sandboxed Vite UI bridged via @biocompass/plugin-sdk."
+category = "Target Discovery"
+image = "127.0.0.1:5500/alithea/hla-interactive-explorer@sha256:d8ac5235ee9b5e7ff6538ad69651c7491b1ce46b382166c4ec3bbada47106536"
+network = "none"
+price_milli_act = 5000
+
+[resources]
+cpus = 2
+memory_mb = 2048
+gpu = 0
+timeout_sec = 120
+pids_limit = 256
+
+[inputs.schema]
+type = "object"
+required = ["alleles", "max_ic50_nm"]
+
+[inputs.schema.properties.alleles]
+type = "array"
+title = "Target HLA Class I Alleles"
+default = ["HLA-A*02:01", "HLA-A*03:01", "HLA-B*07:02", "HLA-B*44:02"]
+items = { type = "string" }
+
+[inputs.schema.properties.max_ic50_nm]
+type = "number"
+title = "Maximum IC50 Cutoff (nM)"
+minimum = 5.0
+maximum = 1000.0
+default = 250.0
+
+[inputs.schema.properties.min_donors]
+type = "integer"
+title = "Minimum Donor Recurrence"
+minimum = 1
+maximum = 20
+default = 1
+
+[[views]]
+id = "summary-metrics"
+kind = "metric_cards"
+title = "Gene Hotspot Metrics"
+data_pointer = "/summary_cards"
+
+[[views]]
+id = "gene-enrichment"
+kind = "bar"
+title = "Strong Binders by Source Gene"
+data_pointer = "/allele_counts"
+
+[[views]]
+id = "length-dist"
+kind = "length_distribution"
+title = "Ligand Length Profile"
+data_pointer = "/length_distribution"
+
+[ui]
+entry = "ui/dist/index.html"

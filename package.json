@@ -5,13 +5,23 @@
   "type": "module",
   "workspaces": [
     "packages/*",
+    "plugins/*/ui",
     "web"
   ],
   "scripts": {
     "build:sdk": "npm run build --workspace=@biocompass/plugin-sdk",
+    "build:plugin-ui": "npm run build --workspace=@biocompass/hla-interactive-explorer-ui",
     "build:web": "npm run build --workspace=@biocompass/web",
-    "build": "npm run build:sdk && npm run build:web",
-    "typecheck": "npm run typecheck --workspace=@biocompass/plugin-sdk && npm run typecheck --workspace=@biocompass/web",
-    "dev": "npm run dev --workspace=@biocompass/web"
+    "build": "npm run build:sdk && npm run build:plugin-ui && npm run build:web",
+    "typecheck": "npm run build:sdk && npm run typecheck --workspace=@biocompass/plugin-sdk && npm run typecheck --workspace=@biocompass/hla-interactive-explorer-ui && npm run typecheck --workspace=@biocompass/web",
+    "dev": "npm run dev --workspace=@biocompass/web",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.8.2",
+    "vite": "^8.3.8",
+    "@vitejs/plugin-react": "^6.3.0"
   }
 }

@@ -6,6 +6,9 @@
 node_modules/
 /web/dist/
 /packages/*/dist/
+/plugins/*/ui/dist/
+/playwright-report/
+/test-results/
 *.tsbuildinfo
 
 # Local runtime state & secrets
