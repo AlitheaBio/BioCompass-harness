@@ -135,7 +135,7 @@ impl AgentRuntime {
         let prior_events = self.session_store.list_events(session_id).await?;
         let mut history = reconstruct_conversation_window(&prior_events);
 
-        let catalogs = self.execution_port.list_catalogs().await;
+        let catalogs = self.execution_port.list_catalog_manifests().await;
         let plugins = self.execution_port.list_plugins().await;
         let system_prompt = build_system_prompt(active_grant, &catalogs, &plugins);
         let tools = allowed_tool_definitions();

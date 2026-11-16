@@ -9,8 +9,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use biocompass_agent_core::AgentStreamEvent;
 use biocompass_core_traits::{
-    CatalogId, CompassError, CreditAmountAct, PluginId, PrepareRunRequest, RunDispatcher, RunId,
-    SessionId,
+    CatalogId, CompassError, CreditAmountAct, PluginId, PrepareRunRequest, RunId, SessionId,
 };
 use biocompass_data_engine::CatalogQuery;
 use biocompass_node_runtime::verify_froglet_chain_offline;
@@ -122,15 +121,15 @@ impl IntoResponse for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 async fn get_health(State(state): State<AppState>) -> Json<Value> {
-    let catalogs = state.runtime.list_catalogs().await;
-    let plugins = state.runtime.list_plugins().await;
+    let catalogs = state.registry.list_catalog_manifests().await;
+    let plugins = state.registry.list_plugins().await;
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "mode": state.mode.as_str(),
-        "node_id": state.runtime.node_id(),
-        "provider_id": state.runtime.provider_id(),
-        "requester_id": state.runtime.requester_id(),
+        "node_id": state.registry.node_id(),
+        "provider_id": state.registry.provider_id(),
+        "requester_id": state.registry.requester_id(),
         "container_engine": state.container_engine_label,
         "llm_configured": state.agent.is_llm_configured(),
         "llm_model": state.agent.llm_model_name(),
@@ -141,18 +140,12 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
 
 async fn list_grants(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
-        "grants": state.available_grants(),
+        "grants": state.available_grants().await,
     }))
 }
 
 async fn list_catalogs(State(state): State<AppState>) -> Json<Value> {
-    let items: Vec<Value> = state
-        .runtime
-        .list_catalogs()
-        .await
-        .into_iter()
-        .map(|c| serde_json::to_value(c.manifest()).unwrap_or(Value::Null))
-        .collect();
+    let items = state.registry.list_catalog_manifests().await;
     Json(json!({ "catalogs": items }))
 }
 
@@ -170,9 +163,9 @@ async fn query_catalog_handler(
 ) -> ApiResult<Json<Value>> {
     let catalog_id =
         CatalogId::new(format!("{ns}/{name}")).map_err(CompassError::Validation)?;
-    let catalog = state.runtime.get_catalog(&catalog_id).await?;
     let grant = state
-        .resolve_grant(req.grant_id.as_deref().or(Some("full")))?
+        .resolve_grant(req.grant_id.as_deref().or(Some("full")))
+        .await?
         .ok_or_else(|| CompassError::AccessDenied("a DatasetGrant is required".into()))?;
     if grant.catalog_id != catalog_id {
         return Err(CompassError::AccessDenied(format!(
@@ -181,7 +174,10 @@ async fn query_catalog_handler(
         ))
         .into());
     }
-    let result = catalog.query(&grant, &req.query)?;
+    let result = state
+        .registry
+        .query_catalog(&catalog_id, &grant, &req.query)
+        .await?;
     Ok(Json(serde_json::to_value(result).unwrap_or(Value::Null)))
 }
 
@@ -218,7 +214,7 @@ fn to_plugin_dto(plugin: LoadedPlugin) -> PluginSummaryDto {
 
 async fn list_plugins_handler(State(state): State<AppState>) -> Json<Value> {
     let dtos: Vec<PluginSummaryDto> = state
-        .runtime
+        .registry
         .list_plugins()
         .await
         .into_iter()
@@ -272,7 +268,7 @@ async fn scaffold_plugin_handler(
 
     let registered = if state.allow_local_dev_tags {
         if let Ok(loaded) = LoadedPlugin::load_from_dir(&target_dir, true) {
-            state.runtime.register_plugin(loaded).await.is_ok()
+            state.registry.register_plugin(loaded).await.is_ok()
         } else {
             false
         }
@@ -312,10 +308,10 @@ async fn prepare_run_handler(
         .map(SessionId::new)
         .transpose()
         .map_err(CompassError::Validation)?;
-    let grant = state.resolve_grant(req.grant_id.as_deref())?;
+    let grant = state.resolve_grant(req.grant_id.as_deref()).await?;
 
     let quote = state
-        .runtime
+        .dispatcher
         .prepare_run(PrepareRunRequest {
             org_id: state.default_org_id.clone(),
             session_id,
@@ -343,7 +339,7 @@ async fn confirm_run_handler(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("idem-{}", Uuid::new_v4().simple()));
 
-    let record = state.runtime.confirm_run(&run_id, &idem).await?;
+    let record = state.dispatcher.confirm_run(&run_id, &idem).await?;
     Ok(Json(serde_json::to_value(record).unwrap_or(Value::Null)))
 }
 
@@ -366,7 +362,7 @@ async fn stream_run_events_handler(
     AxumPath(run_id_raw): AxumPath<String>,
 ) -> ApiResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
     let target_run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
-    let rx = state.runtime.subscribe_logs();
+    let rx = state.dispatcher.subscribe_logs();
     let stream = BroadcastStream::new(rx).filter_map(move |msg| {
         let target = target_run_id.clone();
         async move {
@@ -477,7 +473,8 @@ async fn create_session_handler(
     Json(req): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<Value>> {
     let grant = state
-        .resolve_grant(req.active_grant_id.as_deref().or(Some("full")))?
+        .resolve_grant(req.active_grant_id.as_deref().or(Some("full")))
+        .await?
         .ok_or_else(|| CompassError::Validation("invalid default grant".into()))?;
     let session = state
         .session_store
@@ -497,7 +494,7 @@ async fn update_session_handler(
     Json(req): Json<UpdateSessionRequest>,
 ) -> ApiResult<Json<Value>> {
     let session_id = SessionId::new(session_id_raw).map_err(CompassError::Validation)?;
-    let _ = state.resolve_grant(Some(&req.active_grant_id))?;
+    let _ = state.resolve_grant(Some(&req.active_grant_id)).await?;
     let updated = state
         .session_store
         .update_session_grant(&session_id, &req.active_grant_id)
@@ -526,7 +523,7 @@ async fn stream_session_chat_handler(
 ) -> ApiResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
     let session_id = SessionId::new(session_id_raw).map_err(CompassError::Validation)?;
     let session = state.session_store.get_session(&session_id).await?;
-    let active_grant = state.resolve_grant(Some(&session.active_grant_id))?;
+    let active_grant = state.resolve_grant(Some(&session.active_grant_id)).await?;
 
     let (tx, rx) = mpsc::channel::<AgentStreamEvent>(128);
     let agent = state.agent.clone();
@@ -552,7 +549,7 @@ async fn serve_plugin_ui_asset(
     AxumPath((ns, slug, asset_path)): AxumPath<(String, String, String)>,
 ) -> ApiResult<Response> {
     let plugin_id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
-    let plugin = state.runtime.get_plugin(&plugin_id).await?;
+    let plugin = state.registry.get_plugin(&plugin_id).await?;
     let ui_spec = plugin.manifest.ui.as_ref().ok_or_else(|| {
         CompassError::NotFound(format!("plugin '{plugin_id}' has no custom UI declared"))
     })?;

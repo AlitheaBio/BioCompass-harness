@@ -2,14 +2,14 @@
 //! and OCI plugin `SKILL.md` operational guidance.
 
 use biocompass_core_traits::DatasetGrant;
-use biocompass_data_engine::DuckDbCatalogEngine;
+use biocompass_data_engine::CatalogManifest;
 use biocompass_plugin_spec::LoadedPlugin;
 use std::fmt::Write as _;
 
 /// Build the deterministic system prompt provided to the LLM for a session turn.
 pub fn build_system_prompt(
     active_grant: Option<&DatasetGrant>,
-    catalogs: &[DuckDbCatalogEngine],
+    catalogs: &[CatalogManifest],
     plugins: &[LoadedPlugin],
 ) -> String {
     let mut out = String::with_capacity(4096);
@@ -46,8 +46,7 @@ pub fn build_system_prompt(
     if catalogs.is_empty() {
         out.push_str("- None registered.\n\n");
     } else {
-        for cat in catalogs {
-            let m = cat.manifest();
+        for m in catalogs {
             let cols: Vec<String> = m
                 .columns
                 .iter()

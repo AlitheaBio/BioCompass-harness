@@ -13,6 +13,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 biocompass-agent-core.workspace = true
 biocompass-core-traits.workspace = true
@@ -24,10 +25,13 @@ chrono.workspace = true
 clap.workspace = true
 froglet-verify.workspace = true
 futures.workspace = true
+hex.workspace = true
 mime_guess.workspace = true
+reqwest.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower.workspace = true
@@ -37,5 +41,4 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile.workspace = true

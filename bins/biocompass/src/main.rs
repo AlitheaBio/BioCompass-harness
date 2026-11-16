@@ -2,7 +2,7 @@
 
 use biocompass::server::build_router;
 use biocompass::state::{AppState, DeploymentMode};
-use biocompass_core_traits::{CompassError, CompassResult, PluginId, PrepareRunRequest, RunDispatcher, RunStatus};
+use biocompass_core_traits::{CompassError, CompassResult, PluginId, PrepareRunRequest, RunStatus};
 use biocompass_plugin_spec::{LoadedPlugin, TemplateKind, write_template_to_dir};
 use clap::{Parser, Subcommand};
 use froglet_verify::{extract_documents, validate_chain_documents};
@@ -132,7 +132,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 env!("CARGO_PKG_VERSION"),
                 deploy_mode.as_str(),
                 addr,
-                state.runtime.node_id()
+                state.registry.node_id()
             );
 
             let router = build_router(state);
@@ -180,15 +180,15 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
             let plugin_id = if plugin_path.is_dir() && plugin_path.join("plugin.toml").is_file() {
                 let loaded = LoadedPlugin::load_from_dir(plugin_path, allow_local_dev_tags)?;
                 let pid = loaded.manifest.id.clone();
-                state.runtime.register_plugin(loaded).await?;
+                state.registry.register_plugin(loaded).await?;
                 pid
             } else {
                 PluginId::new(plugin).map_err(CompassError::Validation)?
             };
 
-            let dataset_grant = state.resolve_grant(Some(&grant))?;
+            let dataset_grant = state.resolve_grant(Some(&grant)).await?;
             let quote = state
-                .runtime
+                .dispatcher
                 .prepare_run(PrepareRunRequest {
                     org_id: state.default_org_id.clone(),
                     session_id: None,
@@ -199,7 +199,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 .await?;
 
             let idem = format!("cli-{}", Uuid::new_v4().simple());
-            let record = state.runtime.confirm_run(&quote.run_id, &idem).await?;
+            let record = state.dispatcher.confirm_run(&quote.run_id, &idem).await?;
 
             if let Some(out_path) = receipt_out {
                 if let Some(parent) = out_path.parent()

@@ -1,16 +1,21 @@
-//! Shared application state & zero-source-tree bootstrap for `biocompass`.
+//! Shared application state & zero-source-tree bootstrap for `biocompass` (`local` and `cloud-web`).
 
+use crate::cloud_client::{CompassHubClient, CompassHubConfig};
+use async_trait::async_trait;
 use biocompass_agent_core::{AgentConfig, AgentRuntime};
 use biocompass_core_traits::{
     BlobStore, CatalogId, CompassError, CompassResult, CreditAmountAct, DatasetGrant,
-    LocalFsBlobStore, OciRegistryClient, OrgId, PaymentGateway, SessionStore, SqliteActLedger,
-    SqliteSessionStore, StandardOciPolicyVerifier,
+    LocalFsBlobStore, NodeId, OciRegistryClient, OrgId, PaymentGateway, PluginId, RunDispatcher,
+    SessionStore, SqliteActLedger, SqliteSessionStore, StandardOciPolicyVerifier,
 };
-use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
+use biocompass_data_engine::{
+    CatalogManifest, CatalogQuery, CatalogQueryResult, DuckDbCatalogEngine, seed_demo_hla_catalog,
+};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
 use biocompass_oci_runner::{OciContainerRunner, OciDistributionClient};
 use biocompass_plugin_spec::LoadedPlugin;
 use rust_embed::RustEmbed;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,6 +52,77 @@ impl DeploymentMode {
     }
 }
 
+/// Transport-agnostic workspace catalog, plugin, and grant query port (`InProcessNodeRuntime` locally; `CompassHubClient` in Cloud).
+#[async_trait]
+pub trait WorkspaceRegistryPort: Send + Sync {
+    fn node_id(&self) -> NodeId;
+    fn provider_id(&self) -> String;
+    fn requester_id(&self) -> String;
+    async fn list_catalog_manifests(&self) -> Vec<CatalogManifest>;
+    async fn query_catalog(
+        &self,
+        id: &CatalogId,
+        grant: &DatasetGrant,
+        query: &CatalogQuery,
+    ) -> CompassResult<CatalogQueryResult>;
+    async fn list_plugins(&self) -> Vec<LoadedPlugin>;
+    async fn get_plugin(&self, id: &PluginId) -> CompassResult<LoadedPlugin>;
+    async fn register_plugin(&self, plugin: LoadedPlugin) -> CompassResult<()>;
+    async fn list_grants(&self, org_id: &OrgId, default_catalog_id: &CatalogId) -> Vec<DatasetGrant>;
+}
+
+#[async_trait]
+impl WorkspaceRegistryPort for InProcessNodeRuntime {
+    fn node_id(&self) -> NodeId {
+        InProcessNodeRuntime::node_id(self).clone()
+    }
+
+    fn provider_id(&self) -> String {
+        InProcessNodeRuntime::provider_id(self)
+    }
+
+    fn requester_id(&self) -> String {
+        InProcessNodeRuntime::requester_id(self)
+    }
+
+    async fn list_catalog_manifests(&self) -> Vec<CatalogManifest> {
+        InProcessNodeRuntime::list_catalogs(self)
+            .await
+            .into_iter()
+            .map(|c| c.manifest().clone())
+            .collect()
+    }
+
+    async fn query_catalog(
+        &self,
+        id: &CatalogId,
+        grant: &DatasetGrant,
+        query: &CatalogQuery,
+    ) -> CompassResult<CatalogQueryResult> {
+        let cat = InProcessNodeRuntime::get_catalog(self, id).await?;
+        cat.query(grant, query)
+    }
+
+    async fn list_plugins(&self) -> Vec<LoadedPlugin> {
+        InProcessNodeRuntime::list_plugins(self).await
+    }
+
+    async fn get_plugin(&self, id: &PluginId) -> CompassResult<LoadedPlugin> {
+        InProcessNodeRuntime::get_plugin(self, id).await
+    }
+
+    async fn register_plugin(&self, plugin: LoadedPlugin) -> CompassResult<()> {
+        InProcessNodeRuntime::register_plugin(self, plugin).await
+    }
+
+    async fn list_grants(&self, org_id: &OrgId, default_catalog_id: &CatalogId) -> Vec<DatasetGrant> {
+        vec![
+            DatasetGrant::full_access(org_id.clone(), default_catalog_id.clone()),
+            DatasetGrant::restricted_partner_demo(org_id.clone(), default_catalog_id.clone()),
+        ]
+    }
+}
+
 /// Shared state injected into the Axum HTTP/SSE router.
 #[derive(Clone)]
 pub struct AppState {
@@ -58,18 +134,30 @@ pub struct AppState {
     pub session_store: Arc<dyn SessionStore>,
     pub blob_store: Arc<dyn BlobStore>,
     pub payment_gateway: Arc<dyn PaymentGateway>,
-    pub runtime: Arc<InProcessNodeRuntime>,
+    pub dispatcher: Arc<dyn RunDispatcher>,
+    pub registry: Arc<dyn WorkspaceRegistryPort>,
     pub agent: Arc<AgentRuntime>,
     pub default_catalog_id: CatalogId,
     pub container_engine_label: String,
 }
 
 impl AppState {
-    /// Bootstrap stores, seed verified DuckDB Parquet catalog, extract bundled plugins into `data_dir`
-    /// (so standalone binaries run anywhere without the git repo), and bind the container engine.
+    /// Bootstrap stores and execution bindings for either `DeploymentMode::Local` or `DeploymentMode::CloudWeb`.
     pub async fn bootstrap(
         data_dir: impl AsRef<Path>,
         mode: DeploymentMode,
+        allow_local_dev_tags: bool,
+    ) -> CompassResult<Self> {
+        match mode {
+            DeploymentMode::Local => Self::bootstrap_local(data_dir, allow_local_dev_tags).await,
+            DeploymentMode::CloudWeb => {
+                Self::bootstrap_cloud_web(data_dir, allow_local_dev_tags).await
+            }
+        }
+    }
+
+    async fn bootstrap_local(
+        data_dir: impl AsRef<Path>,
         allow_local_dev_tags: bool,
     ) -> CompassResult<Self> {
         let root = data_dir.as_ref().to_path_buf();
@@ -88,7 +176,6 @@ impl AppState {
             CreditAmountAct::from_whole_act(250),
         )?);
 
-        // Ensure genesis balance row is initialized on first boot.
         let _ = payment_gateway.available_balance(&default_org_id).await?;
 
         let oci_registry: Arc<dyn OciRegistryClient> = if allow_local_dev_tags {
@@ -116,7 +203,6 @@ impl AppState {
             allow_local_dev_tags,
         })?);
 
-        // Seed or verify the reference HLA Immunopeptidomics Parquet catalog.
         let catalog_dir = root.join("catalogs").join("hla-immunopeptidomics-v1");
         if !catalog_dir.join("catalog.json").is_file() {
             seed_demo_hla_catalog(&catalog_dir)?;
@@ -125,13 +211,10 @@ impl AppState {
         let default_catalog_id = catalog.manifest().id.clone();
         runtime.register_catalog(catalog).await?;
 
-        // Extract embedded first-party plugins (`plugin.toml`, `SKILL.md`, `ui/dist/*`) into `data_dir/bundled-plugins`.
         let bundled_dir = root.join("bundled-plugins");
         extract_bundled_plugins(&bundled_dir)?;
         load_plugins_from_parent(&bundled_dir, allow_local_dev_tags, true, &runtime).await?;
 
-        // Load user-created or scaffolded plugins from `data_dir/plugins`.
-        // Unpinned `:dev` skeletons are skipped with a warning unless `--allow-local-dev-tags` is set.
         let user_plugins_dir = root.join("plugins");
         std::fs::create_dir_all(&user_plugins_dir)
             .map_err(|e| CompassError::Storage(format!("create user plugins dir: {e}")))?;
@@ -148,7 +231,6 @@ impl AppState {
             runtime.clone(),
         )?);
 
-        // Ensure at least one default session exists for immediate UI/API use.
         let existing_sessions = session_store.list_sessions(&default_org_id).await?;
         if existing_sessions.is_empty() {
             let full_grant =
@@ -163,7 +245,7 @@ impl AppState {
         }
 
         Ok(Self {
-            mode,
+            mode: DeploymentMode::Local,
             default_org_id,
             data_dir: root,
             user_plugins_dir,
@@ -171,26 +253,84 @@ impl AppState {
             session_store,
             blob_store,
             payment_gateway,
-            runtime,
+            dispatcher: runtime.clone(),
+            registry: runtime,
             agent,
             default_catalog_id,
             container_engine_label,
         })
     }
 
-    /// Return the canonical `DatasetGrant` presets available for `default_org_id`.
-    pub fn available_grants(&self) -> Vec<DatasetGrant> {
-        vec![
-            DatasetGrant::full_access(self.default_org_id.clone(), self.default_catalog_id.clone()),
-            DatasetGrant::restricted_partner_demo(
-                self.default_org_id.clone(),
-                self.default_catalog_id.clone(),
-            ),
-        ]
+    async fn bootstrap_cloud_web(
+        data_dir: impl AsRef<Path>,
+        allow_local_dev_tags: bool,
+    ) -> CompassResult<Self> {
+        let root = data_dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&root)
+            .map_err(|e| CompassError::Storage(format!("create data_dir {}: {e}", root.display())))?;
+
+        let bundled_dir = root.join("bundled-plugins");
+        extract_bundled_plugins(&bundled_dir)?;
+        let bundled_ui_roots = collect_bundled_ui_roots(&bundled_dir);
+
+        let user_plugins_dir = root.join("plugins");
+        std::fs::create_dir_all(&user_plugins_dir)
+            .map_err(|e| CompassError::Storage(format!("create user plugins dir: {e}")))?;
+
+        let hub_cfg = CompassHubConfig::from_env(bundled_dir)?;
+        let (hub_client, default_org_id, container_engine_label) =
+            CompassHubClient::connect(hub_cfg, bundled_ui_roots).await?;
+        let hub = Arc::new(hub_client);
+
+        let catalogs = WorkspaceRegistryPort::list_catalog_manifests(hub.as_ref()).await;
+        let default_catalog_id = catalogs
+            .first()
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| CatalogId::new("alithea/hla-atlas-v2026.1").expect("catalog id"));
+
+        let session_store: Arc<dyn SessionStore> = hub.clone();
+        let blob_store: Arc<dyn BlobStore> = hub.clone();
+        let payment_gateway: Arc<dyn PaymentGateway> = hub.clone();
+        let dispatcher: Arc<dyn RunDispatcher> = hub.clone();
+        let registry: Arc<dyn WorkspaceRegistryPort> = hub.clone();
+
+        let agent_cfg = AgentConfig {
+            scaffold_root_dir: user_plugins_dir.clone(),
+            ..AgentConfig::default()
+        };
+        let agent = Arc::new(AgentRuntime::new(
+            agent_cfg,
+            session_store.clone(),
+            blob_store.clone(),
+            hub,
+        )?);
+
+        Ok(Self {
+            mode: DeploymentMode::CloudWeb,
+            default_org_id,
+            data_dir: root,
+            user_plugins_dir,
+            allow_local_dev_tags,
+            session_store,
+            blob_store,
+            payment_gateway,
+            dispatcher,
+            registry,
+            agent,
+            default_catalog_id,
+            container_engine_label,
+        })
+    }
+
+    /// Return the `DatasetGrant` presets available for `default_org_id`.
+    pub async fn available_grants(&self) -> Vec<DatasetGrant> {
+        self.registry
+            .list_grants(&self.default_org_id, &self.default_catalog_id)
+            .await
     }
 
     /// Resolve a `grant_id` (or `"full"` / `"partner"` shorthand) into a `DatasetGrant`.
-    pub fn resolve_grant(&self, grant_id: Option<&str>) -> CompassResult<Option<DatasetGrant>> {
+    pub async fn resolve_grant(&self, grant_id: Option<&str>) -> CompassResult<Option<DatasetGrant>> {
         let Some(raw) = grant_id else {
             return Ok(None);
         };
@@ -198,7 +338,7 @@ impl AppState {
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
             return Ok(None);
         }
-        let grants = self.available_grants();
+        let grants = self.available_grants().await;
         if trimmed.eq_ignore_ascii_case("full") {
             return Ok(grants.into_iter().next());
         }
@@ -211,6 +351,23 @@ impl AppState {
             .map(Some)
             .ok_or_else(|| CompassError::NotFound(format!("unknown grant_id '{trimmed}'")))
     }
+}
+
+fn collect_bundled_ui_roots(bundled_dir: &Path) -> HashMap<PluginId, PathBuf> {
+    let mut map = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(bundled_dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if dir.is_dir()
+            && dir.join("plugin.toml").is_file()
+            && let Ok(loaded) = LoadedPlugin::load_from_dir(&dir, true)
+        {
+            map.insert(loaded.manifest.id, dir);
+        }
+    }
+    map
 }
 
 fn extract_bundled_plugins(dest_root: &Path) -> CompassResult<()> {

@@ -11,7 +11,7 @@ use biocompass_core_traits::{
     BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant, OrgId, PluginId,
     PrepareRunRequest, RunId, RunQuote, SessionId, SessionStore,
 };
-use biocompass_data_engine::{CatalogQuery, DuckDbCatalogEngine};
+use biocompass_data_engine::{CatalogManifest, CatalogQuery, CatalogQueryResult};
 use biocompass_node_runtime::InProcessNodeRuntime;
 use biocompass_plugin_spec::{LoadedPlugin, TemplateKind, write_template_to_dir};
 use serde_json::{Value, json};
@@ -25,8 +25,13 @@ pub const DEFAULT_SPILL_THRESHOLD_BYTES: usize = 48_000;
 #[async_trait]
 pub trait AgentExecutionPort: Send + Sync {
     async fn list_plugins(&self) -> Vec<LoadedPlugin>;
-    async fn list_catalogs(&self) -> Vec<DuckDbCatalogEngine>;
-    async fn get_catalog(&self, id: &CatalogId) -> CompassResult<DuckDbCatalogEngine>;
+    async fn list_catalog_manifests(&self) -> Vec<CatalogManifest>;
+    async fn query_catalog(
+        &self,
+        id: &CatalogId,
+        grant: &DatasetGrant,
+        query: &CatalogQuery,
+    ) -> CompassResult<CatalogQueryResult>;
     async fn prepare_plugin_quote(&self, req: PrepareRunRequest) -> CompassResult<RunQuote>;
 }
 
@@ -36,12 +41,22 @@ impl AgentExecutionPort for InProcessNodeRuntime {
         InProcessNodeRuntime::list_plugins(self).await
     }
 
-    async fn list_catalogs(&self) -> Vec<DuckDbCatalogEngine> {
-        InProcessNodeRuntime::list_catalogs(self).await
+    async fn list_catalog_manifests(&self) -> Vec<CatalogManifest> {
+        InProcessNodeRuntime::list_catalogs(self)
+            .await
+            .into_iter()
+            .map(|c| c.manifest().clone())
+            .collect()
     }
 
-    async fn get_catalog(&self, id: &CatalogId) -> CompassResult<DuckDbCatalogEngine> {
-        InProcessNodeRuntime::get_catalog(self, id).await
+    async fn query_catalog(
+        &self,
+        id: &CatalogId,
+        grant: &DatasetGrant,
+        query: &CatalogQuery,
+    ) -> CompassResult<CatalogQueryResult> {
+        let cat = InProcessNodeRuntime::get_catalog(self, id).await?;
+        cat.query(grant, query)
     }
 
     async fn prepare_plugin_quote(&self, req: PrepareRunRequest) -> CompassResult<RunQuote> {
@@ -180,13 +195,9 @@ pub async fn execute_agent_tool(
     let outcome: CompassResult<Value> = async {
         match call.name.as_str() {
             "list_catalogs" => {
-                let catalogs = port.list_catalogs().await;
-                let items: Vec<Value> = catalogs
-                    .iter()
-                    .map(|c| serde_json::to_value(c.manifest()).unwrap_or(Value::Null))
-                    .collect();
+                let catalogs = port.list_catalog_manifests().await;
                 Ok(json!({
-                    "catalogs": items,
+                    "catalogs": catalogs,
                     "active_grant": active_grant,
                 }))
             }
@@ -211,14 +222,13 @@ pub async fn execute_agent_tool(
                         grant.grant_id, grant.catalog_id, catalog_id
                     )));
                 }
-                let catalog = port.get_catalog(&catalog_id).await?;
                 let mut query_obj = call.arguments.clone();
                 if let Some(map) = query_obj.as_object_mut() {
                     map.remove("catalog_id");
                 }
                 let query: CatalogQuery = serde_json::from_value(query_obj)
                     .map_err(|e| CompassError::Validation(format!("invalid query_catalog args: {e}")))?;
-                let res = catalog.query(grant, &query)?;
+                let res = port.query_catalog(&catalog_id, grant, &query).await?;
                 serde_json::to_value(res)
                     .map_err(|e| CompassError::Internal(format!("serialize query result: {e}")))
             }
