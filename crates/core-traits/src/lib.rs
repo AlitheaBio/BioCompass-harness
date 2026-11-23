@@ -66,6 +66,40 @@ mod tests {
         assert_eq!(local_dev.local_tag.as_deref(), Some("dev"));
     }
 
+    #[test]
+    fn sec_23_oci_image_ref_parse_rejects_traversal_query_fragment_userinfo_and_control_chars() {
+        let valid_sha = "8f3a9d0b1c2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f80";
+        for valid in [
+            format!("ghcr.io/alitheabio/hla-motif-enrichment@sha256:{valid_sha}"),
+            format!("127.0.0.1:5500/alithea/hla-motif-enrichment@sha256:{valid_sha}"),
+            format!("[::1]:5000/alithea/hla-motif-enrichment@sha256:{valid_sha}"),
+            format!("localhost:5000/alithea/hla-motif-enrichment@sha256:{valid_sha}"),
+            format!("test/echo@sha256:{valid_sha}"),
+        ] {
+            assert!(OciImageRef::parse(&valid, false).is_ok(), "should accept {valid}");
+        }
+        for bad in [
+            format!("registry.example/org/../secret@sha256:{valid_sha}"),
+            format!("registry.example/org/./img@sha256:{valid_sha}"),
+            format!("registry.example/org/img?foo=bar@sha256:{valid_sha}"),
+            format!("registry.example/org/img#frag@sha256:{valid_sha}"),
+            format!("user:pass@registry.example/org/img@sha256:{valid_sha}"),
+            format!("registry.example/org/img\r\nX-Injected:1@sha256:{valid_sha}"),
+            format!("registry.example/org/img with space@sha256:{valid_sha}"),
+            format!("registry.example/org//img@sha256:{valid_sha}"),
+            format!("registry.example/org\\img@sha256:{valid_sha}"),
+            format!("https://registry.example/org/img@sha256:{valid_sha}"),
+            format!("registry.example/org/img:tag@sha256:{valid_sha}"),
+        ] {
+            assert!(
+                OciImageRef::parse(&bad, false).is_err(),
+                "SEC-23 parser must reject '{bad}'"
+            );
+        }
+        assert!(OciImageRef::parse("local/../escape:dev", true).is_err());
+        assert!(OciImageRef::parse("local/ok:bad?tag", true).is_err());
+    }
+
     #[cfg(feature = "local-sqlite")]
     #[tokio::test]
     async fn sqlite_session_store_persists_ordered_events_across_reopen() {

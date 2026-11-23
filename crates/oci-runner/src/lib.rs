@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
@@ -266,6 +266,7 @@ fn build_hardened_oci_args_with_local_allowance(
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--log-driver=none".to_string(),
         "--name".to_string(),
         container_name.to_string(),
         "--user".to_string(),
@@ -727,6 +728,21 @@ impl OciContainerRunner {
         responder: Option<Arc<dyn LiveQueryResponder>>,
         started_tx: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> CompassResult<ContainerExecutionReport> {
+        self.execute_with_limits(spec, log_tx, revoked, responder, started_tx, None)
+            .await
+    }
+
+    /// Execute with explicit mid-run `max_output_bytes` enforcement across stdout, stderr,
+    /// `BIOCOMPASS_QUERY_V1` frames, and `/out` regular files (`SEC-28`).
+    pub async fn execute_with_limits(
+        &self,
+        spec: &ContainerRunSpec,
+        log_tx: Option<broadcast::Sender<RunLogEvent>>,
+        revoked: Option<&AtomicBool>,
+        responder: Option<Arc<dyn LiveQueryResponder>>,
+        started_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        max_output_bytes: Option<u64>,
+    ) -> CompassResult<ContainerExecutionReport> {
         let revoked_error = || {
             CompassError::AccessDenied("DATASET_ACCESS_REVOKED: dataset access was revoked".into())
         };
@@ -779,11 +795,6 @@ impl OciContainerRunner {
         if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(revoked_error());
         }
-        if responder.is_some() || self.worker_cache.is_some() {
-            // Forward attached output to the run, without retaining scientific
-            // output or live-query frames in the persistent Docker image store.
-            args.insert(1, "--log-driver=none".into());
-        }
         let stdin = if responder.is_some() {
             args.insert(1, "--interactive".into());
             Stdio::piped()
@@ -826,6 +837,26 @@ impl OciContainerRunner {
             (None, _) => None,
         };
 
+        let shared_stream_bytes = Arc::new(AtomicU64::new(0));
+        let out_quota_exceeded = async {
+            let Some(cap) = max_output_bytes else {
+                return std::future::pending::<CompassError>().await;
+            };
+            let out_dir = spec.out_dir.clone();
+            let streamed = Arc::clone(&shared_stream_bytes);
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let dir_bytes = measure_out_dir_regular_bytes(&out_dir);
+                let total = dir_bytes.saturating_add(streamed.load(Ordering::Acquire));
+                if total > cap {
+                    return CompassError::ContainerEngine(format!(
+                        "OUTPUT_QUOTA_EXCEEDED: container output ({total} bytes) exceeded max_output_bytes ({cap})"
+                    ));
+                }
+            }
+        };
+        tokio::pin!(out_quota_exceeded);
+
         let timeout_dur = Duration::from_secs(spec.resources.timeout_sec.max(1));
         let execute = async {
             let wait = async {
@@ -837,13 +868,23 @@ impl OciContainerRunner {
             };
             tokio::try_join!(
                 wait,
-                drain_stream_bounded(stdout, "stdout", &spec.run_id, log_tx.as_ref(), channel),
+                drain_stream_bounded(
+                    stdout,
+                    "stdout",
+                    &spec.run_id,
+                    log_tx.as_ref(),
+                    channel,
+                    max_output_bytes,
+                    Some(&shared_stream_bytes),
+                ),
                 drain_stream_bounded(
                     stderr,
                     "stderr",
                     &spec.run_id,
                     log_tx.as_ref(),
-                    None::<LiveQueryChannel<tokio::process::ChildStdin>>
+                    None::<LiveQueryChannel<tokio::process::ChildStdin>>,
+                    max_output_bytes,
+                    Some(&shared_stream_bytes),
                 ),
             )
         };
@@ -851,6 +892,9 @@ impl OciContainerRunner {
             biased;
             () = &mut wait_for_revocation => {
                 return Err(self.abort_execution(&mut child, &container_name, revoked_error()).await);
+            }
+            quota_err = &mut out_quota_exceeded => {
+                return Err(self.abort_execution(&mut child, &container_name, quota_err).await);
             }
             result = tokio::time::timeout(timeout_dur, execute) => result,
         };
@@ -881,12 +925,35 @@ impl OciContainerRunner {
     }
 }
 
+fn measure_out_dir_regular_bytes(root: &Path) -> u64 {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_file() {
+                *total = total.saturating_add(meta.len());
+            } else if meta.is_dir() {
+                walk(&entry.path(), total);
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(root, &mut total);
+    total
+}
+
 async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut stream: R,
     stream_name: &'static str,
     run_id: &RunId,
     log_tx: Option<&broadcast::Sender<RunLogEvent>>,
     mut channel: Option<LiveQueryChannel<W>>,
+    max_output_bytes: Option<u64>,
+    shared_quota_bytes: Option<&AtomicU64>,
 ) -> CompassResult<(Vec<String>, u64)> {
     const MAX_RETAINED_LINES: usize = 2_000;
     const MAX_LINE_BYTES: usize = 8_192;
@@ -897,6 +964,7 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
     let mut line_byte_count = 0u64;
     let mut lines: Vec<String> = Vec::new();
     let mut total_bytes: u64 = 0;
+    let mut raw_stream_bytes: u64 = 0;
 
     let emit_line = |line_bytes: &[u8], lines: &mut Vec<String>| {
         let trimmed = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
@@ -924,11 +992,34 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
             }
             Err(_) => break,
             Ok(n) => {
+                // SEC-28: Account EVERY raw byte (including BIOCOMPASS_QUERY_V1 frames on stdout/stderr)
+                // against `max_output_bytes` immediately mid-stream before buffering or replying.
+                raw_stream_bytes = raw_stream_bytes.saturating_add(n as u64);
+                let cumulative = if let Some(shared) = shared_quota_bytes {
+                    shared
+                        .fetch_add(n as u64, Ordering::AcqRel)
+                        .saturating_add(n as u64)
+                } else {
+                    raw_stream_bytes
+                };
+                if let Some(cap) = max_output_bytes
+                    && cumulative > cap
+                {
+                    return Err(CompassError::ContainerEngine(format!(
+                        "OUTPUT_QUOTA_EXCEEDED: container {stream_name} exceeded max_output_bytes ({cap})"
+                    )));
+                }
+
                 for &b in &buf[..n] {
                     if b == b'\n' {
                         if current_line.starts_with(LIVE_QUERY_MARKER) {
                             if let Some(channel) = &mut channel {
                                 channel.reply(&current_line).await?;
+                            } else {
+                                // SEC-28: Discarded reserved-prefix lines when no live-query channel is active
+                                // MUST still count toward `total_bytes` (never reported as 0 bytes).
+                                total_bytes =
+                                    total_bytes.saturating_add(line_byte_count.saturating_add(1));
                             }
                         } else {
                             emit_line(
@@ -961,6 +1052,7 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
                     "unterminated live query request frame".into(),
                 ));
             }
+            total_bytes = total_bytes.saturating_add(line_byte_count);
         } else {
             emit_line(
                 &current_line[..current_line.len().min(MAX_LINE_BYTES)],
@@ -1000,6 +1092,8 @@ mod tests {
                 stdin: pipe,
                 responder: Arc::new(EchoLiveQuery),
             }),
+            None,
+            None,
         )
         .await
         .expect("drain stdout");
@@ -1031,6 +1125,8 @@ mod tests {
                 stdin: tokio::io::sink(),
                 responder: Arc::new(EchoLiveQuery),
             }),
+            None,
+            None,
         )
         .await
         .expect_err("reject oversized query before newline");
@@ -1043,12 +1139,97 @@ mod tests {
             &run_id,
             Some(&tx),
             None::<LiveQueryChannel<tokio::io::Sink>>,
+            None,
+            None,
         )
         .await
         .expect("discard a reserved frame from stderr");
         assert!(lines.is_empty());
-        assert_eq!(bytes, 0);
+        assert_eq!(bytes, oversize.len() as u64);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn sec_28_unconditional_log_driver_none_and_max_output_bytes_across_live_query_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = DetectedEngine {
+            kind: EngineKind::Docker,
+            binary_path: PathBuf::from("/usr/bin/docker"),
+            server_version: "29.10.0".into(),
+            rootless: false,
+        };
+        let spec = ContainerRunSpec {
+            run_id: RunId::from("run-sec-28"),
+            image: OciImageRef::parse("local/test:dev", true).unwrap(),
+            in_dir: tmp.path().join("in"),
+            out_dir: tmp.path().join("out"),
+            resources: PluginResources {
+                cpus: 1,
+                memory_mb: 128,
+                gpu: 0,
+                timeout_sec: 10,
+                pids_limit: 32,
+            },
+            network: NetworkPolicy::default(),
+            command_override: None,
+        };
+        let args = build_hardened_oci_args(&engine, "bc-sec-28", &spec).unwrap();
+        assert!(
+            args.iter().any(|a| a == "--log-driver=none"),
+            "SEC-28: --log-driver=none must be unconditional: {args:?}"
+        );
+
+        let run_id = RunId::from("run-sec-28");
+        let flood_line = b"BIOCOMPASS_QUERY_V1 {\"flood\":\"payload-payload-payload\"}\n";
+        let mut flood = Vec::new();
+        for _ in 0..20 {
+            flood.extend_from_slice(flood_line);
+        }
+
+        // 1. Without live-query channel (e.g. stderr / normal stdout), BIOCOMPASS_QUERY_V1 flood is counted & rejected!
+        let (lines, counted) = drain_stream_bounded(
+            &flood[..],
+            "stderr",
+            &run_id,
+            None,
+            None::<LiveQueryChannel<tokio::io::Sink>>,
+            None,
+            None,
+        )
+        .await
+        .expect("drain without cap counts all bytes");
+        assert!(lines.is_empty());
+        assert_eq!(counted, flood.len() as u64);
+
+        let err = drain_stream_bounded(
+            &flood[..],
+            "stderr",
+            &run_id,
+            None,
+            None::<LiveQueryChannel<tokio::io::Sink>>,
+            Some(256),
+            None,
+        )
+        .await
+        .expect_err("SEC-28 must reject BIOCOMPASS_QUERY_V1 flood over max_output_bytes");
+        assert!(err.to_string().contains("OUTPUT_QUOTA_EXCEEDED"));
+
+        // 2. Even WITH an active live-query channel, BIOCOMPASS_QUERY_V1 frames obey max_output_bytes!
+        let err_live = drain_stream_bounded(
+            &flood[..],
+            "stdout",
+            &run_id,
+            None,
+            Some(LiveQueryChannel {
+                stdin: tokio::io::sink(),
+                responder: Arc::new(EchoLiveQuery),
+            }),
+            Some(256),
+            None,
+        )
+        .await
+        .expect_err("SEC-28 must enforce max_output_bytes across live-query frames too");
+        assert!(err_live.to_string().contains("OUTPUT_QUOTA_EXCEEDED"));
     }
 
     #[cfg(unix)]
