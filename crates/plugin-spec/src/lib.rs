@@ -816,6 +816,7 @@ dataset_input_contract = "biocompass.toxicity-screening.v1"
             .expect("workspace root");
         let test_script = ws_root.join("plugins/test_sec_20_30_bundled_plugins.py");
         let out = std::process::Command::new("python3")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .arg(&test_script)
             .arg("-v")
             .output()

@@ -220,6 +220,8 @@ fn validate_payload(
         {
             return Err(invalid("module icon failed integrity check"));
         }
+        crate::server::validate_safe_svg_icon(&data)
+            .map_err(|e| invalid(format!("unsafe module SVG icon: {e}")))?;
         (Some((icon_file.sha256, icon_file.size_bytes)), Some(data))
     } else {
         (None, None)

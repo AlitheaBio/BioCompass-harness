@@ -15,17 +15,55 @@ use serde_json::{Value, json};
 use std::{fs, path::Path, sync::Arc};
 use tower::ServiceExt;
 
-async fn state(root: &Path, url: &str) -> AppState {
+const TEST_HOST: &str = "127.0.0.1:18451";
+
+async fn state(root: &Path, url: &str) -> (AppState, String) {
     let mut state = AppState::bootstrap(root, DeploymentMode::Local, true)
         .await
         .unwrap();
+    let link = state
+        .enable_local_owner(TEST_HOST.parse().unwrap())
+        .unwrap()
+        .unwrap();
     state.installed_workspace = Some(Arc::new(InstalledWorkspace::open(root, url).unwrap()));
-    state
+    (state, link)
 }
-async fn call(app: &Router, method: &str, path: &str, body: Value, user: &str) -> (u16, Value) {
+
+async fn redeem_owner(app: &Router, link: &str) -> String {
+    let ticket = link.trim().split_once("#local-owner=").unwrap().1;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/local/owner-session")
+                .method("POST")
+                .header("host", TEST_HOST)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "ticket": ticket }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["owner_session"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn call(
+    app: &Router,
+    owner: &str,
+    method: &str,
+    path: &str,
+    body: Value,
+    user: &str,
+) -> (u16, Value) {
     let request = Request::builder()
         .uri(path)
         .method(method)
+        .header("host", TEST_HOST)
+        .header("x-biocompass-local-owner", owner)
         .header("content-type", "application/json")
         .header("authorization", user)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -80,52 +118,55 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
         .unwrap();
         managed_dirs.push(dir);
     }
-    let initial = state(root, &url).await;
+    let (initial, link1) = state(root, &url).await;
     let app = build_router(initial.clone());
+    let owner1 = redeem_owner(&app, &link1).await;
     let managed = "/api/v1/plugins/fixture/managed/versions/1/install";
     assert_eq!(
-        call(&app, "DELETE", managed, json!({}), "Bearer org-b")
+        call(&app, &owner1, "DELETE", managed, json!({}), "Bearer org-b")
             .await
             .0,
         403
     );
     assert_eq!(
-        call(&app, "DELETE", managed, json!({}), "Bearer org-a")
+        call(&app, &owner1, "DELETE", managed, json!({}), "Bearer org-a")
             .await
             .1["removed"],
         true
     );
     assert_eq!(
-        call(&app, "DELETE", managed, json!({}), "Bearer org-a")
+        call(&app, &owner1, "DELETE", managed, json!({}), "Bearer org-a")
             .await
             .1["removed"],
         false
     );
     assert!(!managed_dirs[0].exists() && managed_dirs[1].join("release.json").is_file());
     let remove = "/api/v1/plugins/fixture/source/versions/1/install";
-    assert_eq!(call(&app, "DELETE", remove, json!({}), "").await.0, 401);
+    assert_eq!(call(&app, &owner1, "DELETE", remove, json!({}), "").await.0, 401);
     assert_eq!(
-        call(&app, "DELETE", remove, json!({}), "Bearer org-a")
+        call(&app, &owner1, "DELETE", remove, json!({}), "Bearer org-a")
             .await
             .1["removed"],
         true
     );
     assert_eq!(
-        call(&app, "DELETE", remove, json!({}), "Bearer org-a")
+        call(&app, &owner1, "DELETE", remove, json!({}), "Bearer org-a")
             .await
             .1["removed"],
         false
     );
     assert_eq!(
-        call(&app, "DELETE", remove, json!({}), "Bearer org-b")
+        call(&app, &owner1, "DELETE", remove, json!({}), "Bearer org-b")
             .await
             .0,
         403
     );
     let source_path = root.join("plugins/source-1/plugin.toml");
     assert_eq!(fs::read_to_string(&source_path).unwrap(), original);
-    let app = build_router(state(root, &url).await);
-    let cards = call(&app, "GET", "/api/v1/plugins", json!({}), "").await.1;
+    let (st2, link2) = state(root, &url).await;
+    let app = build_router(st2);
+    let owner2 = redeem_owner(&app, &link2).await;
+    let cards = call(&app, &owner2, "GET", "/api/v1/plugins", json!({}), "").await.1;
     let card = cards["plugins"]
         .as_array()
         .unwrap()
@@ -137,7 +178,7 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
     let restore = "/api/v1/plugins/fixture/source/install";
     let req = json!({"source":"workspace","plugin_version":"1"});
     assert_eq!(
-        call(&app, "POST", restore, req.clone(), "Bearer org-b")
+        call(&app, &owner2, "POST", restore, req.clone(), "Bearer org-b")
             .await
             .0,
         403
@@ -148,23 +189,23 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
     )
     .unwrap();
     assert_eq!(
-        call(&app, "POST", restore, req.clone(), "Bearer org-a")
+        call(&app, &owner2, "POST", restore, req.clone(), "Bearer org-a")
             .await
             .0,
         409
     );
     fs::write(&source_path, &original).unwrap();
-    let (s, r) = call(&app, "POST", restore, req, "Bearer org-a").await;
+    let (s, r) = call(&app, &owner2, "POST", restore, req, "Bearer org-a").await;
     assert_eq!((s, r["plugin_version"].as_str()), (200, Some("1")));
     let prep = json!({"plugin_id":"fixture/quoted","plugin_version":"1","params":{}});
-    let (s, quote) = call(&app, "POST", "/api/v1/runs/prepare", prep, "Bearer org-a").await;
+    let (s, quote) = call(&app, &owner2, "POST", "/api/v1/runs/prepare", prep, "Bearer org-a").await;
     assert_eq!(s, 200, "{quote}");
     let quote = quote.get("quote").unwrap_or(&quote);
     let run_id = RunId::from(quote["run_id"].as_str().unwrap().to_string());
     let db = initial.local_sqlite.as_ref().unwrap();
     let delete = "/api/v1/plugins/fixture/quoted/versions/1/install";
     assert_eq!(
-        call(&app, "DELETE", delete, json!({}), "Bearer org-a")
+        call(&app, &owner2, "DELETE", delete, json!({}), "Bearer org-a")
             .await
             .0,
         409
@@ -174,7 +215,7 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
     record.status = RunStatus::Running;
     db.save_run(&record).await.unwrap();
     assert_eq!(
-        call(&app, "DELETE", delete, json!({}), "Bearer org-a")
+        call(&app, &owner2, "DELETE", delete, json!({}), "Bearer org-a")
             .await
             .0,
         409
@@ -182,7 +223,7 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
     record.status = RunStatus::Prepared;
     db.save_run(&record).await.unwrap();
     assert_eq!(
-        call(&app, "DELETE", delete, json!({}), "Bearer org-a")
+        call(&app, &owner2, "DELETE", delete, json!({}), "Bearer org-a")
             .await
             .0,
         200

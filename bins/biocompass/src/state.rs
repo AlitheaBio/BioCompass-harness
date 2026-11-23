@@ -467,12 +467,15 @@ impl AppState {
             scaffold_root_dir: user_plugins_dir.clone(),
             ..default_agent_cfg
         };
-        let agent = Arc::new(AgentRuntime::new(
-            agent_cfg,
-            session_store.clone(),
-            blob_store.clone(),
-            hub.clone(),
-        )?);
+        let agent = Arc::new(
+            AgentRuntime::new(
+                agent_cfg,
+                session_store.clone(),
+                blob_store.clone(),
+                hub.clone(),
+            )?
+            .with_allow_scaffold(false),
+        );
 
         let allowed_origins = std::env::var("COMPASS_ALLOWED_ORIGINS")
             .unwrap_or_default()

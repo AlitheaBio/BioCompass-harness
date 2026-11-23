@@ -24,7 +24,15 @@ async fn publisher_prints_the_hubs_versioned_custom_entry() {
     let router = Router::new()
         .route(
             "/v2/fixture/numeric/manifests/:digest",
-            get(|| async { MANIFEST }),
+            get(|| async {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/vnd.oci.image.manifest.v1+json",
+                    )],
+                    MANIFEST,
+                )
+            }),
         )
         .route(
             "/api/v1/plugins",
@@ -122,7 +130,15 @@ async fn dev_05_publish_plugin_uploads_optional_icon_svg() {
     let router = Router::new()
         .route(
             "/v2/fixture/iconmod/manifests/:digest",
-            get(|| async { MANIFEST }),
+            get(|| async {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/vnd.oci.image.manifest.v1+json",
+                    )],
+                    MANIFEST,
+                )
+            }),
         )
         .route(
             "/api/v1/plugins",

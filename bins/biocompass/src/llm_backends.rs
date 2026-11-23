@@ -201,6 +201,59 @@ pub fn redact_llm_config(cfg: &LlmProviderConfig) -> RedactedLlmConfig {
     }
 }
 
+/// Defense-in-depth command validation for local CLI/ACP backends (`SEC-16`).
+/// Only permits recognized coding/ACP CLI executables and forbids shells, scripting interpreters,
+/// whitespace, and shell metacharacters.
+fn validate_local_cli_command(command: &str, args: &[String]) -> CompassResult<()> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(CompassError::Validation("CLI backend command cannot be empty".into()));
+    }
+    if trimmed.starts_with('-')
+        || trimmed
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, ';' | '&' | '|' | '`' | '$' | '<' | '>'))
+    {
+        return Err(CompassError::Validation(
+            "CLI backend command contains disallowed characters".into(),
+        ));
+    }
+    let basename = std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let allowed = matches!(
+        basename.as_str(),
+        "opencode"
+            | "gemini"
+            | "claude"
+            | "claude-code"
+            | "claude-code-acp"
+            | "codex"
+            | "codex-acp"
+            | "vibe"
+            | "vibe-acp"
+            | "kiro-cli"
+            | "goose"
+            | "aider"
+    );
+    if !allowed {
+        return Err(CompassError::Validation(format!(
+            "CLI backend executable '{trimmed}' is not an allowed ACP/CLI agent binary"
+        )));
+    }
+    if args
+        .iter()
+        .any(|a| a.chars().any(char::is_control))
+    {
+        return Err(CompassError::Validation(
+            "CLI backend arguments must not contain control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate and normalize an incoming UI update payload into a `LlmProviderConfig`.
 pub fn normalize_llm_config_request(
     req: UpdateLlmConfigRequest,
@@ -237,6 +290,13 @@ pub fn normalize_llm_config_request(
         } else if command == "gemini" && args.is_empty() {
             args.push("--acp".into());
         }
+    }
+
+    if matches!(
+        protocol,
+        LlmWireProtocol::AcpStdio | LlmWireProtocol::CodexCli | LlmWireProtocol::ClaudeCodeCli
+    ) {
+        validate_local_cli_command(&command, &args)?;
     }
 
     let same_backend = previous.is_some_and(|prev| {
