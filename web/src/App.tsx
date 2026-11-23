@@ -1,4 +1,5 @@
 import { setPrepareCaller } from "./prepareRequest";
+import { buildStagedPluginChatDraft } from "./pluginBridgePolicy";
 import { useWorkspaceReadHandle, workspaceReadStorageChanged } from "./workspaceReadSession";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1651,64 +1652,40 @@ export function App() {
 
   const handleSendModuleToChat = useCallback(
     (pluginId: string, message: string, context?: Record<string, unknown>) => {
+      // SEC-27: Never auto-submit plugin `sendToChat` calls; always stage the message
+      // and attachment into the composer for explicit user confirmation.
       setActivePage("workbench");
-      if (context && context["mode"] === "attach") {
-        // Keep the module visible side-by-side with chat if it was floating, and focus composer.
-        const hasPluginWindow = windows.some((w) => w.pluginId === pluginId);
-        if (hasPluginWindow) {
-          setWindows((prev) =>
-            prev.map((w) =>
-              w.pluginId === pluginId
-                ? { ...w, docked: true, minimized: false }
-                : w.docked
-                  ? { ...w, docked: false, minimized: true }
-                  : { ...w, minimized: true },
-            ),
-          );
-          setSidebarCollapsed(true);
-        }
-        const label =
-          typeof context["attachment_label"] === "string" &&
-          context["attachment_label"].trim()
-            ? context["attachment_label"]
-            : pluginId;
-        const preview =
-          typeof context["attachment_preview"] === "string"
-            ? context["attachment_preview"]
-            : undefined;
-        const images = extractImagesFromContext(context);
-        setAttachedModuleContext({
-          pluginId,
-          label,
-          preview,
-          defaultMessage: message,
-          context,
-          ...(images.length > 0 ? { images } : {}),
-        });
-        window.setTimeout(() => {
-          composerTextareaRef.current?.focus();
-        }, 40);
-        return;
+      const hasPluginWindow = windows.some((w) => w.pluginId === pluginId);
+      if (hasPluginWindow) {
+        setWindows((prev) =>
+          prev.map((w) =>
+            w.pluginId === pluginId
+              ? { ...w, docked: true, minimized: false }
+              : w.docked
+                ? { ...w, docked: false, minimized: true }
+                : { ...w, minimized: true },
+          ),
+        );
+        setSidebarCollapsed(true);
       }
-
-      if (session && context) {
-        const images = extractImagesFromContext(context);
-        if (images.length > 0) {
-          setUserImagesByPrompt((prev) => ({
-            ...prev,
-            [`${session.session_id}:${message.trim()}`]: images,
-          }));
-        }
+      const images = context ? extractImagesFromContext(context) : [];
+      const draft = buildStagedPluginChatDraft(pluginId, message, context, chatInput);
+      setAttachedModuleContext({
+        pluginId: draft.pluginId,
+        label: draft.label,
+        preview: draft.preview,
+        defaultMessage: draft.defaultMessage,
+        context: draft.context ?? {},
+        ...(images.length > 0 ? { images } : {}),
+      });
+      if (draft.stagedComposerText && !chatInput.trim()) {
+        setChatInput(draft.stagedComposerText);
       }
-
-      setWindows((prev) =>
-        prev.some((w) => !w.minimized && !w.docked)
-          ? prev.map((w) => (w.docked ? w : { ...w, minimized: true }))
-          : prev,
-      );
-      void submitChatPrompt(message, { pluginId, context });
+      window.setTimeout(() => {
+        composerTextareaRef.current?.focus();
+      }, 40);
     },
-    [session, chatBusy, windows, draftParamsByPlugin],
+    [windows, chatInput],
   );
 
   const handleScaffoldModule = async (payload: {

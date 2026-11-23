@@ -28,6 +28,7 @@ import {
   toQueryAst,
 } from "../api";
 import { CatalogImportWizard } from "./CatalogImportWizard";
+import { serializeRowsForExport } from "../csvExport";
 import { CatalogTableSearch } from "./CatalogTableSearch";
 import { PrivateUploadDialog } from "./PrivateUploadDialog";
 import { HostedReleaseChanges } from "./HostedReleaseChanges";
@@ -351,29 +352,6 @@ function downloadTextFile(filename: string, content: string, mime: string): void
   a.click();
   document.body.removeChild(a);
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function serializeRowsForExport(
-  rows: PeptideRecord[],
-  cols: Array<{ key: string }>,
-  format: "csv" | "tsv" | "json",
-): string {
-  if (format === "json") {
-    return JSON.stringify(rows, null, 2);
-  }
-  const sep = format === "tsv" ? "\t" : ",";
-  const escapeCell = (val: unknown): string => {
-    const s = val == null ? "" : String(val);
-    if (format === "csv" && (s.includes(",") || s.includes('"') || s.includes("\n"))) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s.replace(/[\r\n\t]+/g, " ");
-  };
-  const header = cols.map((c) => escapeCell(c.key)).join(sep);
-  const lines = rows.map((row) =>
-    cols.map((c) => escapeCell(row[c.key])).join(sep),
-  );
-  return [header, ...lines].join("\n");
 }
 
 function binderTierBadge(ic50: number): { label: string; cls: string } {

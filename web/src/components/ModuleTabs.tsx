@@ -1090,20 +1090,49 @@ export function ModuleRunsTab({
               </span>
             </div>
             <div className="bc-artifact-list">
-              {activeRun.artifacts.map((art) => (
-                <a
-                  key={art.name}
-                  className="bc-artifact-chip"
-                  href={`/api/v1/runs/${encodeURIComponent(activeRun.run_id)}/artifacts/${encodeURIComponent(art.name)}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <span className="mono">{art.name}</span>
-                  <span className="bc-caption">
-                    {(art.size_bytes / 1024).toFixed(1)} KB
-                  </span>
-                </a>
-              ))}
+              {activeRun.artifacts.map((art) => {
+                const encodedArtPath = art.name
+                  .split("/")
+                  .map(encodeURIComponent)
+                  .join("/");
+                const artifactUrl = `/api/v1/runs/${encodeURIComponent(activeRun.run_id)}/artifacts/${encodedArtPath}`;
+                const basename = art.name.split("/").pop() || "artifact.bin";
+                return (
+                  <button
+                    key={art.name}
+                    type="button"
+                    className="bc-artifact-chip"
+                    onClick={() => {
+                      // SEC-18: Download artifacts as inert application/octet-stream blobs
+                      // instead of opening container-authored HTML/SVG inline in the Workbench origin.
+                      void fetch(artifactUrl, { credentials: "include" })
+                        .then((r) => {
+                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                          return r.arrayBuffer();
+                        })
+                        .then((buf) => {
+                          const blob = new Blob([buf], {
+                            type: "application/octet-stream",
+                          });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = basename;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+                        })
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <span className="mono">{art.name}</span>
+                    <span className="bc-caption">
+                      {(art.size_bytes / 1024).toFixed(1)} KB
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
