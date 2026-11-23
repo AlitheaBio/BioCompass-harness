@@ -18,10 +18,11 @@ use biocompass_agent_core::{AgentConfig, AgentRuntime, AgentStreamEvent};
 use biocompass_core_traits::{
     BlobStore, CatalogId, CompassError, CreditAmountAct, DatasetGrant, LocalFsBlobStore, OrgId,
     PaymentGateway, RunStatus, SessionEventKind, SessionStore, SqliteActLedger, SqliteSessionStore,
+    StandardOciPolicyVerifier,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
-use biocompass_oci_runner::{OciContainerRunner, OciDistributionClient};
+use biocompass_oci_runner::OciContainerRunner;
 use biocompass_plugin_spec::LoadedPlugin;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -179,7 +180,7 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
         Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).expect("blob store"));
     let initial_act = CreditAmountAct::from_whole_act(50);
     let ledger = Arc::new(SqliteActLedger::in_memory(initial_act).expect("ledger"));
-    let oci_registry = Arc::new(OciDistributionClient::new(true).expect("oci registry"));
+    let oci_registry = Arc::new(StandardOciPolicyVerifier::strict_pinned());
     let oci_runner = Arc::new(OciContainerRunner::detect().await.expect("oci runner"));
 
     let runtime = Arc::new(
@@ -449,7 +450,7 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
     let catalog = DuckDbCatalogEngine::open_verified(&cat_dir).expect("open catalog");
     let catalog_id = catalog.manifest().id.clone();
 
-    let oci_registry = Arc::new(OciDistributionClient::new(true).expect("oci registry"));
+    let oci_registry = Arc::new(StandardOciPolicyVerifier::strict_pinned());
     let oci_runner = Arc::new(OciContainerRunner::detect().await.expect("oci runner"));
 
     let runtime = Arc::new(

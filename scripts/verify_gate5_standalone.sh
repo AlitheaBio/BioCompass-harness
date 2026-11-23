@@ -54,7 +54,7 @@ else
   "${EPHEMERAL_REGISTRY_ENGINE}" run -d --rm \
     --name "${EPHEMERAL_REGISTRY_NAME}" \
     -p "127.0.0.1:${REGISTRY_PORT}:5000" \
-    registry:2 >/dev/null
+    ghcr.io/distribution/distribution:3.0.0 >/dev/null
   for _ in {1..40}; do
     if curl -fsS "http://127.0.0.1:${REGISTRY_PORT}/v2/" >/dev/null 2>&1; then
       break

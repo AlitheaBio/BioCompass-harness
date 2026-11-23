@@ -22,20 +22,124 @@ fn plugin_dir() -> PathBuf {
         .expect("canonicalize plugins/hla-motif-enrichment")
 }
 
+struct EphemeralRegistry {
+    engine_bin: PathBuf,
+    container_name: String,
+    host_port: u16,
+    created_tags: Vec<String>,
+}
+
+impl EphemeralRegistry {
+    async fn start_and_push_motif(runner: &OciContainerRunner, context_dir: &std::path::Path) -> (Self, String) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("allocate ephemeral registry port")
+            .local_addr()
+            .unwrap()
+            .port();
+        let engine_bin = runner.engine().binary_path.clone();
+        let container_name = format!(
+            "biocompass-gate2-reg-{}-{}",
+            std::process::id(),
+            port
+        );
+        let status = Command::new(&engine_bin)
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container_name,
+                "-p",
+                &format!("127.0.0.1:{port}:5000"),
+                "ghcr.io/distribution/distribution:3.0.0",
+            ])
+            .status()
+            .expect("start ephemeral OCI registry");
+        assert!(status.success(), "failed starting ephemeral OCI registry");
+
+        let client = reqwest::Client::new();
+        let v2_url = format!("http://127.0.0.1:{port}/v2/");
+        let mut ready = false;
+        for _ in 0..40 {
+            if client.get(&v2_url).send().await.is_ok_and(|r| r.status().is_success()) {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(ready, "ephemeral OCI registry on 127.0.0.1:{port} did not become healthy");
+
+        let tag = format!("127.0.0.1:{port}/alithea/hla-motif-enrichment:2.0.0");
+        let mut build_cmd = Command::new(&engine_bin);
+        build_cmd.arg("build");
+        if runner.engine().kind == biocompass_oci_runner::EngineKind::Docker {
+            build_cmd.arg("--provenance=false");
+        }
+        let build_status = build_cmd
+            .args(["-q", "-t", &tag])
+            .arg(context_dir)
+            .status()
+            .expect("build hla-motif-enrichment");
+        assert!(build_status.success(), "failed building hla-motif-enrichment");
+
+        let push_status = Command::new(&engine_bin)
+            .args(["push", "-q", &tag])
+            .status()
+            .expect("push hla-motif-enrichment to ephemeral registry");
+        assert!(push_status.success(), "failed pushing hla-motif-enrichment");
+
+        let inspect_out = Command::new(&engine_bin)
+            .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &tag])
+            .output()
+            .expect("inspect RepoDigests");
+        assert!(inspect_out.status.success());
+        let pinned = String::from_utf8_lossy(&inspect_out.stdout).trim().to_owned();
+        assert!(pinned.contains("@sha256:"), "expected @sha256 digest, got '{pinned}'");
+
+        (
+            Self {
+                engine_bin,
+                container_name,
+                host_port: port,
+                created_tags: vec![tag, pinned.clone()],
+            },
+            pinned,
+        )
+    }
+}
+
+impl Drop for EphemeralRegistry {
+    fn drop(&mut self) {
+        let _ = self.host_port;
+        let _ = Command::new(&self.engine_bin)
+            .args(["rm", "-f", &self.container_name])
+            .output();
+        for tag in &self.created_tags {
+            let _ = Command::new(&self.engine_bin)
+                .args(["rmi", "-f", tag])
+                .output();
+        }
+    }
+}
+
 #[tokio::test]
 async fn live_oci_registry_manifest_verification_and_confinement_exploit_suite() {
-    let loaded =
-        LoadedPlugin::load_from_dir(plugin_dir(), false).expect("load @sha256 pinned plugin.toml");
+    let dir = plugin_dir();
+    let mut loaded =
+        LoadedPlugin::load_from_dir(&dir, false).expect("load @sha256 pinned plugin.toml");
     let runner = OciContainerRunner::detect()
         .await
         .expect("detect active Docker/Podman engine");
+    let (_ephemeral_reg, pinned_image) =
+        EphemeralRegistry::start_and_push_motif(&runner, &dir).await;
+    loaded.manifest.image = pinned_image;
 
-    // 1. Cryptographic OCI Distribution Spec v1.1 manifest verification against 127.0.0.1:5500
+    // 1. Cryptographic OCI Distribution Spec v1.1 manifest verification against ephemeral local registry
     let oci_client = OciDistributionClient::new(true).expect("oci client");
     let verified_image = oci_client
         .verify_image(&loaded.manifest.image)
         .await
-        .expect("verify real manifest @sha256 against 127.0.0.1:5500/v2/");
+        .expect("verify real manifest @sha256 against ephemeral OCI v1.1 registry");
     assert!(verified_image.sha256_digest.is_some());
 
     // Tamper 1 hex nibble of digest -> must fail with NotFound or IntegrityViolation
