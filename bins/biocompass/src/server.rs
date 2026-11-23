@@ -4395,10 +4395,60 @@ mod milestone_b_tests {
                             [(header::ETAG, "\"feed-v1\""), (header::CACHE_CONTROL, "public, max-age=60")],
                             Json(json!({
                                 "query": uri.query().unwrap_or(""),
-                                "offers": [
-                                    { "id": "mo-1", "kind": "run", "title": "HLA Motif Enrichment", "version": "2.0.0", "provider_org": "org-alithea" },
-                                    { "id": "mo-2", "kind": "download", "title": "Cell Type Annotator", "version": "1.1.0", "provider_org": "org-partner" }
-                                ]
+                                "artifacts": [
+                                    {
+                                        "cursor": 1,
+                                        "artifact_hash": "hash-desc-1",
+                                        "payload_hash": "ph-desc-1",
+                                        "artifact_kind": "descriptor",
+                                        "actor_id": "provider-alithea",
+                                        "created_at": 1760000000,
+                                        "document": { "hash": "hash-desc-1", "signer": "aaaa", "payload": {} }
+                                    },
+                                    {
+                                        "cursor": 2,
+                                        "artifact_hash": "hash-offer-1",
+                                        "payload_hash": "ph-1",
+                                        "artifact_kind": "offer",
+                                        "actor_id": "provider-alithea",
+                                        "created_at": 1760000001,
+                                        "document": {
+                                            "hash": "hash-offer-1",
+                                            "signer": "aaaa",
+                                            "payload": {
+                                                "provider_id": "provider-alithea",
+                                                "offer_id": "mo-1",
+                                                "offer_kind": "biocompass.module.run.v1",
+                                                "execution_profile": {
+                                                    "access_handles": ["alithea/hla-motif-enrichment@2.0.0"]
+                                                }
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "cursor": 3,
+                                        "artifact_hash": "hash-offer-2",
+                                        "payload_hash": "ph-2",
+                                        "artifact_kind": "offer",
+                                        "actor_id": "provider-partner",
+                                        "created_at": 1760000002,
+                                        "document": {
+                                            "hash": "hash-offer-2",
+                                            "signer": "bbbb",
+                                            "payload": {
+                                                "provider_id": "provider-partner",
+                                                "offer_id": "do-2",
+                                                "offer_kind": "dataset.ducklake.v1",
+                                                "execution_profile": {
+                                                    "access_handles": ["alithea/hla-atlas-v2026.1"]
+                                                }
+                                            }
+                                        }
+                                    }
+                                ],
+                                "active_offer_hashes": ["hash-offer-1", "hash-offer-2"],
+                                "has_more": false,
+                                "next_cursor": 3
                             })),
                         )
                     }
@@ -4782,7 +4832,8 @@ mod milestone_b_tests {
         )
         .unwrap();
         assert_eq!(feed_json["query"], "kind=run");
-        assert_eq!(feed_json["offers"].as_array().map(Vec::len), Some(2));
+        assert_eq!(feed_json["artifacts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(feed_json["active_offer_hashes"].as_array().map(Vec::len), Some(2));
 
         // [B1] GET /v1/artifacts/:hash proxied with digest header; traversal rejected.
         let art_resp = cloud_app

@@ -11,6 +11,7 @@ import {
   subscribeModuleOffer,
 } from "../api";
 import { sanitizeFederatedLaunchUrl } from "../safeUrl";
+import { formatFederatedOfferTarget } from "../milestoneBPolicy";
 import {
   hasMinOrgRole,
   type AuthPrincipal,
@@ -194,26 +195,42 @@ export function ModuleOffersView({
           {federated.length > 0 && (
             <div className="table-scroll">
               <table className="data-table">
-                <thead><tr><th>Hosted offer</th><th>Module release</th><th>Provider</th><th>Access</th></tr></thead>
+                <thead><tr><th>Federated offer</th><th>Module / Dataset</th><th>Provider</th><th>Access</th></tr></thead>
                 <tbody>
-                  {federated.map(({ offer, provider, launch_url }) => {
-                    const safeLaunchUrl = sanitizeFederatedLaunchUrl(launch_url);
+                  {federated.map(({ offer, offer_kind, provider, launch_url }) => {
+                    const safeLaunchUrl = launch_url ? sanitizeFederatedLaunchUrl(launch_url) : null;
+                    const kind = offer_kind ?? offer.action;
+                    const kindLabel =
+                      kind === "run"
+                        ? "Hosted run"
+                        : kind === "download"
+                          ? "Download"
+                          : kind === "dataset"
+                            ? "Dataset"
+                            : kind;
                     return (
-                      <tr key={`${provider}:${offer.offer_id}:${launch_url}`}>
-                        <th scope="row">{offer.title}</th>
-                        <td className="mono">{offer.plugin_id} · {offer.version}</td>
+                      <tr key={`${provider}:${offer.offer_id}:${launch_url ?? ""}`}>
+                        <th scope="row">
+                          {offer.title}
+                          {kindLabel && <div className="bc-caption">{kindLabel}</div>}
+                        </th>
+                        <td className="mono">{formatFederatedOfferTarget(offer)}</td>
                         <td>{provider}</td>
                         <td>
-                          {safeLaunchUrl ? (
-                            <a
-                              className="bc-btn bc-btn-secondary"
-                              href={safeLaunchUrl}
-                              rel="noopener noreferrer"
-                            >
-                              Open on {provider}
-                            </a>
+                          {launch_url ? (
+                            safeLaunchUrl ? (
+                              <a
+                                className="bc-btn bc-btn-secondary"
+                                href={safeLaunchUrl}
+                                rel="noopener noreferrer"
+                              >
+                                Open on {provider}
+                              </a>
+                            ) : (
+                              <span className="bc-caption">Blocked unsafe launch URL</span>
+                            )
                           ) : (
-                            <span className="bc-caption">Blocked unsafe launch URL</span>
+                            <span className="bc-caption">Synced via federation</span>
                           )}
                         </td>
                       </tr>

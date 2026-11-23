@@ -5,13 +5,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  formatFederatedOfferTarget,
   formatMarketplaceSyncBadge,
   getExternalProviderConsentInfo,
   requiresExternalProviderConsent,
   shouldPromptQuoteConsent,
   shouldShowMarketplaceConsentModal,
 } from "../src/milestoneBPolicy.ts";
-import type { MarketplaceStatus } from "../src/types.ts";
+import type { FederationPeerRecord, MarketplaceStatus } from "../src/types.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webSrc = resolve(here, "../src");
@@ -155,4 +156,47 @@ test("[B1/A3] Org Admin enrolls provider-edge and Control Tower manages federati
   assert.match(apiSrc, /\/api\/v1\/marketplace\/status/);
   assert.match(apiSrc, /\/api\/v1\/marketplace\/consent/);
   assert.match(apiSrc, /\/api\/v1\/marketplace\/sync/);
+
+  // Nullable home_org / destination_org on pending public PeerDto (#50).
+  const pendingPeer: FederationPeerRecord = {
+    id: "peer-1",
+    peer_url: "https://client.hospital.org",
+    peer_pubkey: "a".repeat(64),
+    org_name: "Hospital Client",
+    status: "pending",
+    requested_at: "2026-11-23T00:00:00Z",
+    enabled: false,
+    role: "consumer",
+    label: "Hospital Client",
+    origin: "https://client.hospital.org",
+    backchannel: "https://client.hospital.org",
+    home_org: null,
+    destination_org: null,
+    archive_enabled: false,
+  };
+  assert.equal(pendingPeer.home_org, null);
+  assert.equal(pendingPeer.destination_org, null);
+
+  // Federated dataset offers have plugin_id: null and catalog_id set (#50).
+  assert.equal(
+    formatFederatedOfferTarget({
+      offer_id: "do-1",
+      plugin_id: null,
+      version: null,
+      catalog_id: "alithea/hla-atlas-v2026.1",
+    }),
+    "alithea/hla-atlas-v2026.1",
+  );
+  assert.equal(
+    formatFederatedOfferTarget({
+      offer_id: "mo-1",
+      plugin_id: "alithea/hla-motif-enrichment",
+      version: "2.0.0",
+      catalog_id: null,
+    }),
+    "alithea/hla-motif-enrichment · 2.0.0",
+  );
+
+  const moduleOffersSrc = readSrc("components/ModuleOffersView.tsx");
+  assert.match(moduleOffersSrc, /formatFederatedOfferTarget\(offer\)/);
 });

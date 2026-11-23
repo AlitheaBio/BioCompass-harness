@@ -515,6 +515,120 @@ async fn fetch_marketplace_feed(
     let parsed: Value = serde_json::from_slice(&body)
         .map_err(|e| CompassError::Validation(format!("invalid marketplace feed JSON: {e}")))?;
 
+    Ok(parse_marketplace_feed(&parsed))
+}
+
+fn classify_froglet_offer_kind(raw: &str) -> String {
+    match raw.trim() {
+        "biocompass.module.run.v1" => "run".to_owned(),
+        "biocompass.module.download.v1" => "download".to_owned(),
+        "dataset.ducklake.v1" => "dataset".to_owned(),
+        other if other.starts_with("dataset.") || other.starts_with("biocompass.dataset.") => {
+            "dataset".to_owned()
+        }
+        other if !other.is_empty() => other.to_owned(),
+        _ => "offer".to_owned(),
+    }
+}
+
+/// Parse a `GET /v1/feed` JSON response.
+///
+/// Supports the canonical `compass-hub` Froglet feed wire format (`{ "artifacts": [...],
+/// "active_offer_hashes": [...], "has_more", "next_cursor" }`) as well as legacy flat
+/// `"offers"` / `"items"` / `"entries"` / array responses.
+pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceOfferSummary>) {
+    if let Some(artifacts) = parsed.get("artifacts").and_then(Value::as_array) {
+        let active_hashes: Option<std::collections::HashSet<&str>> = parsed
+            .get("active_offer_hashes")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect());
+        let has_more = parsed
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let mut matched_count = 0usize;
+        let mut preview = Vec::new();
+
+        for (idx, entry) in artifacts.iter().enumerate() {
+            let artifact_kind = entry
+                .get("artifact_kind")
+                .or_else(|| entry.pointer("/document/artifact_type"))
+                .and_then(Value::as_str);
+            if artifact_kind != Some("offer") {
+                continue;
+            }
+
+            let entry_hash = entry
+                .get("artifact_hash")
+                .or_else(|| entry.pointer("/document/hash"))
+                .and_then(Value::as_str);
+            if let Some(active) = &active_hashes
+                && !entry_hash.is_some_and(|h| active.contains(h))
+            {
+                continue;
+            }
+
+            matched_count += 1;
+            if preview.len() >= MAX_OFFERS_PREVIEW {
+                continue;
+            }
+
+            let payload = entry.pointer("/document/payload");
+            let id = payload
+                .and_then(|p| p.get("offer_id"))
+                .and_then(Value::as_str)
+                .or(entry_hash)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("offer-{}", idx + 1));
+
+            let raw_kind = payload
+                .and_then(|p| p.get("offer_kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let kind = classify_froglet_offer_kind(raw_kind);
+
+            let access_handle = payload
+                .and_then(|p| p.pointer("/execution_profile/access_handles/0"))
+                .and_then(Value::as_str);
+
+            let (title, version) = match (kind.as_str(), access_handle) {
+                ("run" | "download", Some(handle)) => match handle.split_once('@') {
+                    Some((plugin_id, ver)) if !plugin_id.is_empty() && !ver.is_empty() => {
+                        (plugin_id.to_owned(), Some(ver.to_owned()))
+                    }
+                    _ => (handle.to_owned(), None),
+                },
+                (_, Some(handle)) if !handle.is_empty() => (handle.to_owned(), None),
+                _ => (id.clone(), None),
+            };
+
+            let provider_org = payload
+                .and_then(|p| p.get("provider_id"))
+                .and_then(Value::as_str)
+                .or_else(|| entry.pointer("/document/signer").and_then(Value::as_str))
+                .or_else(|| entry.get("actor_id").and_then(Value::as_str))
+                .map(str::to_owned);
+
+            preview.push(MarketplaceOfferSummary {
+                id,
+                kind,
+                title,
+                version,
+                provider_org,
+            });
+        }
+
+        let total_count = if has_more {
+            active_hashes
+                .as_ref()
+                .map_or(matched_count, |active| matched_count.max(active.len()))
+        } else {
+            matched_count
+        };
+        return (total_count, preview);
+    }
+
     let items: &[Value] = if let Some(arr) = parsed.as_array() {
         arr
     } else if let Some(arr) = parsed.get("offers").and_then(Value::as_array) {
@@ -544,8 +658,8 @@ async fn fetch_marketplace_feed(
                 .or_else(|| item.get("offer_kind"))
                 .or_else(|| item.get("type"))
                 .and_then(Value::as_str)
-                .unwrap_or("module")
-                .to_owned();
+                .map(classify_froglet_offer_kind)
+                .unwrap_or_else(|| "module".to_owned());
             let title = item
                 .get("title")
                 .or_else(|| item.get("name"))
@@ -574,7 +688,7 @@ async fn fetch_marketplace_feed(
         })
         .collect();
 
-    Ok((items.len(), preview))
+    (items.len(), preview)
 }
 
 fn load_persisted_consent(data_dir: &Path) -> Option<PersistedMarketplaceConsent> {
@@ -788,5 +902,138 @@ mod tests {
         assert!(validate_marketplace_hub_url("https://169.254.169.254").is_err());
         assert!(validate_marketplace_hub_url("https://user:pass@hub.example.com").is_err());
         assert!(validate_marketplace_hub_url("https://hub.example.com?foo=bar").is_err());
+    }
+
+    #[test]
+    fn b1_parses_live_compass_hub_froglet_v1_feed_artifacts_and_active_hashes() {
+        let feed = serde_json::json!({
+            "artifacts": [
+                {
+                    "cursor": 1,
+                    "artifact_hash": "hash-desc-1",
+                    "payload_hash": "ph-desc-1",
+                    "artifact_kind": "descriptor",
+                    "actor_id": "provider-alithea",
+                    "created_at": 1760000000,
+                    "document": {
+                        "hash": "hash-desc-1",
+                        "signer": "aaaa",
+                        "payload": { "provider_id": "provider-alithea" }
+                    }
+                },
+                {
+                    "cursor": 2,
+                    "artifact_hash": "hash-offer-run",
+                    "payload_hash": "ph-run",
+                    "artifact_kind": "offer",
+                    "actor_id": "provider-alithea",
+                    "created_at": 1760000001,
+                    "document": {
+                        "hash": "hash-offer-run",
+                        "signer": "aaaa",
+                        "payload": {
+                            "provider_id": "provider-alithea",
+                            "offer_id": "mo-11111111111111111111111111111111",
+                            "offer_kind": "biocompass.module.run.v1",
+                            "execution_profile": {
+                                "access_handles": ["alithea/hla-motif-enrichment@2.0.0"]
+                            }
+                        }
+                    }
+                },
+                {
+                    "cursor": 3,
+                    "artifact_hash": "hash-offer-download",
+                    "payload_hash": "ph-dl",
+                    "artifact_kind": "offer",
+                    "actor_id": "provider-partner",
+                    "created_at": 1760000002,
+                    "document": {
+                        "hash": "hash-offer-download",
+                        "signer": "bbbb",
+                        "payload": {
+                            "provider_id": "provider-partner",
+                            "offer_id": "mo-22222222222222222222222222222222",
+                            "offer_kind": "biocompass.module.download.v1",
+                            "execution_profile": {
+                                "access_handles": ["partner/cell-annotator@1.3.0"]
+                            }
+                        }
+                    }
+                },
+                {
+                    "cursor": 4,
+                    "artifact_hash": "hash-offer-dataset",
+                    "payload_hash": "ph-ds",
+                    "artifact_kind": "offer",
+                    "actor_id": "provider-alithea",
+                    "created_at": 1760000003,
+                    "document": {
+                        "hash": "hash-offer-dataset",
+                        "signer": "aaaa",
+                        "payload": {
+                            "provider_id": "provider-alithea",
+                            "offer_id": "do-33333333333333333333333333333333",
+                            "offer_kind": "dataset.ducklake.v1",
+                            "execution_profile": {
+                                "access_handles": ["alithea/hla-atlas-v2026.1"]
+                            }
+                        }
+                    }
+                },
+                {
+                    "cursor": 5,
+                    "artifact_hash": "hash-offer-retired",
+                    "payload_hash": "ph-ret",
+                    "artifact_kind": "offer",
+                    "actor_id": "provider-alithea",
+                    "created_at": 1760000004,
+                    "document": {
+                        "hash": "hash-offer-retired",
+                        "signer": "aaaa",
+                        "payload": {
+                            "provider_id": "provider-alithea",
+                            "offer_id": "mo-retired",
+                            "offer_kind": "biocompass.module.run.v1",
+                            "execution_profile": {
+                                "access_handles": ["alithea/old-mod@0.1.0"]
+                            }
+                        }
+                    }
+                }
+            ],
+            "active_offer_hashes": [
+                "hash-offer-run",
+                "hash-offer-download",
+                "hash-offer-dataset"
+            ],
+            "cursor_type": "artifact_sequence",
+            "cursor_semantics": "exclusive_after",
+            "applied_cursor": 0,
+            "page_size": 50,
+            "has_more": false,
+            "next_cursor": 5
+        });
+
+        let (count, offers) = parse_marketplace_feed(&feed);
+        assert_eq!(count, 3, "only active offer artifacts must be counted (excluding descriptor & retired offer)");
+        assert_eq!(offers.len(), 3);
+
+        assert_eq!(offers[0].id, "mo-11111111111111111111111111111111");
+        assert_eq!(offers[0].kind, "run");
+        assert_eq!(offers[0].title, "alithea/hla-motif-enrichment");
+        assert_eq!(offers[0].version.as_deref(), Some("2.0.0"));
+        assert_eq!(offers[0].provider_org.as_deref(), Some("provider-alithea"));
+
+        assert_eq!(offers[1].id, "mo-22222222222222222222222222222222");
+        assert_eq!(offers[1].kind, "download");
+        assert_eq!(offers[1].title, "partner/cell-annotator");
+        assert_eq!(offers[1].version.as_deref(), Some("1.3.0"));
+        assert_eq!(offers[1].provider_org.as_deref(), Some("provider-partner"));
+
+        assert_eq!(offers[2].id, "do-33333333333333333333333333333333");
+        assert_eq!(offers[2].kind, "dataset");
+        assert_eq!(offers[2].title, "alithea/hla-atlas-v2026.1");
+        assert_eq!(offers[2].version, None);
     }
 }

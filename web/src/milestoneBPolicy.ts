@@ -110,3 +110,25 @@ export function shouldShowMarketplaceConsentModal(
   if (!status || status.airgapped) return false;
   return Boolean(status.prompt_required);
 }
+
+/**
+ * Formats the module release or dataset catalog target column for federated offers,
+ * safely handling `plugin_id == null` (`catalog_id`) on federated `dataset` offers.
+ */
+export function formatFederatedOfferTarget(offer: {
+  offer_id: string;
+  plugin_id?: string | null;
+  version?: string | null;
+  catalog_id?: string | null;
+}): string {
+  const pluginId = offer.plugin_id?.trim();
+  if (pluginId) {
+    const version = offer.version?.trim();
+    return version ? `${pluginId} · ${version}` : pluginId;
+  }
+  const catalogId = offer.catalog_id?.trim();
+  if (catalogId) {
+    return catalogId;
+  }
+  return offer.offer_id;
+}

@@ -303,10 +303,26 @@ export interface ModuleOffer {
   access?: ModuleOfferAccess;
 }
 
+export interface FederatedOfferSummary {
+  offer_id: string;
+  publisher_org_id?: string | null;
+  plugin_id?: string | null;
+  version?: string | null;
+  catalog_id?: string | null;
+  title: string;
+  action: ModuleOfferAction | "dataset" | string;
+  scope: ModuleOfferScope | string;
+  approval_required?: boolean;
+  access?: ModuleOfferAccess;
+}
+
 export interface FederatedModuleOffer {
-  offer: ModuleOffer;
+  offer_kind?: "run" | "download" | "dataset" | string;
+  peer_id?: string;
+  offer_hash?: string;
+  offer: FederatedOfferSummary;
   provider: string;
-  launch_url: string;
+  launch_url: string | null;
 }
 
 export interface ModuleOfferRequest {
@@ -935,8 +951,8 @@ export interface FederationPeerRecord {
   label: string;
   origin: string;
   backchannel: string;
-  home_org: string;
-  destination_org: string;
+  home_org: string | null;
+  destination_org: string | null;
   archive_enabled: boolean;
 }
 
