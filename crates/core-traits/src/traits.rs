@@ -3,10 +3,10 @@
 //! - Local (`biocompass up`): SQLite WAL + POSIX `~/.biocompass/store` + in-process `NodeRuntime` + SQLite ACT ledger.
 //! - Cloud (`compass-hub` + `biocompass --mode cloud-web`): PostgreSQL 16 + S3 REST v4 + OCI Distribution v1.1 + WSS `froglet-node` pool + Mollie/B2B ACT ledger.
 
-use crate::ids::{CreditAmountAct, OrgId, RunId, SessionId};
+use crate::ids::{CreditAmountAct, OrgId, ProjectId, RunId, SessionId};
 use crate::types::{
-    CompassResult, LedgerTx, OciImageRef, PrepareRunRequest, RunLogEvent, RunQuote, RunRecord,
-    SessionEvent, SessionEventKind, SessionRecord,
+    CompassResult, LedgerTx, OciImageRef, PrepareRunRequest, ProjectRecord, RunLogEvent, RunQuote,
+    RunRecord, RunReservation, SessionEvent, SessionEventKind, SessionRecord,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -29,9 +29,31 @@ pub trait SessionStore: Send + Sync {
         active_grant_id: &str,
     ) -> CompassResult<SessionRecord>;
 
+    async fn update_session(
+        &self,
+        session_id: &SessionId,
+        title: Option<&str>,
+        active_grant_id: Option<&str>,
+        project_id: Option<Option<&ProjectId>>,
+    ) -> CompassResult<SessionRecord>;
+
+    async fn delete_session(&self, session_id: &SessionId) -> CompassResult<()>;
+
     async fn get_session(&self, session_id: &SessionId) -> CompassResult<SessionRecord>;
 
     async fn list_sessions(&self, org_id: &OrgId) -> CompassResult<Vec<SessionRecord>>;
+
+    async fn create_project(&self, org_id: &OrgId, name: &str) -> CompassResult<ProjectRecord>;
+
+    async fn rename_project(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> CompassResult<ProjectRecord>;
+
+    async fn list_projects(&self, org_id: &OrgId) -> CompassResult<Vec<ProjectRecord>>;
+
+    async fn delete_project(&self, project_id: &ProjectId) -> CompassResult<()>;
 
     async fn append_event(
         &self,
@@ -44,6 +66,21 @@ pub trait SessionStore: Send + Sync {
     async fn list_events(&self, session_id: &SessionId) -> CompassResult<Vec<SessionEvent>>;
 
     async fn save_run(&self, run: &RunRecord) -> CompassResult<()>;
+
+    /// Persist a terminal run and its optional transcript entry.
+    async fn finish_run(
+        &self,
+        run: &RunRecord,
+        summary: &str,
+        metadata: Value,
+    ) -> CompassResult<()> {
+        self.save_run(run).await?;
+        if let Some(session_id) = &run.session_id {
+            self.append_event(session_id, SessionEventKind::RunCompleted, summary, metadata)
+                .await?;
+        }
+        Ok(())
+    }
 
     async fn get_run(&self, run_id: &RunId) -> CompassResult<RunRecord>;
 
@@ -59,8 +96,23 @@ pub trait BlobStore: Send + Sync {
     /// Read raw bytes from a logical key.
     async fn get_bytes(&self, key: &str) -> CompassResult<Vec<u8>>;
 
+    /// Read the stored bytes and return their lowercase SHA-256 digest and size.
+    /// Remote stores can stream the object to keep artifact verification memory bounded.
+    async fn sha256_and_size(&self, key: &str) -> CompassResult<(String, u64)> {
+        use sha2::{Digest, Sha256};
+        let bytes = self.get_bytes(key).await?;
+        Ok((hex::encode(Sha256::digest(&bytes)), bytes.len() as u64))
+    }
+
     /// Check whether a logical key exists.
     async fn exists(&self, key: &str) -> CompassResult<bool>;
+
+    /// Enumerate all object keys strictly below a directory, for historical result recovery.
+    async fn list_keys_under(&self, directory: &str) -> CompassResult<Vec<String>> {
+        Err(crate::CompassError::Storage(format!(
+            "listing blob keys below '{directory}' is unavailable"
+        )))
+    }
 
     /// Copy/materialize a stored object into a local scratch path (e.g. `/in` container staging).
     async fn materialize_to_path(&self, key: &str, dest: &Path) -> CompassResult<u64>;
@@ -91,6 +143,17 @@ pub trait RunDispatcher: Send + Sync {
 /// 5. Pluggable double-entry ACT credit ledger & top-up gateway (No-op/SQLite locally; B2B Invoice + Mollie in Cloud).
 #[async_trait]
 pub trait PaymentGateway: Send + Sync {
+    /// Inspect the original confirmation terms when this gateway owns native run recovery.
+    async fn run_reservation(
+        &self,
+        _org_id: &OrgId,
+        _run_id: &RunId,
+    ) -> CompassResult<Option<RunReservation>> {
+        Err(crate::types::CompassError::Payment(
+            "this gateway does not expose native run reservations".into(),
+        ))
+    }
+
     /// Return available (unreserved) ACT balance for `org_id`.
     async fn available_balance(&self, org_id: &OrgId) -> CompassResult<CreditAmountAct>;
 

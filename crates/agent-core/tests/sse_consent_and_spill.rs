@@ -16,12 +16,10 @@ use biocompass_agent_core::llm::{LlmProviderConfig, LlmWireProtocol};
 use biocompass_agent_core::tools::allowed_tool_definitions;
 use biocompass_agent_core::{AgentConfig, AgentRuntime, AgentStreamEvent};
 use biocompass_core_traits::{
-    BlobStore, CompassError, CreditAmountAct, DatasetGrant, LocalFsBlobStore, OrgId,
+    BlobStore, CatalogId, CompassError, CreditAmountAct, DatasetGrant, LocalFsBlobStore, OrgId,
     PaymentGateway, RunStatus, SessionEventKind, SessionStore, SqliteActLedger, SqliteSessionStore,
 };
-use biocompass_data_engine::{
-    CatalogColumnSpec, CatalogManifest, DuckDbCatalogEngine, seed_demo_hla_catalog,
-};
+use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
 use biocompass_oci_runner::{OciContainerRunner, OciDistributionClient};
 use biocompass_plugin_spec::LoadedPlugin;
@@ -164,7 +162,8 @@ async fn start_mock_sse_server(mode: &str) -> (String, Arc<Mutex<Vec<Value>>>) {
 async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
     // 1. Static schema check: zero confirm tools exist in allowed_tool_definitions().
     let defs = allowed_tool_definitions();
-    assert_eq!(defs.len(), 5);
+    assert_eq!(defs.len(), 8);
+    assert!(defs.iter().any(|d| d.name == "update_module_draft"));
     for d in &defs {
         assert!(
             !d.name.contains("confirm"),
@@ -215,7 +214,7 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
     runtime.register_plugin(plugin).await.expect("reg plugin");
 
     let org_id = OrgId::new("org-gate4").expect("org id");
-    let grant = DatasetGrant::restricted_partner_demo(org_id.clone(), catalog_id);
+    let grant = DatasetGrant::scoped_rows_partner(org_id.clone(), catalog_id);
     let session = session_store
         .create_session(&org_id, "Gate 4 Consent & Spill", &grant.grant_id)
         .await
@@ -250,6 +249,9 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
                 api_key: "test-key".into(),
                 model: "mock-sse-v1".into(),
                 max_tokens: 1024,
+                command: String::new(),
+                args: Vec::new(),
+                config_options: Default::default(),
             }),
             max_tool_iterations: 4,
             spill_threshold_bytes: 48_000,
@@ -321,27 +323,29 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
     assert!(logged_events.iter().any(|e| e.kind == SessionEventKind::AssistantMessage));
 
     // 4. `> 60 KB` Tool Payload Spill Test under real `48 KB` threshold:
-    // Register a second verified catalog whose manifest metadata exceeds 65 KB so `list_catalogs`
+    // Register a second verified DuckLake catalog whose summary description exceeds 65 KB so `list_catalogs`
     // naturally produces a ~66 KB JSON payload.
     let big_cat_dir = tmp.path().join("big_catalog");
-    seed_demo_hla_catalog(&big_cat_dir).expect("seed big catalog");
-    let manifest_path = big_cat_dir.join("catalog.json");
-    let mut big_manifest: CatalogManifest =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("read manifest"))
-            .expect("parse manifest");
-    big_manifest.id = "alithea/oversized-atlas-v1".into();
-    big_manifest.description = "X".repeat(64_000);
-    big_manifest.columns.push(CatalogColumnSpec {
-        name: "extended_notes".into(),
-        sql_type: "VARCHAR".into(),
-        maskable: false,
-    });
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&big_manifest).expect("encode big manifest"),
+    let mut pk_map = std::collections::BTreeMap::new();
+    pk_map.insert("peptides".to_owned(), vec!["peptide_id".to_owned()]);
+    let big_catalog = DuckDbCatalogEngine::create_local_catalog(
+        &big_cat_dir,
+        CatalogId::new("alithea/oversized-atlas-v1").expect("big catalog id"),
+        "Oversized Atlas",
+        "1.0",
+        "X".repeat(64_000),
+        "Homo sapiens",
+        pk_map,
+        "Initial oversized metadata seed",
+        |conn| {
+            conn.execute_batch(
+                "CREATE TABLE dl.peptides (peptide_id VARCHAR, sequence VARCHAR, extended_notes VARCHAR);
+                 INSERT INTO dl.peptides VALUES ('PEP_1', 'GILGFVFTL', 'note');",
+            )
+            .map_err(|e| CompassError::Storage(e.to_string()))
+        },
     )
-    .expect("write big manifest");
-    let big_catalog = DuckDbCatalogEngine::open_verified(&big_cat_dir).expect("open big catalog");
+    .expect("create big catalog");
     runtime
         .register_catalog(big_catalog)
         .await
@@ -361,6 +365,9 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
                 api_key: "test-key".into(),
                 model: "mock-sse-v1".into(),
                 max_tokens: 1024,
+                command: String::new(),
+                args: Vec::new(),
+                config_options: Default::default(),
             }),
             max_tool_iterations: 4,
             spill_threshold_bytes: 48_000, // Production 48 KB (~12k tokens) threshold
@@ -419,4 +426,238 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
         raw_spilled.len() as u64,
         spill_doc["original_bytes"].as_u64().unwrap()
     );
+}
+
+#[tokio::test]
+async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
+    use biocompass_agent_core::llm::LlmToolCall;
+    use biocompass_agent_core::prompt::build_system_prompt;
+    use biocompass_agent_core::tools::execute_agent_tool;
+    use biocompass_core_traits::{ArtifactRef, NodeId, PluginId, RunId, RunQuote, RunRecord};
+    use chrono::Utc;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let keys = NodeKeypairSet::load_or_generate(tmp.path().join("keys")).expect("keys");
+    let session_store = Arc::new(SqliteSessionStore::in_memory().expect("session store"));
+    let blob_store = Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).expect("blob store"));
+    let ledger = Arc::new(
+        SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(50)).expect("ledger"),
+    );
+
+    let cat_dir = tmp.path().join("cat");
+    seed_demo_hla_catalog(&cat_dir).expect("seed catalog");
+    let catalog = DuckDbCatalogEngine::open_verified(&cat_dir).expect("open catalog");
+    let catalog_id = catalog.manifest().id.clone();
+
+    let oci_registry = Arc::new(OciDistributionClient::new(true).expect("oci registry"));
+    let oci_runner = Arc::new(OciContainerRunner::detect().await.expect("oci runner"));
+
+    let runtime = Arc::new(
+        InProcessNodeRuntime::new(NodeRuntimeDeps {
+            session_store: session_store.clone(),
+            blob_store: blob_store.clone(),
+            payment_gateway: ledger,
+            oci_registry,
+            oci_runner,
+            keys,
+            stage_root_dir: tmp.path().join("stages"),
+            allow_local_dev_tags: true,
+        })
+        .expect("runtime"),
+    );
+    runtime.register_catalog(catalog).await.expect("register catalog");
+
+    let org_id = OrgId::new("org-nb").expect("org id");
+    let grant = DatasetGrant::scoped_rows_partner(org_id.clone(), catalog_id);
+    let session = session_store
+        .create_session(&org_id, "Notebook Bridge Session", &grant.grant_id)
+        .await
+        .expect("session");
+
+    let art_key = "artifacts/test/report.html";
+    let sha = blob_store
+        .put_bytes(art_key, b"<html><body>OK</body></html>")
+        .await
+        .expect("put artifact");
+
+    let run_id = RunId::new("run-nb-bridge-1").expect("run id");
+    let plugin_id = PluginId::new("alithea/bc-jupyter-notebook").expect("pid");
+    let big_b64 = "A".repeat(4096);
+    let now = Utc::now();
+    let rec = RunRecord {
+        run_id: run_id.clone(),
+        org_id: org_id.clone(),
+        session_id: Some(session.session_id.clone()),
+        plugin_id: plugin_id.clone(),
+        plugin_version: "1.0.0".into(),
+        status: RunStatus::Succeeded,
+        admission: None,
+        params: json!({
+            "notebook_title": "Test NB",
+            "cells": [{ "cell_type": "code", "source": "print(1)" }]
+        }),
+        grant: Some(grant.clone()),
+        quote: RunQuote {
+            run_id: run_id.clone(),
+            plugin_id,
+            plugin_version: "1.0.0".into(),
+            image_ref: "127.0.0.1:5500/alithea/bc-jupyter-notebook@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            target_node_id: NodeId::new("node-1").expect("node"),
+            offer_id: "default".into(),
+            offer_name: "Standard Run".into(),
+            base_fee_act: CreditAmountAct(0),
+            estimated_cost_act: CreditAmountAct(0),
+            max_input_bytes: 10 * 1024 * 1024,
+            max_output_bytes: 256 * 1024 * 1024,
+            max_runtime_sec: 1800,
+            max_memory_mb: 4096,
+            workload_hash: "hash-1".into(),
+            dataset_grant_summary: Some(grant.label.clone()),
+            froglet_quote: json!({}),
+            expires_at: now,
+        },
+        result_json: Some(json!({
+            "notebook_title": "Test NB",
+            "cells": [{
+                "index": 0,
+                "outputs": [{ "output_type": "display_data", "data": { "image/png": big_b64 } }]
+            }]
+        })),
+        artifacts: vec![ArtifactRef {
+            name: "notebook_report.html".into(),
+            blob_key: art_key.into(),
+            media_type: "text/html".into(),
+            size_bytes: 28,
+            sha256: sha,
+        }],
+        froglet_receipt: None,
+        froglet_chain: vec![],
+        receipt_verified: true,
+        logs: vec![],
+        error_message: None,
+        created_at: now,
+        completed_at: Some(now),
+    };
+    session_store.save_run(&rec).await.expect("save run");
+
+    let listed = execute_agent_tool(
+        &LlmToolCall {
+            id: "c1".into(),
+            name: "list_runs".into(),
+            arguments: json!({ "plugin_id": "alithea/bc-jupyter-notebook", "limit": 5 }),
+        },
+        &org_id,
+        &session.session_id,
+        Some(&grant),
+        runtime.as_ref(),
+        session_store.as_ref(),
+        blob_store.as_ref(),
+        tmp.path(),
+        None,
+    )
+    .await;
+    assert_eq!(listed["runs"].as_array().expect("runs").len(), 1);
+    assert_eq!(listed["runs"][0]["run_id"], json!(rec.run_id.as_str()));
+
+    let res = execute_agent_tool(
+        &LlmToolCall {
+            id: "c2".into(),
+            name: "get_run_result".into(),
+            arguments: json!({ "run_id": rec.run_id.as_str() }),
+        },
+        &org_id,
+        &session.session_id,
+        Some(&grant),
+        runtime.as_ref(),
+        session_store.as_ref(),
+        blob_store.as_ref(),
+        tmp.path(),
+        None,
+    )
+    .await;
+    let omitted = res["result_json"]["cells"][0]["outputs"][0]["data"]["image/png"]
+        .as_str()
+        .expect("redacted png placeholder");
+    assert!(omitted.contains("base64 omitted"), "got {omitted}");
+
+    let art = execute_agent_tool(
+        &LlmToolCall {
+            id: "c3".into(),
+            name: "get_run_artifact".into(),
+            arguments: json!({ "run_id": rec.run_id.as_str(), "artifact_name": "notebook_report.html" }),
+        },
+        &org_id,
+        &session.session_id,
+        Some(&grant),
+        runtime.as_ref(),
+        session_store.as_ref(),
+        blob_store.as_ref(),
+        tmp.path(),
+        None,
+    )
+    .await;
+    assert_eq!(art["content"], json!("<html><body>OK</body></html>"));
+
+    let prompt = build_system_prompt(
+        Some(&grant),
+        &[],
+        &[],
+        Some(&json!({
+            "plugin_id": "alithea/bc-jupyter-notebook",
+            "draft_params": { "notebook_title": "Live Draft" },
+            "latest_run": { "run_id": rec.run_id.as_str(), "status": "succeeded" }
+        })),
+    );
+    assert!(prompt.contains("Active Open Module Context (Live UI Draft, Parameters & Outputs)"));
+    assert!(prompt.contains("Live Draft"));
+    assert!(prompt.contains(rec.run_id.as_str()));
+
+    let plugin = LoadedPlugin::load_from_dir(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root")
+            .join("plugins/hla-motif-enrichment"),
+        false,
+    )
+    .expect("load plugin");
+    runtime.register_plugin(plugin).await.expect("reg plugin");
+
+    let (tx, mut rx) = mpsc::channel::<AgentStreamEvent>(8);
+    let draft_res = execute_agent_tool(
+        &LlmToolCall {
+            id: "c4".into(),
+            name: "update_module_draft".into(),
+            arguments: json!({
+                "plugin_id": "alithea/hla-motif-enrichment",
+                "params": { "min_length": 9, "max_length": 11 },
+                "open_tab": "run"
+            }),
+        },
+        &org_id,
+        &session.session_id,
+        Some(&grant),
+        runtime.as_ref(),
+        session_store.as_ref(),
+        blob_store.as_ref(),
+        tmp.path(),
+        Some(&tx),
+    )
+    .await;
+    assert_eq!(draft_res["status"], json!("applied_to_open_module_ui"));
+    let ev = rx.recv().await.expect("stream event");
+    match ev {
+        AgentStreamEvent::ModuleDraftUpdated {
+            plugin_id,
+            params,
+            merge,
+            open_tab,
+        } => {
+            assert_eq!(plugin_id, "alithea/hla-motif-enrichment");
+            assert_eq!(params["min_length"], json!(9));
+            assert!(merge);
+            assert_eq!(open_tab.as_deref(), Some("run"));
+        }
+        other => panic!("unexpected stream event: {other:?}"),
+    }
 }

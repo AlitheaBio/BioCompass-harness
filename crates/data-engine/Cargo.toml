@@ -4,18 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Embedded DuckDB engine over immutable Parquet catalogs with SHA-256 verification and Grant row/*** sequence masking"
+description = "DuckLake + Arrow RecordBatch catalog engine with SHA-256 sealed snapshots, verify-once shard cache, and 3-level DatasetGrant enforcement"
 
 [lints]
 workspace = true
 
 [dependencies]
 biocompass-core-traits.workspace = true
+chrono.workspace = true
 duckdb.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

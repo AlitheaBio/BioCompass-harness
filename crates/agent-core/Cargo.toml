@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+axum.workspace = true
 biocompass-core-traits.workspace = true
 biocompass-data-engine.workspace = true
 biocompass-node-runtime.workspace = true
@@ -24,7 +25,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
 biocompass-core-traits = { workspace = true, features = ["local-sqlite"] }
 biocompass-oci-runner.workspace = true
 tempfile.workspace = true

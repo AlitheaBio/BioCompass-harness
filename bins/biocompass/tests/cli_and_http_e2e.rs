@@ -197,7 +197,8 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
     assert_eq!(health["status"], json!("ok"));
     assert!(health["plugin_count"].as_u64().unwrap_or(0) >= 2);
 
-    // 5b. Discover catalog ID via GET /api/v1/catalogs, then query with Partner Masked Grant (`'***'` + Lung-only)
+    // 5b. Discover catalog ID via GET /api/v1/catalogs, then query with Partner Scoped Rows Grant (unmasked + Lung-only)
+    // and verify compute_only grant is rejected on query API, custom module, and local export!
     let cat_list: Value = http
         .get(format!("{base}/api/v1/catalogs"))
         .send()
@@ -210,6 +211,12 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
         .as_str()
         .expect("catalog id string");
     assert_eq!(catalog_id, "alithea/hla-atlas-v2026.1");
+    assert!(
+        cat_list["catalogs"][0]["facets"]["hla_alleles"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "expected published non-sensitive hla_alleles facets on catalog card"
+    );
 
     let cat_resp: Value = http
         .post(format!("{base}/api/v1/catalogs/{catalog_id}/query"))
@@ -223,13 +230,43 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
         .json()
         .await
         .expect("catalog query json");
-    assert_eq!(cat_resp["sequence_masked"], json!(true), "unexpected resp: {cat_resp}");
+    assert_eq!(cat_resp["access_level"], json!("rows"), "unexpected resp: {cat_resp}");
     let rows = cat_resp["rows"].as_array().expect("rows");
     assert!(!rows.is_empty());
     for r in rows {
-        assert_eq!(r["sequence"], json!("***"));
+        let seq = r["sequence"].as_str().expect("sequence string");
+        assert!(seq.len() >= 8 && seq != "***", "expected unmasked IUPAC sequence, got {r}");
         assert_eq!(r["organ"], json!("Lung"));
     }
+
+    // Verify compute_only grant gets 403 on query API, local export, and unapproved custom module!
+    let co_query = http
+        .post(format!("{base}/api/v1/catalogs/{catalog_id}/query"))
+        .json(&json!({ "grant_id": "compute_only", "query": { "limit": 10 } }))
+        .send()
+        .await
+        .expect("POST compute_only query");
+    assert_eq!(co_query.status(), 403);
+
+    let co_export = http
+        .post(format!("{base}/api/v1/catalogs/{catalog_id}/export"))
+        .json(&json!({ "grant_id": "compute_only", "query": { "limit": 10 } }))
+        .send()
+        .await
+        .expect("POST compute_only export");
+    assert_eq!(co_export.status(), 403);
+
+    let co_custom = http
+        .post(format!("{base}/api/v1/runs/prepare"))
+        .json(&json!({
+            "plugin_id": "alithea/gate4-uv-probe",
+            "grant_id": "compute_only",
+            "params": { "alleles": ["HLA-A*02:01"], "min_length": 8, "max_length": 11 }
+        }))
+        .send()
+        .await
+        .expect("POST compute_only custom module prepare");
+    assert_eq!(co_custom.status(), 403);
 
     // 5c. `/plugin-ui/...` enforces strict `PLUGIN_SANDBOX_CSP` (`connect-src 'none'`)
     let ui_resp = http

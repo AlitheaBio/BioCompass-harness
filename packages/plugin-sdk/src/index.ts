@@ -12,6 +12,8 @@
 
 export const BIOCOMPASS_RPC_CHANNEL = "biocompass.plugin.rpc.v1" as const;
 
+export type GrantAccessLevel = "none" | "compute_only" | "rows";
+
 export interface SdkPeptideRecord {
   peptide_id: string;
   sequence: string;
@@ -26,7 +28,57 @@ export interface SdkPeptideRecord {
   donor_count: number;
 }
 
+export type SdkScalarValue = string | number | boolean;
+
+export type SdkFilterExpr =
+  | {
+      op: "eq" | "neq" | "gt" | "gte" | "lt" | "lte";
+      column: string;
+      value: SdkScalarValue;
+    }
+  | {
+      op: "starts_with";
+      column: string;
+      prefix: string;
+    }
+  | {
+      op: "in";
+      column: string;
+      values: SdkScalarValue[];
+    }
+  | {
+      op: "is_null" | "is_not_null";
+      column: string;
+    }
+  | {
+      op: "and" | "or";
+      exprs: SdkFilterExpr[];
+    };
+
+export interface SdkOrderBySpec {
+  column: string;
+  direction?: "asc" | "desc";
+}
+
+export interface SdkAttachedCatalogPin {
+  catalog_id: string;
+  grant_id: string;
+  snapshot_id?: number | null;
+}
+
+export interface SdkQueryAst {
+  table?: string | null;
+  columns?: string[];
+  filter?: SdkFilterExpr | null;
+  order_by?: SdkOrderBySpec[];
+  limit?: number;
+  offset?: number;
+  snapshot_id?: number | null;
+  additional_sources?: SdkAttachedCatalogPin[];
+}
+
 export interface SdkCatalogQuery {
+  table?: string | null;
   organs?: string[];
   conditions?: string[];
   hla_alleles?: string[];
@@ -34,16 +86,90 @@ export interface SdkCatalogQuery {
   min_length?: number;
   max_length?: number;
   max_affinity_nm?: number;
+  sequence_prefix?: string;
   limit?: number;
+  snapshot_id?: number;
 }
 
-export interface SdkCatalogQueryResult {
+export interface SdkColumnDescriptor {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+}
+
+export interface SdkQueryTableResult<TRow = Record<string, unknown>> {
   catalog_id: string;
+  snapshot_id: number;
+  dataset_digest: string;
+  table: string;
   grant_id: string;
-  sequence_masked: boolean;
-  compiled_view_sql: string;
+  access_level: GrantAccessLevel;
+  columns: SdkColumnDescriptor[];
   total_in_scope: number;
-  rows: SdkPeptideRecord[];
+  rows: TRow[];
+  remaining_daily_row_budget?: number | null;
+}
+
+export type SdkCatalogQueryResult<TRow = SdkPeptideRecord> = SdkQueryTableResult<TRow>;
+
+/**
+ * Normalize either a typed `SdkQueryAst` or structured `SdkCatalogQuery` filter object into a
+ * canonical `SdkQueryAst` ready for `/api/v1/catalogs/:ns/:name/query`.
+ */
+export function compileSdkCatalogQuery(
+  input: SdkQueryAst | SdkCatalogQuery,
+): SdkQueryAst {
+  const rec = input as Record<string, unknown>;
+  if (
+    "filter" in rec ||
+    "columns" in rec ||
+    "order_by" in rec ||
+    "offset" in rec ||
+    "additional_sources" in rec
+  ) {
+    return input as SdkQueryAst;
+  }
+
+  const legacy = input as SdkCatalogQuery;
+  const exprs: SdkFilterExpr[] = [];
+  if (legacy.organs && legacy.organs.length > 0) {
+    exprs.push({ op: "in", column: "organ", values: legacy.organs });
+  }
+  if (legacy.conditions && legacy.conditions.length > 0) {
+    exprs.push({ op: "in", column: "condition", values: legacy.conditions });
+  }
+  if (legacy.hla_alleles && legacy.hla_alleles.length > 0) {
+    exprs.push({ op: "in", column: "hla_allele", values: legacy.hla_alleles });
+  }
+  if (legacy.gene_symbols && legacy.gene_symbols.length > 0) {
+    exprs.push({ op: "in", column: "gene_symbol", values: legacy.gene_symbols });
+  }
+  if (typeof legacy.min_length === "number" && Number.isFinite(legacy.min_length)) {
+    exprs.push({ op: "gte", column: "peptide_length", value: legacy.min_length });
+  }
+  if (typeof legacy.max_length === "number" && Number.isFinite(legacy.max_length)) {
+    exprs.push({ op: "lte", column: "peptide_length", value: legacy.max_length });
+  }
+  if (typeof legacy.max_affinity_nm === "number" && Number.isFinite(legacy.max_affinity_nm)) {
+    exprs.push({ op: "lte", column: "affinity_nm", value: legacy.max_affinity_nm });
+  }
+  if (typeof legacy.sequence_prefix === "string" && legacy.sequence_prefix.trim().length > 0) {
+    exprs.push({
+      op: "starts_with",
+      column: "sequence",
+      prefix: legacy.sequence_prefix.trim().toUpperCase(),
+    });
+  }
+
+  const filter: SdkFilterExpr | null =
+    exprs.length === 0 ? null : exprs.length === 1 ? exprs[0]! : { op: "and", exprs };
+
+  return {
+    ...(legacy.table != null ? { table: legacy.table } : {}),
+    ...(filter ? { filter } : {}),
+    ...(typeof legacy.limit === "number" ? { limit: legacy.limit } : {}),
+    ...(typeof legacy.snapshot_id === "number" ? { snapshot_id: legacy.snapshot_id } : {}),
+  };
 }
 
 export interface SdkRunQuote {
@@ -78,14 +204,24 @@ export interface SdkRunRecord {
   error_message: string | null;
 }
 
+export type PluginTheme = "light" | "dark";
+
 export interface PluginHostContext {
   pluginId: string;
   pluginVersion: string;
   activeGrantId: string;
   activeGrantLabel: string;
+  accessLevel: GrantAccessLevel;
+  catalogFacets: Record<string, string[]>;
+  /** @deprecated v2 3-level grants never mask columns with '***'; always `false`. */
   sequenceMasked: boolean;
   defaultCatalogId: string;
+  releaseVersion?: number;
   latestRun: SdkRunRecord | null;
+  draftParams?: Record<string, unknown> | null;
+  pendingRun?: SdkRunQuote | null;
+  pendingParams?: Record<string, unknown> | null;
+  theme?: PluginTheme;
 }
 
 interface JsonRpcRequestFrame {
@@ -139,14 +275,27 @@ function isBiocompassFrame(data: unknown): data is RpcFrame {
 }
 
 export interface PluginClientOptions {
+  /** Deadline for short RPCs. The host owns worker startup and quote deadlines. */
   timeoutMs?: number;
+}
+
+export interface SdkDownloadFileRequest {
+  filename: string;
+  mimeType?: string;
+  content: string;
+  encoding?: "utf-8" | "base64";
 }
 
 export interface BioCompassPluginClient {
   getContext(): Promise<PluginHostContext>;
-  queryCatalog(query: SdkCatalogQuery): Promise<SdkCatalogQueryResult>;
+  queryCatalog<TRow = SdkPeptideRecord>(
+    query: SdkQueryAst | SdkCatalogQuery,
+  ): Promise<SdkQueryTableResult<TRow>>;
   prepareRun(params: Record<string, unknown>): Promise<SdkRunQuote>;
   getLatestRun(): Promise<SdkRunRecord | null>;
+  sendToChat(message: string, context?: Record<string, unknown>): Promise<void>;
+  syncDraftParams(params: Record<string, unknown>): Promise<void>;
+  downloadFile(req: SdkDownloadFileRequest): Promise<void>;
   onContextUpdate(listener: (ctx: PluginHostContext) => void): () => void;
   dispose(): void;
 }
@@ -165,10 +314,22 @@ export function createPluginClient(
     {
       resolve: (value: unknown) => void;
       reject: (reason: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
+      timer: ReturnType<typeof setTimeout> | undefined;
     }
   >();
   const contextListeners = new Set<(ctx: PluginHostContext) => void>();
+
+  const syncDocumentTheme = (ctx: PluginHostContext | null | undefined): void => {
+    if (typeof document === "undefined") return;
+    const theme = ctx?.theme;
+    if (theme === "dark" || theme === "light") {
+      document.documentElement.setAttribute("data-theme", theme);
+      document.documentElement.style.colorScheme = theme;
+      if (document.body) {
+        document.body.setAttribute("data-theme", theme);
+      }
+    }
+  };
 
   const onMessage = (event: MessageEvent<unknown>): void => {
     if (event.source !== window.parent) {
@@ -200,6 +361,7 @@ export function createPluginClient(
       isObjectRecord(frame.params)
     ) {
       const ctx = frame.params as unknown as PluginHostContext;
+      syncDocumentTheme(ctx);
       for (const listener of contextListeners) {
         listener(ctx);
       }
@@ -225,7 +387,9 @@ export function createPluginClient(
     };
 
     return new Promise<TResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      // Preparation can wait for a cold worker. The host reports its own deadline
+      // and can still present a valid paid quote until that request finishes.
+      const timer = method === "biocompass.prepareRun" ? undefined : setTimeout(() => {
         pending.delete(id);
         reject(new Error(`RPC timeout (${timeoutMs}ms) calling ${method}`));
       }, timeoutMs);
@@ -241,12 +405,28 @@ export function createPluginClient(
   }
 
   return {
-    getContext: () => call<PluginHostContext>("biocompass.getContext"),
-    queryCatalog: (query) =>
-      call<SdkCatalogQueryResult>("biocompass.queryCatalog", query),
+    getContext: async () => {
+      const ctx = await call<PluginHostContext>("biocompass.getContext");
+      syncDocumentTheme(ctx);
+      return ctx;
+    },
+    queryCatalog: <TRow = SdkPeptideRecord>(query: SdkQueryAst | SdkCatalogQuery) =>
+      call<SdkQueryTableResult<TRow>>(
+        "biocompass.queryCatalog",
+        compileSdkCatalogQuery(query),
+      ),
     prepareRun: (params) =>
       call<SdkRunQuote>("biocompass.prepareRun", params),
     getLatestRun: () => call<SdkRunRecord | null>("biocompass.getLatestRun"),
+    sendToChat: (message, context) =>
+      call<void>("biocompass.sendToChat", { message, context }),
+    syncDraftParams: (params) =>
+      call<void>("biocompass.syncDraftParams", params),
+    downloadFile: (req) =>
+      call<void>(
+        "biocompass.downloadFile",
+        req as unknown as Record<string, unknown>,
+      ),
     onContextUpdate: (listener) => {
       contextListeners.add(listener);
       return () => {
@@ -267,9 +447,12 @@ export function createPluginClient(
 
 export interface PluginHostHandlers {
   getContext(): Promise<PluginHostContext> | PluginHostContext;
-  queryCatalog(query: SdkCatalogQuery): Promise<SdkCatalogQueryResult>;
+  queryCatalog(query: SdkQueryAst): Promise<SdkQueryTableResult<unknown>>;
   prepareRun(params: Record<string, unknown>): Promise<SdkRunQuote>;
   getLatestRun(): Promise<SdkRunRecord | null> | SdkRunRecord | null;
+  sendToChat?: (message: string, context?: Record<string, unknown>) => Promise<void> | void;
+  syncDraftParams?: (params: Record<string, unknown>) => Promise<void> | void;
+  downloadFile?: (req: SdkDownloadFileRequest) => Promise<void> | void;
 }
 
 export interface PluginHostBridge {
@@ -303,7 +486,7 @@ export function attachPluginHostBridge(
             break;
           case "biocompass.queryCatalog": {
             const q = isObjectRecord(req.params)
-              ? (req.params as SdkCatalogQuery)
+              ? compileSdkCatalogQuery(req.params as SdkQueryAst | SdkCatalogQuery)
               : {};
             result = await handlers.queryCatalog(q);
             break;
@@ -318,6 +501,58 @@ export function attachPluginHostBridge(
           case "biocompass.getLatestRun":
             result = await handlers.getLatestRun();
             break;
+          case "biocompass.sendToChat": {
+            if (!isObjectRecord(req.params) || typeof req.params["message"] !== "string") {
+              throw new Error("sendToChat requires { message: string }");
+            }
+            const ctx = isObjectRecord(req.params["context"])
+              ? req.params["context"]
+              : undefined;
+            if (!handlers.sendToChat) {
+              throw new Error("Host does not handle biocompass.sendToChat");
+            }
+            await handlers.sendToChat(req.params["message"], ctx);
+            result = { ok: true };
+            break;
+          }
+          case "biocompass.syncDraftParams": {
+            if (!isObjectRecord(req.params)) {
+              throw new Error("syncDraftParams params must be a JSON object");
+            }
+            if (handlers.syncDraftParams) {
+              await handlers.syncDraftParams(req.params);
+            }
+            result = { ok: true };
+            break;
+          }
+          case "biocompass.downloadFile": {
+            if (
+              !isObjectRecord(req.params) ||
+              typeof req.params["filename"] !== "string" ||
+              typeof req.params["content"] !== "string"
+            ) {
+              throw new Error("downloadFile requires { filename: string, content: string }");
+            }
+            if (!handlers.downloadFile) {
+              throw new Error("Host does not handle biocompass.downloadFile");
+            }
+            const safeFilename =
+              req.params["filename"]
+                .replace(/[/\\]+/g, "_")
+                .replace(/\.\.+/g, ".")
+                .trim() || "download";
+            const enc = req.params["encoding"] === "base64" ? "base64" : "utf-8";
+            await handlers.downloadFile({
+              filename: safeFilename,
+              ...(typeof req.params["mimeType"] === "string"
+                ? { mimeType: req.params["mimeType"] }
+                : {}),
+              content: req.params["content"],
+              encoding: enc,
+            });
+            result = { ok: true };
+            break;
+          }
           default:
             throw new Error(`Unsupported BioCompass RPC method '${req.method}'`);
         }

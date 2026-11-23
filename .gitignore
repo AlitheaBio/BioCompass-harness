@@ -16,6 +16,10 @@ node_modules/
 .env
 .env.*
 !.env.example
+.sunfire/
+
+# Downloaded offline DuckDB extensions (454 MB binaries, fetched per-platform)
+/vendor/duckdb-extensions/
 
 # OS & editor artifacts
 .DS_Store

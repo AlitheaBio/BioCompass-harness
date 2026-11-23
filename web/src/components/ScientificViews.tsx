@@ -142,7 +142,9 @@ export function ScientificViews({
                   const barMaxW = 240;
                   const w = Math.max(3, (val / maxVal) * barMaxW);
                   const fill =
-                    view.kind === "length_distribution" ? "#3B6FD8" : "#E8612D";
+                    view.kind === "length_distribution"
+                      ? "#3B6FD8"
+                      : "var(--bc-accent, #E8612D)";
                   return (
                     <g key={`${label}-${idx}`} transform={`translate(0, ${y})`}>
                       <text

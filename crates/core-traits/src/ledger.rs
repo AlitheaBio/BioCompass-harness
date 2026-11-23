@@ -4,10 +4,12 @@
 
 use crate::ids::{CreditAmountAct, OrgId, RunId};
 use crate::traits::PaymentGateway;
-use crate::types::{CompassError, CompassResult, LedgerTx, LedgerTxKind};
+use crate::types::{
+    CompassError, CompassResult, LedgerTx, LedgerTxKind, ReservationState, RunReservation,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, types::Type};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -60,11 +62,18 @@ impl SqliteActLedger {
                  kind TEXT NOT NULL,
                  delta_milli_act INTEGER NOT NULL,
                  balance_after_milli_act INTEGER NOT NULL,
+                 receipt_hash TEXT,
                  reference TEXT NOT NULL,
                  created_at TEXT NOT NULL
-             );",
+             );
+             CREATE INDEX IF NOT EXISTS idx_ledger_run_tx ON ledger_txs (org_id, run_id, kind);",
         )
         .map_err(|e| CompassError::Storage(format!("init ledger schema: {e}")))?;
+        let _ = conn.execute("ALTER TABLE ledger_txs ADD COLUMN receipt_hash TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE run_reservations ADD COLUMN receipt_hash TEXT",
+            [],
+        );
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -118,6 +127,90 @@ impl SqliteActLedger {
         Ok((start, 0))
     }
 
+    fn reservation(
+        conn: &Connection,
+        org: &OrgId,
+        run: &RunId,
+    ) -> CompassResult<Option<RunReservation>> {
+        let row: Option<(String, i64, String)> = conn.query_row(
+            "SELECT idempotency_key, amount_milli_act, state FROM run_reservations WHERE org_id=?1 AND run_id=?2",
+            params![org.as_str(), run.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional().map_err(|e| CompassError::Payment(format!("read run reservation: {e}")))?;
+        row.map(|(idempotency_key, amount, state)| {
+            let state = match state.as_str() {
+                "reserved" => ReservationState::Reserved,
+                "settled" => ReservationState::Settled,
+                "refunded" => ReservationState::Refunded,
+                _ => {
+                    return Err(CompassError::IntegrityViolation(format!(
+                        "unknown reservation state for {run}"
+                    )));
+                }
+            };
+            Ok(RunReservation {
+                idempotency_key,
+                amount: CreditAmountAct::from_milli_act(amount),
+                state,
+            })
+        })
+        .transpose()
+    }
+
+    fn decode_entry(row: &Row<'_>) -> rusqlite::Result<LedgerTx> {
+        let kind = serde_json::from_str(&row.get::<_, String>(3)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+        })?;
+        let created_at =
+            DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
+            })?;
+        Ok(LedgerTx {
+            tx_id: row.get(0)?,
+            org_id: OrgId::from(row.get::<_, String>(1)?),
+            run_id: row.get::<_, Option<String>>(2)?.map(RunId::from),
+            kind,
+            delta_act: CreditAmountAct::from_milli_act(row.get(4)?),
+            balance_after_act: CreditAmountAct::from_milli_act(row.get(5)?),
+            receipt_hash: row.get(6)?,
+            reference: row.get(7)?,
+            created_at: created_at.with_timezone(&Utc),
+        })
+    }
+
+    fn recorded_entry(
+        conn: &Connection,
+        org: &OrgId,
+        run: &RunId,
+        kind: LedgerTxKind,
+    ) -> CompassResult<LedgerTx> {
+        let kind =
+            serde_json::to_string(&kind).map_err(|e| CompassError::Payment(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT tx_id, org_id, run_id, kind, delta_milli_act, balance_after_milli_act, receipt_hash, reference, created_at
+             FROM ledger_txs WHERE org_id=?1 AND run_id=?2 AND kind=?3 LIMIT 2",
+        ).map_err(|e| CompassError::Payment(format!("prepare replay: {e}")))?;
+        let mut entries = stmt
+            .query_map(
+                params![org.as_str(), run.as_str(), kind],
+                Self::decode_entry,
+            )
+            .map_err(|e| CompassError::Payment(format!("query replay: {e}")))?;
+        let entry = entries
+            .next()
+            .transpose()
+            .map_err(|e| CompassError::Payment(format!("read replay: {e}")))?
+            .ok_or_else(|| {
+                CompassError::IntegrityViolation(format!("missing {kind} ledger entry for {run}"))
+            })?;
+        if entries.next().is_some() {
+            return Err(CompassError::IntegrityViolation(format!(
+                "multiple {kind} ledger entries for {run}"
+            )));
+        }
+        Ok(entry)
+    }
+
     async fn with_conn<F, T>(&self, f: F) -> CompassResult<T>
     where
         F: FnOnce(&mut Connection, CreditAmountAct) -> CompassResult<T> + Send + 'static,
@@ -138,6 +231,17 @@ impl SqliteActLedger {
 
 #[async_trait]
 impl PaymentGateway for SqliteActLedger {
+    async fn run_reservation(
+        &self,
+        org_id: &OrgId,
+        run_id: &RunId,
+    ) -> CompassResult<Option<RunReservation>> {
+        let org = org_id.clone();
+        let run = run_id.clone();
+        self.with_conn(move |conn, _| Self::reservation(conn, &org, &run))
+            .await
+    }
+
     async fn available_balance(&self, org_id: &OrgId) -> CompassResult<CreditAmountAct> {
         let oid = org_id.clone();
         self.with_conn(move |conn, genesis| {
@@ -175,35 +279,15 @@ impl PaymentGateway for SqliteActLedger {
 
         self.with_conn(move |conn, genesis| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| CompassError::Payment(format!("begin reserve tx: {e}")))?;
 
-            // Idempotent replay check
-            if let Some(existing_run) = tx
-                .query_row(
-                    "SELECT run_id FROM run_reservations WHERE idempotency_key = ?1",
-                    params![idem],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|e| CompassError::Payment(format!("check idempotency_key: {e}")))?
-            {
-                if existing_run != rid.as_str() {
-                    return Err(CompassError::Payment(format!(
-                        "idempotency_key '{idem}' already bound to run '{existing_run}'"
-                    )));
+            if let Some(existing) = Self::reservation(&tx, &oid, &rid)? {
+                if existing.state != ReservationState::Reserved ||
+                    existing.idempotency_key != idem || existing.amount != amount {
+                    return Err(CompassError::Payment(format!("run {rid} already has different or closed reservation terms")));
                 }
-                let (avail, _) = Self::ensure_org(&tx, &oid, genesis)?;
-                return Ok(LedgerTx {
-                    tx_id: format!("tx-idem-{}", rid.as_str()),
-                    org_id: oid,
-                    run_id: Some(rid),
-                    kind: LedgerTxKind::RunReserve,
-                    delta_act: CreditAmountAct::from_milli_act(-amount.milli_act()),
-                    balance_after_act: CreditAmountAct::from_milli_act(avail),
-                    reference: format!("Idempotent replay ({idem})"),
-                    created_at: Utc::now(),
-                });
+                return Self::recorded_entry(&tx, &oid, &rid, LedgerTxKind::RunReserve);
             }
 
             let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
@@ -238,6 +322,7 @@ impl PaymentGateway for SqliteActLedger {
                 kind: LedgerTxKind::RunReserve,
                 delta_act: CreditAmountAct::from_milli_act(-needed),
                 balance_after_act: CreditAmountAct::from_milli_act(new_avail),
+                receipt_hash: None,
                 reference: format!("Reserved for run {}", rid.as_str()),
                 created_at: Utc::now(),
             };
@@ -274,36 +359,52 @@ impl PaymentGateway for SqliteActLedger {
     ) -> CompassResult<LedgerTx> {
         let oid = org_id.clone();
         let rid = run_id.clone();
+        if receipt_hash.trim().is_empty() {
+            return Err(CompassError::Validation(
+                "settlement requires a receipt hash".into(),
+            ));
+        }
         let r_hash = receipt_hash.to_owned();
         self.with_conn(move |conn, genesis| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| CompassError::Payment(format!("begin settle tx: {e}")))?;
-            let (amount, state): (i64, String) = tx
+            let (amount, state, stored_hash): (i64, String, Option<String>) = tx
                 .query_row(
-                    "SELECT amount_milli_act, state FROM run_reservations WHERE run_id = ?1 AND org_id = ?2",
+                    "SELECT amount_milli_act, state, receipt_hash FROM run_reservations WHERE run_id = ?1 AND org_id = ?2",
                     params![rid.as_str(), oid.as_str()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()
                 .map_err(|e| CompassError::Payment(format!("query reservation: {e}")))?
                 .ok_or_else(|| CompassError::NotFound(format!("reservation for run {rid}")))?;
 
-            let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
+            if state == "settled" {
+                let entry = Self::recorded_entry(&tx, &oid, &rid, LedgerTxKind::RunSettle)?;
+                // Early SQLite ledgers kept the hash only in this immutable reference.
+                let recorded = entry.receipt_hash.as_deref()
+                    .or_else(|| entry.reference.strip_prefix("Settled on verified Froglet Receipt "));
+                if recorded != Some(r_hash.as_str()) || stored_hash.as_ref().is_some_and(|hash| hash != &r_hash) {
+                    return Err(CompassError::IntegrityViolation(format!("receipt differs from prior settlement for {rid}")));
+                }
+                return Ok(entry);
+            }
             if state != "reserved" {
                 return Err(CompassError::Payment(format!(
                     "cannot settle run {rid} in reservation state '{state}'"
                 )));
             }
-            let new_reserved = (reserved - amount).max(0);
+            let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
+            let new_reserved = reserved.checked_sub(amount).filter(|n| *n >= 0).ok_or_else(||
+                CompassError::IntegrityViolation(format!("insufficient reserved balance for {rid}")))?;
             tx.execute(
                 "UPDATE org_balances SET reserved_milli_act = ?1 WHERE org_id = ?2",
                 params![new_reserved, oid.as_str()],
             )
             .map_err(|e| CompassError::Payment(format!("update settle balance: {e}")))?;
             tx.execute(
-                "UPDATE run_reservations SET state = 'settled' WHERE run_id = ?1",
-                params![rid.as_str()],
+                "UPDATE run_reservations SET state = 'settled', receipt_hash = ?1 WHERE run_id = ?2",
+                params![&r_hash, rid.as_str()],
             )
             .map_err(|e| CompassError::Payment(format!("mark reservation settled: {e}")))?;
 
@@ -314,20 +415,22 @@ impl PaymentGateway for SqliteActLedger {
                 kind: LedgerTxKind::RunSettle,
                 delta_act: CreditAmountAct::ZERO,
                 balance_after_act: CreditAmountAct::from_milli_act(avail),
+                receipt_hash: Some(r_hash.clone()),
                 reference: format!("Settled on verified Froglet Receipt {r_hash}"),
                 created_at: Utc::now(),
             };
             let kind_str = serde_json::to_string(&entry.kind)
                 .map_err(|e| CompassError::Payment(e.to_string()))?;
             tx.execute(
-                "INSERT INTO ledger_txs (tx_id, org_id, run_id, kind, delta_milli_act, balance_after_milli_act, reference, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
+                "INSERT INTO ledger_txs (tx_id, org_id, run_id, kind, delta_milli_act, balance_after_milli_act, receipt_hash, reference, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8)",
                 params![
                     entry.tx_id,
                     oid.as_str(),
                     rid.as_str(),
                     kind_str,
                     avail,
+                    &r_hash,
                     entry.reference,
                     entry.created_at.to_rfc3339(),
                 ],
@@ -352,7 +455,7 @@ impl PaymentGateway for SqliteActLedger {
         let why = reason.to_owned();
         self.with_conn(move |conn, genesis| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| CompassError::Payment(format!("begin refund tx: {e}")))?;
             let (amount, state): (i64, String) = tx
                 .query_row(
@@ -364,6 +467,9 @@ impl PaymentGateway for SqliteActLedger {
                 .map_err(|e| CompassError::Payment(format!("query reservation: {e}")))?
                 .ok_or_else(|| CompassError::NotFound(format!("reservation for run {rid}")))?;
 
+            if state == "refunded" {
+                return Self::recorded_entry(&tx, &oid, &rid, LedgerTxKind::RunRefund);
+            }
             if state != "reserved" {
                 return Err(CompassError::Payment(format!(
                     "cannot refund run {rid} in reservation state '{state}'"
@@ -371,7 +477,8 @@ impl PaymentGateway for SqliteActLedger {
             }
             let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
             let new_avail = avail + amount;
-            let new_reserved = (reserved - amount).max(0);
+            let new_reserved = reserved.checked_sub(amount).filter(|n| *n >= 0).ok_or_else(||
+                CompassError::IntegrityViolation(format!("insufficient reserved balance for {rid}")))?;
             tx.execute(
                 "UPDATE org_balances SET available_milli_act = ?1, reserved_milli_act = ?2 WHERE org_id = ?3",
                 params![new_avail, new_reserved, oid.as_str()],
@@ -390,6 +497,7 @@ impl PaymentGateway for SqliteActLedger {
                 kind: LedgerTxKind::RunRefund,
                 delta_act: CreditAmountAct::from_milli_act(amount),
                 balance_after_act: CreditAmountAct::from_milli_act(new_avail),
+                receipt_hash: None,
                 reference: format!("Refunded failed/canceled run: {why}"),
                 created_at: Utc::now(),
             };
@@ -426,7 +534,9 @@ impl PaymentGateway for SqliteActLedger {
         via_webhook: bool,
     ) -> CompassResult<LedgerTx> {
         if amount.milli_act() <= 0 {
-            return Err(CompassError::Validation("top-up amount must be positive".into()));
+            return Err(CompassError::Validation(
+                "top-up amount must be positive".into(),
+            ));
         }
         let oid = org_id.clone();
         let ref_text = reference.trim().to_owned();
@@ -454,6 +564,7 @@ impl PaymentGateway for SqliteActLedger {
                 kind,
                 delta_act: amount,
                 balance_after_act: CreditAmountAct::from_milli_act(new_avail),
+                receipt_hash: None,
                 reference: ref_text,
                 created_at: Utc::now(),
             };
@@ -493,45 +604,14 @@ impl PaymentGateway for SqliteActLedger {
 
             let mut stmt = conn
                 .prepare(
-                    "SELECT tx_id, org_id, run_id, kind, delta_milli_act, balance_after_milli_act, reference, created_at
+                    "SELECT tx_id, org_id, run_id, kind, delta_milli_act, balance_after_milli_act, receipt_hash, reference, created_at
                      FROM ledger_txs WHERE org_id = ?1 ORDER BY seq DESC",
                 )
                 .map_err(|e| CompassError::Payment(format!("prepare list_txs: {e}")))?;
-            let rows = stmt
-                .query_map(params![oid.as_str()], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, i64>(4)?,
-                        r.get::<_, i64>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, String>(7)?,
-                    ))
-                })
-                .map_err(|e| CompassError::Payment(format!("query list_txs: {e}")))?;
-
-            let mut out = Vec::new();
-            for row in rows {
-                let r = row.map_err(|e| CompassError::Payment(format!("read tx row: {e}")))?;
-                let kind: LedgerTxKind = serde_json::from_str(&r.3)
-                    .map_err(|e| CompassError::Payment(format!("decode tx kind: {e}")))?;
-                let created_at = DateTime::parse_from_rfc3339(&r.7)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| CompassError::Payment(format!("parse tx ts: {e}")))?;
-                out.push(LedgerTx {
-                    tx_id: r.0,
-                    org_id: OrgId::from(r.1),
-                    run_id: r.2.map(RunId::from),
-                    kind,
-                    delta_act: CreditAmountAct::from_milli_act(r.4),
-                    balance_after_act: CreditAmountAct::from_milli_act(r.5),
-                    reference: r.6,
-                    created_at,
-                });
-            }
-            Ok(out)
+            stmt.query_map(params![oid.as_str()], Self::decode_entry)
+                .map_err(|e| CompassError::Payment(format!("query list_txs: {e}")))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| CompassError::Payment(format!("read ledger transactions: {e}")))
         })
         .await
     }

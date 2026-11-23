@@ -3,20 +3,76 @@
 //! `--security-opt=no-new-privileges`, `--network=none`, `--pids-limit`, and hard deadlines.
 
 pub mod registry;
+mod cleanup;
+pub use cleanup::AbandonedContainer;
+mod release_archive;
+mod worker_cache;
+#[cfg(all(test, unix))]
+mod image_preparation_tests;
+#[cfg(all(test, unix))]
+mod cleanup_tests;
 
 use biocompass_core_traits::{CompassError, CompassResult, OciImageRef, RunId, RunLogEvent};
+use biocompass_core_traits::types::OCI_IMAGE_PREPARATION_TIMEOUT_SECS;
 use biocompass_plugin_spec::{NetworkPolicy, PluginResources};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 pub use registry::OciDistributionClient;
+
+/// Start of a live query request on stdout and its response on stdin.
+pub const LIVE_QUERY_PREFIX: &[u8] = b"BIOCOMPASS_QUERY_V1 ";
+const LIVE_QUERY_MARKER: &[u8] = b"BIOCOMPASS_QUERY_V1";
+const MAX_QUERY_REQUEST_BYTES: usize = 8_192;
+const MAX_QUERY_RESPONSE_BYTES: usize = 1_048_576;
+
+/// Handles a frame for an already-authorized, air-gapped run.
+#[async_trait::async_trait]
+pub trait LiveQueryResponder: Send + Sync {
+    async fn call(&self, frame: &[u8]) -> CompassResult<Vec<u8>>;
+}
+
+struct LiveQueryChannel<W> {
+    stdin: W,
+    responder: Arc<dyn LiveQueryResponder>,
+}
+
+impl<W: AsyncWrite + Unpin> LiveQueryChannel<W> {
+    async fn reply(&mut self, line: &[u8]) -> CompassResult<()> {
+        let frame = line
+            .strip_prefix(LIVE_QUERY_PREFIX)
+            .filter(|frame| !frame.is_empty() && !frame.contains(&b'\r'))
+            .ok_or_else(|| {
+                CompassError::ContainerEngine("malformed live query request frame".into())
+            })?;
+        let response = self.responder.call(frame).await?;
+        if response.is_empty()
+            || response.len() > MAX_QUERY_RESPONSE_BYTES
+            || response.iter().any(|byte| matches!(*byte, b'\n' | b'\r'))
+        {
+            return Err(CompassError::ContainerEngine(
+                "invalid live query response frame".into(),
+            ));
+        }
+        let write = async {
+            self.stdin.write_all(LIVE_QUERY_PREFIX).await?;
+            self.stdin.write_all(&response).await?;
+            self.stdin.write_all(b"\n").await
+        };
+        write
+            .await
+            .map_err(|e| CompassError::ContainerEngine(format!("write live query response: {e}")))
+    }
+}
 
 /// Detected host OCI runtime CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +123,8 @@ pub struct ContainerExecutionReport {
     pub duration_ms: u64,
     pub stdout_lines: Vec<String>,
     pub stderr_lines: Vec<String>,
+    #[serde(default)]
+    pub log_bytes_total: u64,
 }
 
 /// Probe candidate container engines (`podman` preferred on Linux; `podman` or `docker` on macOS/Windows).
@@ -190,6 +248,8 @@ pub fn build_hardened_oci_args(
         spec.resources.cpus.to_string(),
         "--memory".to_string(),
         format!("{}m", spec.resources.memory_mb),
+        "--memory-swap".to_string(),
+        format!("{}m", spec.resources.memory_mb),
         "--tmpfs".to_string(),
         "/tmp:rw,noexec,nosuid,nodev,size=512m".to_string(),
     ];
@@ -263,23 +323,115 @@ pub fn prepare_stage_permissions(stage_root: &Path, in_dir: &Path, out_dir: &Pat
 #[derive(Debug, Clone)]
 pub struct OciContainerRunner {
     engine: DetectedEngine,
+    worker_cache: Option<Arc<worker_cache::WorkerCache>>,
+    workspace_scope: Option<String>,
 }
 
 impl OciContainerRunner {
     /// Detect and bind to an active host Podman/Docker engine.
     pub async fn detect() -> CompassResult<Self> {
         let engine = detect_container_engine().await?;
-        Ok(Self { engine })
+        Ok(Self::from_engine(engine))
     }
 
     /// Construct from a known `DetectedEngine`.
     pub const fn from_engine(engine: DetectedEngine) -> Self {
-        Self { engine }
+        Self { engine, worker_cache: None, workspace_scope: None }
     }
 
     /// Inspect the bound container engine metadata.
     pub const fn engine(&self) -> &DetectedEngine {
         &self.engine
+    }
+
+    /// Return `true` when the given OCI image reference already exists in the local engine store.
+    pub async fn has_local_image(&self, image_ref: &str) -> bool {
+        let args: Vec<&str> = match self.engine.kind {
+            EngineKind::Docker => vec!["image", "inspect", "--format", "{{.Id}}", image_ref],
+            EngineKind::Podman => vec!["image", "exists", image_ref],
+        };
+        let res = tokio::time::timeout(
+            Duration::from_secs(4),
+            Command::new(&self.engine.binary_path)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status(),
+        )
+        .await;
+        matches!(res, Ok(Ok(status)) if status.success())
+    }
+
+    /// Resolve a locally installed image to the exact content the native run will execute.
+    /// Dev tags are allowed only under the existing local-development configuration.
+    pub async fn installed_execution_image(&self, image: &str, allow_dev: bool) -> CompassResult<OciImageRef> {
+        let mut pinned = OciImageRef::parse(image, allow_dev)?;
+        if pinned.sha256_digest.is_some() {
+            if self.has_verified_local_digest(image).await {
+                return Ok(pinned);
+            }
+        } else {
+            let output = tokio::time::timeout(Duration::from_secs(4),
+                Command::new(&self.engine.binary_path)
+                    .args(["image","inspect","--format","{{.Id}}",image])
+                    .stdin(Stdio::null()).kill_on_drop(true).output()
+            ).await.map_err(|_| CompassError::ContainerEngine("local image inspection timed out".into()))?
+             .map_err(|e| CompassError::ContainerEngine(e.to_string()))?;
+            let id = String::from_utf8_lossy(&output.stdout);
+            let digest = id.trim().strip_prefix("sha256:").unwrap_or(id.trim());
+            if output.status.success() && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                pinned.raw = format!("sha256:{digest}");
+                return Ok(pinned);
+            }
+        }
+        Err(CompassError::NotFound(format!("image is not installed locally: {image}")))
+    }
+
+    /// Pull an OCI image into the bound container engine store.
+    pub async fn pull_image(&self, image_ref: &str) -> CompassResult<()> {
+        if self.worker_cache.is_some() {
+            return self.prepare_for_execution(image_ref).await.map(|_| ());
+        }
+        self.pull_uncached(image_ref).await
+    }
+
+    async fn pull_uncached(&self, image_ref: &str) -> CompassResult<()> {
+        let out = tokio::time::timeout(
+            Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
+            Command::new(&self.engine.binary_path)
+                .args(["pull", image_ref])
+                .kill_on_drop(true)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            CompassError::ContainerEngine(format!(
+                "timed out pulling OCI image '{image_ref}' via {}",
+                self.engine.kind.as_str()
+            ))
+        })?
+        .map_err(|e| {
+            CompassError::ContainerEngine(format!(
+                "spawn {} pull failed: {e}",
+                self.engine.binary_path.display()
+            ))
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(CompassError::ContainerEngine(format!(
+                "failed to pull OCI image '{image_ref}': {}",
+                if stderr.is_empty() {
+                    format!("exit code {:?}", out.status.code())
+                } else {
+                    stderr
+                }
+            )));
+        }
+        Ok(())
     }
 
     /// Execute a hardened OCI container, streaming `stdout`/`stderr` lines and enforcing `timeout_sec`.
@@ -288,13 +440,98 @@ impl OciContainerRunner {
         spec: &ContainerRunSpec,
         log_tx: Option<broadcast::Sender<RunLogEvent>>,
     ) -> CompassResult<ContainerExecutionReport> {
-        let container_name = format!("biocompass-job-{}", Uuid::new_v4().simple());
-        let args = build_hardened_oci_args(&self.engine, &container_name, spec)?;
+        self.execute_with_revocation(spec, log_tx, None).await
+    }
+
+    pub async fn execute_with_revocation(
+        &self,
+        spec: &ContainerRunSpec,
+        log_tx: Option<broadcast::Sender<RunLogEvent>>,
+        revoked: Option<&AtomicBool>,
+    ) -> CompassResult<ContainerExecutionReport> {
+        self.execute_with_queries(spec, log_tx, revoked, None).await
+    }
+
+    /// Enable an isolated request/response pipe for a run with a provider query session.
+    pub async fn execute_with_queries(
+        &self,
+        spec: &ContainerRunSpec,
+        log_tx: Option<broadcast::Sender<RunLogEvent>>,
+        revoked: Option<&AtomicBool>,
+        responder: Option<Arc<dyn LiveQueryResponder>>,
+    ) -> CompassResult<ContainerExecutionReport> {
+        self.execute_with_start_notification(spec, log_tx, revoked, responder, None).await
+    }
+
+    /// Notify the orchestrator after image preparation, when the execution deadline begins.
+    pub async fn execute_with_start_notification(
+        &self,
+        spec: &ContainerRunSpec,
+        log_tx: Option<broadcast::Sender<RunLogEvent>>,
+        revoked: Option<&AtomicBool>,
+        responder: Option<Arc<dyn LiveQueryResponder>>,
+        started_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> CompassResult<ContainerExecutionReport> {
+        let revoked_error = || {
+            CompassError::AccessDenied("DATASET_ACCESS_REVOKED: dataset access was revoked".into())
+        };
+        if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(revoked_error());
+        }
+        if responder.is_some() && !spec.network.is_airgapped() {
+            return Err(CompassError::Validation(
+                "live queries require an air-gapped container".into(),
+            ));
+        }
+        let container_name = self.container_name(&spec.run_id);
+        let mut args = build_hardened_oci_args(&self.engine, &container_name, spec)?;
+        self.label_native_job(&mut args);
+        let wait_for_revocation = async {
+            match revoked {
+                Some(flag) => while !flag.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                },
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(wait_for_revocation);
+        let _image_lease;
+        if spec.image.sha256_digest.is_some() {
+            _image_lease = tokio::select! {
+                biased;
+                () = &mut wait_for_revocation => return Err(revoked_error()),
+                result = tokio::time::timeout(Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
+                    self.prepare_for_execution(&spec.image.raw)) => {
+                    result.map_err(|_| CompassError::ContainerEngine(format!(
+                        "timed out preparing pinned OCI image '{}'", spec.image.raw
+                    )))??
+                }
+            };
+            args.insert(1, "--pull=never".into());
+        } else if self.worker_cache.is_some() || spec.image.raw.starts_with("sha256:") {
+            // A development tag may use an already installed image. Only the
+            // digest admission path can fetch images into a worker-owned engine.
+            args.insert(1, "--pull=never".into());
+        }
+        if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(revoked_error());
+        }
+        if responder.is_some() || self.worker_cache.is_some() {
+            // Forward attached output to the run, without retaining scientific
+            // output or live-query frames in the persistent Docker image store.
+            args.insert(1, "--log-driver=none".into());
+        }
+        let stdin = if responder.is_some() {
+            args.insert(1, "--interactive".into());
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
 
         let started = Instant::now();
         let mut child = Command::new(&self.engine.binary_path)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -306,6 +543,9 @@ impl OciContainerRunner {
                 ))
             })?;
 
+        if let Some(tx) = started_tx {
+            let _ = tx.send(());
+        }
         let stdout = child
             .stdout
             .take()
@@ -314,56 +554,46 @@ impl OciContainerRunner {
             .stderr
             .take()
             .ok_or_else(|| CompassError::ContainerEngine("capture container stderr".into()))?;
-
-        let run_id_out = spec.run_id.clone();
-        let tx_out = log_tx.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            let mut lines = Vec::new();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if let Some(tx) = &tx_out {
-                    let _ = tx.send(RunLogEvent {
-                        run_id: run_id_out.clone(),
-                        timestamp: Utc::now(),
-                        stream: "stdout".into(),
-                        line: line.clone(),
-                    });
-                }
-                if lines.len() < 2_000 {
-                    lines.push(line);
-                }
+        let channel = match (responder, child.stdin.take()) {
+            (Some(responder), Some(stdin)) => Some(LiveQueryChannel { stdin, responder }),
+            (Some(_), None) => {
+                let reason = CompassError::ContainerEngine("capture container stdin".into());
+                return Err(self.abort_execution(&mut child, &container_name, reason).await);
             }
-            lines
-        });
-
-        let run_id_err = spec.run_id.clone();
-        let tx_err = log_tx;
-        let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            let mut lines = Vec::new();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if let Some(tx) = &tx_err {
-                    let _ = tx.send(RunLogEvent {
-                        run_id: run_id_err.clone(),
-                        timestamp: Utc::now(),
-                        stream: "stderr".into(),
-                        line: line.clone(),
-                    });
-                }
-                if lines.len() < 2_000 {
-                    lines.push(line);
-                }
-            }
-            lines
-        });
+            (None, _) => None,
+        };
 
         let timeout_dur = Duration::from_secs(spec.resources.timeout_sec.max(1));
-        let wait_res = tokio::time::timeout(timeout_dur, child.wait()).await;
+        let execute = async {
+            let wait = async {
+                child.wait().await.map_err(|e| {
+                    CompassError::ContainerEngine(format!(
+                        "wait on container {container_name} failed: {e}"
+                    ))
+                })
+            };
+            tokio::try_join!(
+                wait,
+                drain_stream_bounded(stdout, "stdout", &spec.run_id, log_tx.as_ref(), channel),
+                drain_stream_bounded(
+                    stderr,
+                    "stderr",
+                    &spec.run_id,
+                    log_tx.as_ref(),
+                    None::<LiveQueryChannel<tokio::process::ChildStdin>>
+                ),
+            )
+        };
+        let wait_res = tokio::select! {
+            biased;
+            () = &mut wait_for_revocation => {
+                return Err(self.abort_execution(&mut child, &container_name, revoked_error()).await);
+            }
+            result = tokio::time::timeout(timeout_dur, execute) => result,
+        };
 
         match wait_res {
-            Ok(Ok(status)) => {
-                let stdout_lines = stdout_task.await.unwrap_or_default();
-                let stderr_lines = stderr_task.await.unwrap_or_default();
+            Ok(Ok((status, (stdout_lines, stdout_bytes), (stderr_lines, stderr_bytes)))) => {
                 let exit_code = status.code().unwrap_or(-1);
                 Ok(ContainerExecutionReport {
                     engine: self.engine.kind,
@@ -373,39 +603,302 @@ impl OciContainerRunner {
                     duration_ms: started.elapsed().as_millis() as u64,
                     stdout_lines,
                     stderr_lines,
+                    log_bytes_total: stdout_bytes.saturating_add(stderr_bytes),
                 })
             }
-            Ok(Err(e)) => {
-                let _ = self.force_remove_container(&container_name).await;
-                Err(CompassError::ContainerEngine(format!(
-                    "wait on container {container_name} failed: {e}"
-                )))
-            }
+            Ok(Err(error)) => Err(self.abort_execution(&mut child, &container_name, error).await),
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = self.force_remove_container(&container_name).await;
-                Err(CompassError::ContainerEngine(format!(
-                    "container {container_name} exceeded hard timeout of {}s and was terminated",
+                let reason = CompassError::ContainerEngine(format!(
+                    "CONTAINER_TIMEOUT: container {container_name} exceeded hard timeout of {}s",
                     spec.resources.timeout_sec
-                )))
+                ));
+                Err(self.abort_execution(&mut child, &container_name, reason).await)
             }
         }
     }
+}
 
-    async fn force_remove_container(&self, container_name: &str) -> CompassResult<()> {
-        let _ = Command::new(&self.engine.binary_path)
-            .args(["rm", "-f", container_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-        Ok(())
+async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut stream: R,
+    stream_name: &'static str,
+    run_id: &RunId,
+    log_tx: Option<&broadcast::Sender<RunLogEvent>>,
+    mut channel: Option<LiveQueryChannel<W>>,
+) -> CompassResult<(Vec<String>, u64)> {
+    const MAX_RETAINED_LINES: usize = 2_000;
+    const MAX_LINE_BYTES: usize = 8_192;
+    const MAX_BUFFER_BYTES: usize = MAX_QUERY_REQUEST_BYTES + LIVE_QUERY_PREFIX.len();
+
+    let mut buf = [0u8; 8_192];
+    let mut current_line: Vec<u8> = Vec::new();
+    let mut line_byte_count = 0u64;
+    let mut lines: Vec<String> = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    let emit_line = |line_bytes: &[u8], lines: &mut Vec<String>| {
+        let trimmed = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
+        let text = String::from_utf8_lossy(trimmed).into_owned();
+        if let Some(tx) = log_tx {
+            let _ = tx.send(RunLogEvent {
+                run_id: run_id.clone(),
+                timestamp: Utc::now(),
+                stream: stream_name.into(),
+                line: text.clone(),
+            });
+        }
+        if lines.len() < MAX_RETAINED_LINES {
+            lines.push(text);
+        }
+    };
+
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Err(e) if channel.is_some() => {
+                return Err(CompassError::ContainerEngine(format!(
+                    "read live query stream: {e}"
+                )));
+            }
+            Err(_) => break,
+            Ok(n) => {
+                for &b in &buf[..n] {
+                    if b == b'\n' {
+                        if current_line.starts_with(LIVE_QUERY_MARKER) {
+                            if let Some(channel) = &mut channel {
+                                channel.reply(&current_line).await?;
+                            }
+                        } else {
+                            emit_line(
+                                &current_line[..current_line.len().min(MAX_LINE_BYTES)],
+                                &mut lines,
+                            );
+                            total_bytes =
+                                total_bytes.saturating_add(line_byte_count.saturating_add(1));
+                        }
+                        current_line.clear();
+                        line_byte_count = 0;
+                    } else {
+                        line_byte_count = line_byte_count.saturating_add(1);
+                        if current_line.len() < MAX_BUFFER_BYTES {
+                            current_line.push(b);
+                        } else if channel.is_some() && current_line.starts_with(LIVE_QUERY_MARKER) {
+                            return Err(CompassError::ContainerEngine(
+                                "live query request exceeded 8192 bytes".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
+    if !current_line.is_empty() {
+        if current_line.starts_with(LIVE_QUERY_MARKER) {
+            if channel.is_some() {
+                return Err(CompassError::ContainerEngine(
+                    "unterminated live query request frame".into(),
+                ));
+            }
+        } else {
+            emit_line(
+                &current_line[..current_line.len().min(MAX_LINE_BYTES)],
+                &mut lines,
+            );
+            total_bytes = total_bytes.saturating_add(line_byte_count);
+        }
+    }
+    Ok((lines, total_bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EchoLiveQuery;
+
+    #[async_trait::async_trait]
+    impl LiveQueryResponder for EchoLiveQuery {
+        async fn call(&self, frame: &[u8]) -> CompassResult<Vec<u8>> {
+            Ok(frame.to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn live_query_frames_round_trip_without_entering_logs() {
+        let input = b"starting\nBIOCOMPASS_QUERY_V1 {\"value\": 42}\nfinished\r\n";
+        let run_id = RunId::from("run-query-test");
+        let (tx, mut rx) = broadcast::channel(8);
+        let (pipe, mut module_stdin) = tokio::io::duplex(128);
+        let (lines, bytes) = drain_stream_bounded(
+            &input[..],
+            "stdout",
+            &run_id,
+            Some(&tx),
+            Some(LiveQueryChannel {
+                stdin: pipe,
+                responder: Arc::new(EchoLiveQuery),
+            }),
+        )
+        .await
+        .expect("drain stdout");
+        let mut response = Vec::new();
+        module_stdin
+            .read_to_end(&mut response)
+            .await
+            .expect("read exact response");
+        assert_eq!(response, b"BIOCOMPASS_QUERY_V1 {\"value\": 42}\n");
+        assert_eq!(lines, ["starting", "finished"]);
+        assert_eq!(bytes, b"starting\nfinished\r\n".len() as u64);
+        assert_eq!(rx.try_recv().expect("first log").line, "starting");
+        assert_eq!(rx.try_recv().expect("second log").line, "finished");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_live_query_frames_are_never_emitted_as_truncated_logs() {
+        let run_id = RunId::from("run-query-test");
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut oversize = LIVE_QUERY_PREFIX.to_vec();
+        oversize.extend(std::iter::repeat_n(b'x', MAX_QUERY_REQUEST_BYTES + 1));
+        let err = drain_stream_bounded(
+            &oversize[..],
+            "stdout",
+            &run_id,
+            Some(&tx),
+            Some(LiveQueryChannel {
+                stdin: tokio::io::sink(),
+                responder: Arc::new(EchoLiveQuery),
+            }),
+        )
+        .await
+        .expect_err("reject oversized query before newline");
+        assert!(err.to_string().contains("exceeded 8192 bytes"));
+        assert!(rx.try_recv().is_err());
+
+        let (lines, bytes) = drain_stream_bounded(
+            &oversize[..],
+            "stderr",
+            &run_id,
+            Some(&tx),
+            None::<LiveQueryChannel<tokio::io::Sink>>,
+        )
+        .await
+        .expect("discard a reserved frame from stderr");
+        assert!(lines.is_empty());
+        assert_eq!(bytes, 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revocation_and_deadline_cancel_inflight_live_queries_and_remove_container() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::sync::Notify;
+
+        struct PendingQuery {
+            called: Notify,
+            dropped: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl LiveQueryResponder for PendingQuery {
+            async fn call(&self, _: &[u8]) -> CompassResult<Vec<u8>> {
+                struct DropFlag<'a>(&'a AtomicBool);
+                impl Drop for DropFlag<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
+                let _drop_flag = DropFlag(&self.dropped);
+                self.called.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("fixture dir");
+        let binary_path = tmp.path().join("fake-docker");
+        let removal = tmp.path().join("removed");
+        std::fs::write(
+            &binary_path,
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    [ "$2" = --interactive ] || exit 42
+    for arg; do
+      case "$arg" in
+        --network=none) offline=1 ;;
+        --log-driver=none) no_logs=1 ;;
+        --tty|-t) exit 43 ;;
+      esac
+    done
+    [ "$offline" = 1 ] && [ "$no_logs" = 1 ] || exit 44
+    printf 'BIOCOMPASS_QUERY_V1 {}\n'
+    read -r response
+    ;;
+  rm) printf '%s\n' "$3" > "${0%/*}/removed" ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .expect("write engine fixture");
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o700))
+            .expect("enable engine fixture");
+        let runner = OciContainerRunner::from_engine(DetectedEngine {
+            kind: EngineKind::Docker,
+            binary_path,
+            server_version: "test".into(),
+            rootless: false,
+        });
+        let mut spec = ContainerRunSpec {
+            run_id: RunId::from("run-query-test"),
+            image: OciImageRef::parse("local/test:one", true).expect("image"),
+            in_dir: tmp.path().join("in"),
+            out_dir: tmp.path().join("out"),
+            resources: PluginResources {
+                cpus: 1,
+                memory_mb: 128,
+                gpu: 0,
+                timeout_sec: 1,
+                pids_limit: 32,
+            },
+            network: NetworkPolicy::default(),
+            command_override: None,
+        };
+        for expected in ["CONTAINER_TIMEOUT", "DATASET_ACCESS_REVOKED"] {
+            let responder = Arc::new(PendingQuery {
+                called: Notify::new(),
+                dropped: AtomicBool::new(false),
+            });
+            let revoked = AtomicBool::new(false);
+            if expected == "DATASET_ACCESS_REVOKED" {
+                spec.resources.timeout_sec = 10;
+            }
+            let revoke = async {
+                tokio::time::timeout(Duration::from_secs(2), responder.called.notified())
+                    .await
+                    .expect("module requests query");
+                if expected == "DATASET_ACCESS_REVOKED" {
+                    revoked.store(true, Ordering::Release);
+                }
+            };
+            let (execution, ()) = tokio::join!(
+                runner.execute_with_queries(&spec, None, Some(&revoked), Some(responder.clone())),
+                revoke,
+            );
+            assert!(
+                execution
+                    .expect_err("execution cancelled")
+                    .to_string()
+                    .contains(expected)
+            );
+            assert!(responder.dropped.load(Ordering::Acquire));
+            assert!(
+                std::fs::read_to_string(&removal)
+                    .expect("container removed")
+                    .starts_with("biocompass-job-")
+            );
+            std::fs::remove_file(&removal).expect("clear removal marker");
+        }
+    }
 
     #[test]
     fn hardened_oci_args_enforce_nonroot_readonly_capdrop_no_network_and_ro_in_mount() {

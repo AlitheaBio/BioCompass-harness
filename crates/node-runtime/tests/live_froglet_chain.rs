@@ -159,14 +159,16 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .expect("create session");
 
     // -------------------------------------------------------------------------
-    // 1. Positive Full-Stack Run (`Prepare -> Confirm`) with Masked Partner Grant
+    // 1. Positive Full-Stack Run (`Prepare -> Confirm`) with Scoped Partner Rows Grant
     // -------------------------------------------------------------------------
-    let partner_grant = DatasetGrant::restricted_partner_demo(org_id.clone(), catalog_id.clone());
+    let partner_grant = DatasetGrant::scoped_rows_partner(org_id.clone(), catalog_id.clone());
     let quote = runtime
         .prepare_run(PrepareRunRequest {
             org_id: org_id.clone(),
             session_id: Some(session.session_id.clone()),
             plugin_id: plugin_id.clone(),
+            plugin_version: None,
+            offer_id: None,
             params: json!({
                 "alleles": ["HLA-A*02:01", "HLA-B*07:02"],
                 "min_length": 8,
@@ -209,13 +211,14 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         "expected container stdout log over broadcast channel, got {streamed_lines:?}"
     );
 
-    // Verify result_json reflects masked partner grant & Lung-only scope.
+    // Verify result_json reflects unmasked 3-level partner grant & Lung-only row_scope.
     let res = run.result_json.as_ref().expect("result.json present");
-    assert_eq!(res["sequence_policy"], json!("masked_grant"));
+    assert_eq!(res["sequence_policy"], json!("unmasked_research"));
     let top = res["top_candidates"].as_array().expect("top_candidates array");
     assert!(!top.is_empty());
     for row in top {
-        assert_eq!(row["sequence"], json!("***"), "leaked unmasked sequence in result: {row}");
+        let seq = row["sequence"].as_str().expect("sequence string");
+        assert!(seq.len() >= 8 && seq != "***", "expected real IUPAC sequence, got {row}");
         assert_eq!(row["organ"], json!("Lung"), "leaked non-Lung organ in result: {row}");
     }
 
@@ -367,6 +370,8 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
             org_id: org_id.clone(),
             session_id: Some(session.session_id.clone()),
             plugin_id,
+            plugin_version: None,
+            offer_id: None,
             params: json!({
                 "alleles": ["HLA-A*02:01"],
                 "min_length": 8,

@@ -45,7 +45,7 @@ export function BrandWordmark({
           />
           <path
             d="M 8 50 A 42 3.86 0 0 0 92 50"
-            stroke="#F56E3D"
+            stroke="var(--bc-accent, #F56E3D)"
             strokeWidth="5.6"
             strokeLinecap="round"
           />
@@ -57,7 +57,7 @@ export function BrandWordmark({
               strokeWidth="1.2"
               strokeLinejoin="round"
             />
-            <polygon points="0,-29.2 8,0 -8,0" fill="#E8612D" />
+            <polygon points="0,-29.2 8,0 -8,0" fill="var(--bc-accent, #E8612D)" />
             <polygon points="0,29.2 8,0 -8,0" fill="currentColor" />
             <circle cx="0" cy="0" r="2.6" fill="var(--bc-bg-surface, #ffffff)" />
           </g>

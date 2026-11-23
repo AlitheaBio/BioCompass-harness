@@ -1,23 +1,29 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  IconCheck,
+  IconAbout,
+  IconApi,
+  IconApp,
   IconClose,
   IconMaximize,
   IconMinimize,
   IconModules,
   IconRestore,
-  IconShield,
+  IconRuns,
+  IconSplitView,
   RunningCompass,
 } from "./Icons";
-import { SandboxedPluginFrame } from "./SandboxedPluginFrame";
-import { ScientificViews } from "./ScientificViews";
 import {
-  formatMilliAct,
-  type DatasetGrant,
-  type FrogletVerifyReport,
-  type PluginSummary,
-  type RunQuote,
-  type RunRecord,
+  ModuleAboutTab,
+  ModuleApiTab,
+  ModuleRunsTab,
+} from "./ModuleTabs";
+import { SandboxedPluginFrame } from "./SandboxedPluginFrame";
+import type {
+  DatasetGrant,
+  RunVerification,
+  PluginSummary,
+  RunQuote,
+  RunRecord,
 } from "../types";
 
 export type WindowTab = "ui" | "run" | "results" | "about";
@@ -25,6 +31,7 @@ export type WindowTab = "ui" | "run" | "results" | "about";
 export interface ModuleWindowState {
   id: string;
   pluginId: string;
+  plugin?: PluginSummary;
   x: number;
   y: number;
   w: number;
@@ -32,26 +39,10 @@ export interface ModuleWindowState {
   z: number;
   minimized: boolean;
   maximized: boolean;
+  docked: boolean;
   activeTab: WindowTab;
+  requestedRunId?: string;
   params: Record<string, unknown>;
-}
-
-interface SchemaPropertySpec {
-  type?: string;
-  title?: string;
-  description?: string;
-  default?: unknown;
-  enum?: unknown[];
-  minimum?: number;
-  maximum?: number;
-}
-
-const FROGLET_STAGES = ["Descriptor", "Offer", "Quote", "Deal", "Receipt"] as const;
-
-function humanizeKey(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 export function FloatingWindowsLayer({
@@ -60,7 +51,12 @@ export function FloatingWindowsLayer({
   runs,
   activeGrant,
   defaultCatalogId,
+  releaseVersion,
+  catalogFacets = {},
+  sessionId,
+  theme = "light",
   pendingQuote,
+  pendingQuoteParams = null,
   isConfirmingRun,
   liveLogs,
   verifyReport,
@@ -68,13 +64,17 @@ export function FloatingWindowsLayer({
   onMoveResizeWindow,
   onToggleMinimize,
   onToggleMaximize,
+  onToggleDock,
   onCloseWindow,
   onChangeTab,
   onUpdateParam,
   onPreparePluginRun,
+  onRunApiTest,
+  onQuoteConfirmed,
   onQuotePrepared,
-  onConfirmPendingQuote,
-  onCancelPendingQuote,
+  onSendToChat,
+  onSyncDraftParams,
+  onUpdateRun,
   onReverifyChain,
 }: {
   windows: ModuleWindowState[];
@@ -82,10 +82,15 @@ export function FloatingWindowsLayer({
   runs: RunRecord[];
   activeGrant: DatasetGrant | null;
   defaultCatalogId: string;
+  releaseVersion?: number;
+  catalogFacets?: Record<string, string[]>;
+  sessionId?: string;
+  theme?: "light" | "dark";
   pendingQuote: RunQuote | null;
+  pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
   liveLogs: string[];
-  verifyReport: FrogletVerifyReport | null;
+  verifyReport: RunVerification | null;
   onFocusWindow: (winId: string) => void;
   onMoveResizeWindow: (
     winId: string,
@@ -93,20 +98,70 @@ export function FloatingWindowsLayer({
   ) => void;
   onToggleMinimize: (winId: string) => void;
   onToggleMaximize: (winId: string) => void;
+  onToggleDock: (winId: string) => void;
   onCloseWindow: (winId: string) => void;
-  onChangeTab: (winId: string, tab: WindowTab) => void;
+  onChangeTab: (winId: string, tab: WindowTab, requestedRunId?: string) => void;
   onUpdateParam: (winId: string, key: string, value: unknown) => void;
   onPreparePluginRun: (plugin: PluginSummary, params: Record<string, unknown>) => void;
-  onQuotePrepared: (quote: RunQuote) => void;
-  onConfirmPendingQuote: () => void;
-  onCancelPendingQuote: () => void;
+  onRunApiTest?: (
+    plugin: PluginSummary,
+    params: Record<string, unknown>,
+    offerId?: string,
+  ) => Promise<RunRecord | null>;
+  onQuoteConfirmed?: (completed: RunRecord) => Promise<void> | void;
+  onQuotePrepared: (quote: RunQuote, params?: Record<string, unknown>) => void;
+  onSendToChat?: (
+    pluginId: string,
+    message: string,
+    context?: Record<string, unknown>,
+  ) => void;
+  onSyncDraftParams?: (pluginId: string, params: Record<string, unknown>) => void;
+  onUpdateRun: (run: RunRecord) => void;
   onReverifyChain: (run: RunRecord, tamperOneByte: boolean) => void;
 }) {
+  const floatingWindows = windows.filter((w) => !w.minimized && !w.docked);
   const visibleWindows = windows.filter((w) => !w.minimized);
-  const topWindowId =
+  const topWindow =
     visibleWindows.length > 0
-      ? visibleWindows.reduce((best, cur) => (cur.z >= best.z ? cur : best)).id
+      ? visibleWindows.reduce((best, cur) => (cur.z >= best.z ? cur : best))
       : null;
+  const topWindowId = topWindow?.id ?? null;
+  const topFloatingWindow =
+    floatingWindows.length > 0
+      ? floatingWindows.reduce((best, cur) => (cur.z >= best.z ? cur : best))
+      : null;
+  const isTopMaximized = Boolean(topFloatingWindow?.maximized);
+  const showTray = windows.some((w) => w.minimized || !w.docked);
+
+  const [trayRevealed, setTrayRevealed] = useState(false);
+  const hideTrayTimerRef = useRef<number | null>(null);
+
+  const clearHideTrayTimer = () => {
+    if (hideTrayTimerRef.current !== null) {
+      window.clearTimeout(hideTrayTimerRef.current);
+      hideTrayTimerRef.current = null;
+    }
+  };
+
+  const revealTray = () => {
+    clearHideTrayTimer();
+    setTrayRevealed(true);
+  };
+
+  const scheduleHideTray = (delayMs = 240) => {
+    clearHideTrayTimer();
+    hideTrayTimerRef.current = window.setTimeout(() => {
+      setTrayRevealed(false);
+      hideTrayTimerRef.current = null;
+    }, delayMs);
+  };
+
+  useEffect(() => {
+    clearHideTrayTimer();
+    setTrayRevealed(false);
+  }, [isTopMaximized]);
+
+  useEffect(() => () => clearHideTrayTimer(), []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -123,28 +178,29 @@ export function FloatingWindowsLayer({
 
   return (
     <>
-      {visibleWindows.map((win) => {
-        const plugin = plugins.find((p) => p.manifest.id === win.pluginId);
+      {floatingWindows.map((win) => {
+        const plugin = win.plugin ?? plugins.find((p) => p.manifest.id === win.pluginId);
         if (!plugin) return null;
         const isFocused = win.id === topWindowId;
         const pluginRuns = runs.filter((r) => r.plugin_id === plugin.manifest.id);
-        const latestRun = pluginRuns[0] ?? null;
-        const latestSucceededRun =
-          pluginRuns.find((r) => r.status === "succeeded") ?? null;
-        const hasPendingQuote = pendingQuote?.plugin_id === plugin.manifest.id;
+        const hasPendingQuote = pendingQuote?.plugin_id === plugin.manifest.id && pendingQuote.plugin_version === plugin.manifest.version;
 
         return (
           <ModuleFloatingWindow
-            key={win.id}
+            key={`${win.id}@${plugin.manifest.version}@${plugin.marketplace_offer_id ?? ""}`}
             win={win}
             plugin={plugin}
             isFocused={isFocused}
-            latestRun={latestRun}
-            latestSucceededRun={latestSucceededRun}
+            runs={pluginRuns}
             runCount={pluginRuns.length}
             activeGrant={activeGrant}
             defaultCatalogId={defaultCatalogId}
+            releaseVersion={releaseVersion}
+            catalogFacets={catalogFacets}
+            sessionId={sessionId}
+            theme={theme}
             pendingQuote={hasPendingQuote ? pendingQuote : null}
+            pendingQuoteParams={hasPendingQuote ? pendingQuoteParams : null}
             isConfirmingRun={isConfirmingRun && hasPendingQuote}
             liveLogs={liveLogs}
             verifyReport={isFocused ? verifyReport : null}
@@ -152,36 +208,47 @@ export function FloatingWindowsLayer({
             onMoveResize={(patch) => onMoveResizeWindow(win.id, patch)}
             onMinimize={() => onToggleMinimize(win.id)}
             onMaximize={() => onToggleMaximize(win.id)}
+            onDock={() => onToggleDock(win.id)}
             onClose={() => onCloseWindow(win.id)}
-            onChangeTab={(tab) => onChangeTab(win.id, tab)}
+            onChangeTab={(tab, runId) => onChangeTab(win.id, tab, runId)}
             onUpdateParam={(key, val) => onUpdateParam(win.id, key, val)}
             onPrepareRun={() => onPreparePluginRun(plugin, win.params)}
+            onRunApiTest={
+              onRunApiTest
+                ? (params, offerId) => onRunApiTest(plugin, params, offerId)
+                : undefined
+            }
+            onQuoteConfirmed={onQuoteConfirmed}
             onQuotePrepared={onQuotePrepared}
-            onConfirmPendingQuote={onConfirmPendingQuote}
-            onCancelPendingQuote={onCancelPendingQuote}
+            onSendToChat={onSendToChat}
+            onSyncDraftParams={onSyncDraftParams}
+            onUpdateRun={onUpdateRun}
             onReverifyChain={onReverifyChain}
           />
         );
       })}
 
-      {/* Fallback approval bar if a quote was prepared for a module without an open visible window */}
-      {pendingQuote &&
-        !visibleWindows.some((w) => w.pluginId === pendingQuote.plugin_id) && (
-          <div className="bc-floating-approval-wrap">
-            <QuoteApprovalBar
-              quote={pendingQuote}
-              isConfirmingRun={isConfirmingRun}
-              onConfirm={onConfirmPendingQuote}
-              onCancel={onCancelPendingQuote}
-            />
-          </div>
-        )}
-
       {/* Bottom centered HLA-Compass-style floating window tray */}
-      {windows.length > 0 && (
-        <div className="bc-window-tray" role="toolbar" aria-label="Open module windows">
+      {showTray && isTopMaximized && (
+        <div
+          className="bc-window-tray-hotzone"
+          aria-hidden="true"
+          onMouseEnter={revealTray}
+          onMouseLeave={() => scheduleHideTray(400)}
+        />
+      )}
+      {showTray && (
+        <div
+          className="bc-window-tray"
+          role="toolbar"
+          aria-label="Open module windows"
+          data-autohide={String(isTopMaximized)}
+          data-revealed={String(!isTopMaximized || trayRevealed)}
+          onMouseEnter={isTopMaximized ? revealTray : undefined}
+          onMouseLeave={isTopMaximized ? () => scheduleHideTray(220) : undefined}
+        >
           {windows.map((win) => {
-            const plugin = plugins.find((p) => p.manifest.id === win.pluginId);
+            const plugin = win.plugin ?? plugins.find((p) => p.manifest.id === win.pluginId);
             const isTop = !win.minimized && win.id === topWindowId;
             return (
               <div
@@ -225,74 +292,20 @@ export function FloatingWindowsLayer({
   );
 }
 
-function QuoteApprovalBar({
-  quote,
-  isConfirmingRun,
-  onConfirm,
-  onCancel,
-}: {
-  quote: RunQuote;
-  isConfirmingRun: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="bc-approval-bar" data-testid="pending-quote-banner">
-      <div className="bc-approval-info">
-        <div className="bc-approval-title">
-          {isConfirmingRun ? (
-            <RunningCompass size={15} />
-          ) : (
-            <span className="bc-approval-dot" />
-          )}
-          <span>
-            Ready to execute <strong className="mono">{quote.plugin_id}</strong>
-          </span>
-          <span className="bc-badge bc-badge-accent mono">
-            {formatMilliAct(quote.estimated_cost_act)}
-          </span>
-        </div>
-        <div className="bc-approval-sub">
-          Grant: <strong>{quote.dataset_grant_summary ?? "Default"}</strong> · Run{" "}
-          <span className="mono">{quote.run_id.slice(0, 14)}</span>
-        </div>
-      </div>
-      <div className="bc-approval-actions">
-        <button
-          type="button"
-          data-testid="cancel-quote-btn"
-          className="bc-btn bc-btn-ghost"
-          disabled={isConfirmingRun}
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          data-testid="confirm-run-btn"
-          className="bc-btn bc-btn-primary"
-          disabled={isConfirmingRun}
-          onClick={onConfirm}
-        >
-          {isConfirmingRun
-            ? "Running Container..."
-            : `Approve & Run (${formatMilliAct(quote.estimated_cost_act)})`}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ModuleFloatingWindow({
+export function ModuleFloatingWindow({
   win,
   plugin,
   isFocused,
-  latestRun,
-  latestSucceededRun,
+  runs: moduleRuns,
   runCount,
   activeGrant,
   defaultCatalogId,
+  releaseVersion,
+  catalogFacets = {},
+  sessionId,
+  theme = "light",
   pendingQuote,
+  pendingQuoteParams = null,
   isConfirmingRun,
   liveLogs,
   verifyReport,
@@ -300,41 +313,59 @@ function ModuleFloatingWindow({
   onMoveResize,
   onMinimize,
   onMaximize,
+  onDock,
   onClose,
   onChangeTab,
-  onUpdateParam,
-  onPrepareRun,
+  onUpdateParam: _onUpdateParam,
+  onPrepareRun: _onPrepareRun,
+  onRunApiTest,
+  onQuoteConfirmed,
   onQuotePrepared,
-  onConfirmPendingQuote,
-  onCancelPendingQuote,
+  onSendToChat,
+  onSyncDraftParams,
+  onUpdateRun,
   onReverifyChain,
 }: {
   win: ModuleWindowState;
   plugin: PluginSummary;
   isFocused: boolean;
-  latestRun: RunRecord | null;
-  latestSucceededRun: RunRecord | null;
+  runs: RunRecord[];
   runCount: number;
   activeGrant: DatasetGrant | null;
   defaultCatalogId: string;
+  releaseVersion?: number;
+  catalogFacets?: Record<string, string[]>;
+  sessionId?: string;
+  theme?: "light" | "dark";
   pendingQuote: RunQuote | null;
+  pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
   liveLogs: string[];
-  verifyReport: FrogletVerifyReport | null;
+  verifyReport: RunVerification | null;
   onFocus: () => void;
   onMoveResize: (patch: Partial<Pick<ModuleWindowState, "x" | "y" | "w" | "h">>) => void;
   onMinimize: () => void;
   onMaximize: () => void;
+  onDock: () => void;
   onClose: () => void;
-  onChangeTab: (tab: WindowTab) => void;
+  onChangeTab: (tab: WindowTab, requestedRunId?: string) => void;
   onUpdateParam: (key: string, value: unknown) => void;
   onPrepareRun: () => void;
-  onQuotePrepared: (quote: RunQuote) => void;
-  onConfirmPendingQuote: () => void;
-  onCancelPendingQuote: () => void;
+  onRunApiTest?: (
+    params: Record<string, unknown>,
+    offerId?: string,
+  ) => Promise<RunRecord | null>;
+  onQuoteConfirmed?: (completed: RunRecord) => Promise<void> | void;
+  onQuotePrepared: (quote: RunQuote, params?: Record<string, unknown>) => void;
+  onSendToChat?: (
+    pluginId: string,
+    message: string,
+    context?: Record<string, unknown>,
+  ) => void;
+  onSyncDraftParams?: (pluginId: string, params: Record<string, unknown>) => void;
+  onUpdateRun: (run: RunRecord) => void;
   onReverifyChain: (run: RunRecord, tamperOneByte: boolean) => void;
 }) {
-  const [selectedStageIdx, setSelectedStageIdx] = useState<number>(4);
   const dragState = useRef<{
     startX: number;
     startY: number;
@@ -349,7 +380,7 @@ function ModuleFloatingWindow({
   } | null>(null);
 
   const handleHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (win.maximized) return;
+    if (win.maximized || win.docked) return;
     if ((e.target as HTMLElement).closest("button")) return;
     onFocus();
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -415,455 +446,250 @@ function ModuleFloatingWindow({
     }
   };
 
-  const schemaProps =
-    (plugin.manifest.inputs.schema["properties"] as
-      | Record<string, SchemaPropertySpec>
-      | undefined) ?? {};
-  const schemaEntries = Object.entries(schemaProps);
+  const versionRuns = moduleRuns.filter((run) => run.plugin_version === plugin.manifest.version);
+  const latestRun = versionRuns[0];
+  const terminalProblem =
+    latestRun?.status === "failed" || latestRun?.status === "canceled" ? latestRun : null;
+  const frameRun = terminalProblem ?? versionRuns.find((run) => run.status === "succeeded") ?? null;
 
-  const isChainValid = verifyReport
-    ? verifyReport.valid
-    : Boolean(latestRun?.receipt_verified);
-
-  const windowStyle: React.CSSProperties = win.maximized
-    ? {
-        top: 56,
-        left: 16,
-        right: 16,
-        bottom: 58,
-        zIndex: 200 + win.z,
-      }
-    : {
-        top: win.y,
-        left: win.x,
-        width: win.w,
-        height: win.h,
-        zIndex: 200 + win.z,
-      };
-
-  const logsToDisplay =
-    isConfirmingRun || liveLogs.length > 0
-      ? liveLogs
-      : (latestRun?.logs ?? []);
+  const windowStyle: React.CSSProperties | undefined = win.docked
+    ? undefined
+    : win.maximized
+      ? {
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          width: "100vw",
+          height: "100dvh",
+          zIndex: 200 + win.z,
+        }
+      : {
+          top: win.y,
+          left: win.x,
+          width: win.w,
+          height: win.h,
+          zIndex: 200 + win.z,
+        };
 
   return (
     <section
       className="bc-window"
       data-focused={String(isFocused)}
       data-maximized={String(win.maximized)}
+      data-docked={String(Boolean(win.docked))}
       data-testid={`module-window-${plugin.manifest.id}`}
       style={windowStyle}
       onMouseDown={onFocus}
       aria-label={plugin.manifest.name}
     >
-      {/* Draggable Window Title Bar */}
-      <div
-        className="bc-window-titlebar"
-        onPointerDown={handleHeaderPointerDown}
-        onPointerMove={handleHeaderPointerMove}
-        onPointerUp={handleHeaderPointerUp}
-        onDoubleClick={onMaximize}
-      >
-        <div className="bc-window-title-left">
-          <span className="bc-window-icon">
-            <IconModules size={14} />
-          </span>
-          <span className="bc-window-title">{plugin.manifest.name}</span>
-          <span className="bc-window-version mono">v{plugin.manifest.version}</span>
+      {/* Top Window Chrome + Autohiding Centered Module Navigation Tabs */}
+      <div className="bc-window-chrome-top">
+        <div
+          className="bc-window-titlebar"
+          onPointerDown={handleHeaderPointerDown}
+          onPointerMove={handleHeaderPointerMove}
+          onPointerUp={handleHeaderPointerUp}
+          onDoubleClick={win.docked ? undefined : onMaximize}
+        >
+          <div className="bc-window-title-left">
+            <span className="bc-window-icon">
+              <IconModules size={14} />
+            </span>
+            <span className="bc-window-title">{plugin.manifest.name}</span>
+            <span className="bc-window-version mono">v{plugin.manifest.version}</span>
+          </div>
+
+          <span className="bc-window-tab-indicator" aria-hidden="true" />
+
+          <div className="bc-window-controls">
+            <button
+              type="button"
+              className="bc-win-ctrl"
+              data-active={String(Boolean(win.docked))}
+              aria-label={win.docked ? "Undock from chat" : "Split screen with chat"}
+              aria-pressed={Boolean(win.docked)}
+              title={
+                win.docked
+                  ? "Undock to floating window"
+                  : "Split screen next to chat (Canvas)"
+              }
+              onClick={onDock}
+            >
+              <IconSplitView size={13} />
+            </button>
+            <button
+              type="button"
+              className="bc-win-ctrl"
+              aria-label="Minimize window"
+              title="Minimize to tray"
+              onClick={onMinimize}
+            >
+              <IconMinimize size={13} />
+            </button>
+            <button
+              type="button"
+              className="bc-win-ctrl"
+              aria-label={win.maximized ? "Restore window" : "Maximize window"}
+              title={win.maximized ? "Restore size" : "Maximize"}
+              onClick={onMaximize}
+            >
+              {win.maximized ? <IconRestore size={13} /> : <IconMaximize size={12} />}
+            </button>
+            <button
+              type="button"
+              className="bc-win-ctrl bc-win-ctrl-close"
+              aria-label="Close window"
+              title="Close (Esc)"
+              onClick={onClose}
+            >
+              <IconClose size={13} />
+            </button>
+          </div>
         </div>
 
-        <div className="bc-window-controls">
-          <button
-            type="button"
-            className="bc-win-ctrl"
-            aria-label="Minimize window"
-            title="Minimize to tray"
-            onClick={onMinimize}
-          >
-            <IconMinimize size={13} />
-          </button>
-          <button
-            type="button"
-            className="bc-win-ctrl"
-            aria-label={win.maximized ? "Restore window" : "Maximize window"}
-            title={win.maximized ? "Restore size" : "Maximize"}
-            onClick={onMaximize}
-          >
-            {win.maximized ? <IconRestore size={13} /> : <IconMaximize size={12} />}
-          </button>
-          <button
-            type="button"
-            className="bc-win-ctrl bc-win-ctrl-close"
-            aria-label="Close window"
-            title="Close (Esc)"
-            onClick={onClose}
-          >
-            <IconClose size={13} />
-          </button>
+        <div className="bc-window-tabs-drawer">
+          <div className="bc-window-tabs" role="tablist">
+            {plugin.has_custom_ui && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={win.activeTab === "ui"}
+                className="bc-window-tab"
+                data-active={String(win.activeTab === "ui")}
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onChangeTab("ui");
+                }}
+              >
+                <IconApp size={13} />
+                <span>App</span>
+              </button>
+            )}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={win.activeTab === "run"}
+              className="bc-window-tab"
+              data-active={String(win.activeTab === "run")}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onChangeTab("run");
+              }}
+            >
+              <IconApi size={13} />
+              <span>API</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={win.activeTab === "results"}
+              className="bc-window-tab"
+              data-active={String(win.activeTab === "results")}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onChangeTab("results");
+              }}
+            >
+              <IconRuns size={13} />
+              <span>Runs</span>
+              {runCount > 0 && <span className="bc-tab-count">{runCount}</span>}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={win.activeTab === "about"}
+              className="bc-window-tab"
+              data-active={String(win.activeTab === "about")}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onChangeTab("about");
+              }}
+            >
+              <IconAbout size={13} />
+              <span>About</span>
+            </button>
+          </div>
         </div>
-      </div>
-
-      {/* Clean Module Navigation Tabs */}
-      <div className="bc-window-tabs" role="tablist">
-        {plugin.has_custom_ui && (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={win.activeTab === "ui"}
-            className="bc-window-tab"
-            data-active={String(win.activeTab === "ui")}
-            onClick={() => onChangeTab("ui")}
-          >
-            Interactive App
-          </button>
-        )}
-        <button
-          type="button"
-          role="tab"
-          aria-selected={win.activeTab === "run"}
-          className="bc-window-tab"
-          data-active={String(win.activeTab === "run")}
-          onClick={() => onChangeTab("run")}
-        >
-          Parameters
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={win.activeTab === "results"}
-          className="bc-window-tab"
-          data-active={String(win.activeTab === "results")}
-          onClick={() => onChangeTab("results")}
-        >
-          <span>Results &amp; Receipt</span>
-          {runCount > 0 && <span className="bc-tab-count">{runCount}</span>}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={win.activeTab === "about"}
-          className="bc-window-tab"
-          data-active={String(win.activeTab === "about")}
-          onClick={() => onChangeTab("about")}
-        >
-          About
-        </button>
       </div>
 
       {/* Window Body */}
       <div className="bc-window-body">
         {/* Keep custom UI iframe mounted so postMessage run updates stay seamless */}
-        {plugin.has_custom_ui && activeGrant && (
+        {plugin.has_custom_ui && (
           <div
             className="bc-window-iframe-pane"
             style={{ display: win.activeTab === "ui" ? "flex" : "none" }}
           >
+            {terminalProblem && (
+              <div role="alert" className="bc-error-banner" data-testid="module-run-problem" data-run-id={terminalProblem.run_id}>
+                <div className="bc-error-banner-body">
+                  <strong>Run {terminalProblem.status}</strong>
+                  {terminalProblem.error_message && <span className="bc-error-banner-message">{terminalProblem.error_message}</span>}
+                  <span className="bc-error-banner-hint">{terminalProblem.run_id}</span>
+                </div>
+                <button type="button" className="bc-btn" onClick={() => onChangeTab("results", terminalProblem.run_id)}>View run</button>
+              </div>
+            )}
             <SandboxedPluginFrame
+              key={plugin.manifest.version}
               plugin={plugin}
               activeGrant={activeGrant}
               defaultCatalogId={defaultCatalogId}
-              latestPluginRun={latestSucceededRun}
+              releaseVersion={releaseVersion}
+              catalogFacets={catalogFacets}
+              sessionId={sessionId}
+              latestPluginRun={frameRun}
+              draftParams={win.params}
+              pendingQuote={pendingQuote}
+              pendingParams={pendingQuoteParams}
               isFocused={isFocused}
+              theme={theme}
               onQuotePrepared={onQuotePrepared}
+              onSendToChat={onSendToChat}
+              onSyncDraftParams={onSyncDraftParams}
             />
           </div>
         )}
 
         {win.activeTab === "run" && (
-          <div className="bc-window-pane">
-            <p className="bc-pane-lead">{plugin.manifest.description}</p>
-
-            {schemaEntries.length === 0 ? (
-              <div className="bc-empty-note">
-                This module runs with default cohort inputs from your active data grant.
-              </div>
-            ) : (
-              <div className="bc-form-grid">
-                {schemaEntries.map(([key, spec]) => {
-                  const val = win.params[key] ?? spec.default ?? "";
-                  return (
-                    <label key={key} className="bc-field">
-                      <span className="bc-field-label">
-                        {spec.title ?? humanizeKey(key)}
-                      </span>
-                      {Array.isArray(spec.enum) && spec.enum.length > 0 ? (
-                        <select
-                          className="bc-input"
-                          value={String(val)}
-                          onChange={(e) => onUpdateParam(key, e.target.value)}
-                        >
-                          {spec.enum.map((opt) => (
-                            <option key={String(opt)} value={String(opt)}>
-                              {String(opt)}
-                            </option>
-                          ))}
-                        </select>
-                      ) : spec.type === "boolean" ? (
-                        <select
-                          className="bc-input"
-                          value={val ? "true" : "false"}
-                          onChange={(e) =>
-                            onUpdateParam(key, e.target.value === "true")
-                          }
-                        >
-                          <option value="true">Enabled</option>
-                          <option value="false">Disabled</option>
-                        </select>
-                      ) : spec.type === "number" || spec.type === "integer" ? (
-                        <input
-                          type="number"
-                          className="bc-input"
-                          min={spec.minimum}
-                          max={spec.maximum}
-                          step={spec.type === "integer" ? 1 : "any"}
-                          value={String(val)}
-                          onChange={(e) =>
-                            onUpdateParam(
-                              key,
-                              spec.type === "integer"
-                                ? parseInt(e.target.value, 10) || 0
-                                : parseFloat(e.target.value) || 0,
-                            )
-                          }
-                        />
-                      ) : (
-                        <input
-                          type="text"
-                          className="bc-input"
-                          value={String(val)}
-                          onChange={(e) => onUpdateParam(key, e.target.value)}
-                        />
-                      )}
-                      {spec.description && (
-                        <span className="bc-field-hint">{spec.description}</span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <ModuleApiTab
+            key={plugin.manifest.version}
+            plugin={plugin}
+            initialParams={win.params}
+            activeGrant={activeGrant}
+            sessionId={sessionId}
+            isFocused={isFocused}
+            isConfirmingRun={isConfirmingRun}
+            onSyncDraftParams={onSyncDraftParams}
+            onRunApiTest={onRunApiTest}
+            onQuoteConfirmed={onQuoteConfirmed}
+            onInspectRun={(runId) => onChangeTab("results", runId)}
+          />
         )}
 
         {win.activeTab === "results" && (
-          <div className="bc-window-pane">
-            {!latestRun && !isConfirmingRun ? (
-              <div className="bc-empty-note">
-                No completed runs for <strong>{plugin.manifest.name}</strong> yet.
-                Configure parameters and run the module to view charts, CSV exports, and
-                cryptographic receipts.
-              </div>
-            ) : (
-              <div className="bc-results-stack">
-                {latestRun?.result_json && (
-                  <ScientificViews
-                    resultJson={latestRun.result_json}
-                    views={plugin.views}
-                    exposeTestIds={isFocused}
-                  />
-                )}
-
-                {latestRun && latestRun.artifacts.length > 0 && (
-                  <div
-                    className="bc-card"
-                    data-testid={isFocused ? "run-artifacts" : undefined}
-                  >
-                    <div className="bc-card-header">
-                      <span className="bc-card-title">Output Files</span>
-                      <span className="bc-caption">
-                        {latestRun.artifacts.length} file(s)
-                      </span>
-                    </div>
-                    <div className="bc-artifact-list">
-                      {latestRun.artifacts.map((art) => (
-                        <a
-                          key={art.name}
-                          className="bc-artifact-chip"
-                          href={`/api/v1/runs/${encodeURIComponent(latestRun.run_id)}/artifacts/${encodeURIComponent(art.name)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <span className="mono">{art.name}</span>
-                          <span className="bc-caption">
-                            {(art.size_bytes / 1024).toFixed(1)} KB
-                          </span>
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div className="bc-card">
-                  <div className="bc-card-header">
-                    <span className="bc-card-title">Container Execution Log</span>
-                    {isConfirmingRun && (
-                      <span className="bc-badge bc-badge-accent">Running</span>
-                    )}
-                  </div>
-                  <pre
-                    className="bc-log-pre"
-                    data-testid={isFocused ? "live-run-logs" : undefined}
-                  >
-                    {logsToDisplay.length > 0
-                      ? logsToDisplay.join("\n")
-                      : "Waiting for container output..."}
-                  </pre>
-                </div>
-
-                {latestRun && latestRun.froglet_chain.length > 0 && (
-                  <div
-                    className="bc-card"
-                    data-testid={isFocused ? "receipt-inspector" : undefined}
-                  >
-                    <div className="bc-card-header">
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <IconShield size={15} />
-                        <span className="bc-card-title">
-                          Verifiable Execution Receipt
-                        </span>
-                      </div>
-                      <span
-                        data-testid={isFocused ? "receipt-verified-badge" : undefined}
-                        className={`bc-badge ${
-                          isChainValid ? "bc-badge-success" : "bc-badge-danger"
-                        }`}
-                      >
-                        {isChainValid
-                          ? "SCHNORR CHAIN VALID"
-                          : "TAMPER DETECTED / INVALID"}
-                      </span>
-                    </div>
-
-                    <p className="bc-caption" style={{ marginTop: 4 }}>
-                      5-artifact <code>froglet/v1</code> RFC 8785 JCS +{" "}
-                      <code>secp256k1</code> Schnorr provenance chain.
-                    </p>
-
-                    <div className="bc-receipt-actions">
-                      <button
-                        type="button"
-                        data-testid={isFocused ? "reverify-chain-btn" : undefined}
-                        className="bc-btn bc-btn-secondary"
-                        onClick={() => onReverifyChain(latestRun, false)}
-                      >
-                        <IconCheck size={14} />
-                        <span>Verify Chain</span>
-                      </button>
-                      <button
-                        type="button"
-                        data-testid={isFocused ? "tamper-test-btn" : undefined}
-                        className="bc-btn bc-btn-ghost"
-                        onClick={() => onReverifyChain(latestRun, true)}
-                      >
-                        Simulate 1-Byte Tamper
-                      </button>
-                    </div>
-
-                    <details className="bc-details">
-                      <summary>Inspect signed protocol artifacts</summary>
-                      <div className="bc-stage-pills">
-                        {latestRun.froglet_chain.map((_, idx) => (
-                          <button
-                            key={idx}
-                            type="button"
-                            className="bc-btn bc-btn-ghost"
-                            data-active={String(selectedStageIdx === idx)}
-                            onClick={() => setSelectedStageIdx(idx)}
-                          >
-                            {idx + 1}. {FROGLET_STAGES[idx] ?? `Artifact ${idx + 1}`}
-                          </button>
-                        ))}
-                      </div>
-                      <pre className="bc-code-pre">
-                        {JSON.stringify(
-                          latestRun.froglet_chain[
-                            Math.min(
-                              selectedStageIdx,
-                              latestRun.froglet_chain.length - 1,
-                            )
-                          ],
-                          null,
-                          2,
-                        )}
-                      </pre>
-                    </details>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <ModuleRunsTab
+            plugin={plugin}
+            runs={moduleRuns}
+            requestedRunId={win.requestedRunId}
+            isFocused={isFocused}
+            isConfirmingRun={isConfirmingRun}
+            liveLogs={liveLogs}
+            verifyReport={verifyReport}
+            onClearRequestedRunId={() => onChangeTab("results")}
+            onUpdateRun={onUpdateRun}
+            onReverifyChain={onReverifyChain}
+          />
         )}
 
         {win.activeTab === "about" && (
-          <div className="bc-window-pane">
-            <div className="bc-meta-grid">
-              <div className="bc-meta-item">
-                <span className="bc-caption">Module ID</span>
-                <span className="mono">{plugin.manifest.id}</span>
-              </div>
-              <div className="bc-meta-item">
-                <span className="bc-caption">Compute Resources</span>
-                <span>
-                  {plugin.manifest.resources.cpus} CPU ·{" "}
-                  {plugin.manifest.resources.memory_mb} MB RAM ·{" "}
-                  {plugin.manifest.resources.timeout_sec}s timeout
-                </span>
-              </div>
-              <div className="bc-meta-item">
-                <span className="bc-caption">Container Network</span>
-                <span className="mono">{plugin.manifest.network}</span>
-              </div>
-              <div className="bc-meta-item">
-                <span className="bc-caption">Pinned OCI Image</span>
-                <span className="mono" style={{ wordBreak: "break-all" }}>
-                  {plugin.manifest.image}
-                </span>
-              </div>
-            </div>
-
-            {plugin.skill && (
-              <div className="bc-card" style={{ marginTop: 14 }}>
-                <div className="bc-card-title" style={{ marginBottom: 6 }}>
-                  Agent Skill Specification (SKILL.md)
-                </div>
-                <pre className="bc-code-pre">{plugin.skill.markdown_body}</pre>
-              </div>
-            )}
-          </div>
+          <ModuleAboutTab plugin={plugin} isFocused={isFocused} />
         )}
       </div>
 
-      {/* Window Bottom Action / Approval Bar */}
-      {pendingQuote ? (
-        <QuoteApprovalBar
-          quote={pendingQuote}
-          isConfirmingRun={isConfirmingRun}
-          onConfirm={onConfirmPendingQuote}
-          onCancel={onCancelPendingQuote}
-        />
-      ) : (
-        win.activeTab === "run" && (
-          <div className="bc-window-footer">
-            <div className="bc-caption">
-              Active grant: <strong>{activeGrant?.label ?? "Default"}</strong> ·{" "}
-              <span className="mono">
-                {formatMilliAct(plugin.manifest.price_milli_act)}
-              </span>
-            </div>
-            <button
-              type="button"
-              data-testid={isFocused ? "plugin-prepare-btn" : undefined}
-              className="bc-btn bc-btn-primary"
-              onClick={onPrepareRun}
-            >
-              Run Module ({formatMilliAct(plugin.manifest.price_milli_act)})
-            </button>
-          </div>
-        )
-      )}
-
       {/* Resize Corner Handle */}
-      {!win.maximized && (
+      {!win.maximized && !win.docked && (
         <div
           className="bc-window-resize"
           onPointerDown={handleResizePointerDown}

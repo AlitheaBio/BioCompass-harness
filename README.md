@@ -39,6 +39,28 @@ cargo build --bin biocompass
 cargo run --bin biocompass -- up --port 8080
 ```
 
+### Retrieve hosted results in a local workspace
+
+Start the personal workspace with the hub's HTTPS base URL in `COMPASS_HUB_URL`. For a hub reached over loopback, HTTP is supported. From a second terminal, use your organization's `COMPASS_API_KEY` or `COMPASS_BEARER_TOKEN` for the following commands.
+
+```sh
+biocompass workspace prepare --plugin "$PLUGIN_ID"
+# Review the price and set RUN_ID to the run ID in the quote.
+biocompass workspace confirm "$RUN_ID"
+
+# After reconnecting, start the same workspace and collect the result.
+biocompass workspace sync
+biocompass workspace runs "$RUN_ID"
+biocompass workspace result "$RUN_ID" --artifact "$ARTIFACT_NAME" > result.bin
+```
+
+The worker can finish while the workspace is stopped. Repeating sync picks up outstanding deliveries without running the module again. A locally saved result is available to the owning OS account even with both services offline. Use the hub origin, organization and subject from `biocompass workspace identity` together with the original data directory.
+
+```sh
+biocompass workspace --data-dir "$DATA_DIR" --hub-url "$HUB_ORIGIN" \
+  --org "$ORG_ID" --subject "$SUBJECT" result "$RUN_ID" > result.json
+```
+
 ## Cloud-Agnostic Deployment
 
 Domain crates depend exclusively on the 5 traits in `biocompass-core-traits` (`SessionStore`, `BlobStore`, `OciRegistryClient`, `RunDispatcher`, `PaymentGateway`) and speak 100% standard open protocols:
@@ -48,3 +70,19 @@ Domain crates depend exclusively on the 5 traits in `biocompass-core-traits` (`S
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Local app release channel
+
+Open **Settings → Appearance → Local app** to see releases from the maintainer’s signed channel. On a local installation, the workbench also checks at startup and every day while it stays open. A verified newer release adds an update indicator to Settings. An installation can continue using BioCompass with the channel offline or unconfigured. The native app reports its compiled version and platform. The cloud workbench uses browser platform information when available and lets the scientist select a platform explicitly.
+
+Set `BIOCOMPASS_RELEASE_CHANNEL` to the HTTPS URL of `latest.json` and `BIOCOMPASS_RELEASE_PUBLIC_KEY` to the base64 public-key line from a trusted Minisign key. Set these on the BioCompass gateway, including the local installation if it should receive update notices. For laptop tests, an HTTP URL on a numeric loopback address is also accepted. Provision the public key independently of the release host. Keep the private signing key with the publisher.
+
+To publish a release:
+
+1. Build and check the actual versioned binaries or packages for each supported system. Upload immutable artifact filenames to static storage on the same origin as `latest.json`. The origin must serve direct `HEAD` and `GET` requests.
+2. Sign each file with `minisign -Sm <artifact> -s <release-private-key>`. Use Tauri's static update metadata shape for `latest.json`: a stable semantic `version`, plaintext `notes`, and a `platforms` map. Each key, such as `darwin-aarch64`, maps to `{ "url": "...", "signature": "..." }`. The signature is the complete Minisign signature text or its base64 encoding. Publish only targets whose artifacts exist.
+3. Sign the completed metadata with `minisign -Sm latest.json -s <release-private-key>`. Publish `latest.json` and `latest.json.minisig` together after the assets. The workbench verifies that signature before displaying the version and release notes. A download rechecks the metadata the scientist selected, verifies the entire artifact in a temporary file, and offers the verified file to the browser.
+
+“Download verified update” saves a file. To use a portable archive, extract it, stop the running app and start the new binary with the original `--data-dir`. An OS package uses its normal installer. Workspace and account files are separate from the release artifact. The gateway does not replace or execute installed binaries. A failed or canceled download can be retried. Ports, signing keys, release storage and installers for real platforms are deployment inputs.
+
+A channel can also provide a compatible customer worker. Add a separate entry to the signed `platforms` map named `froglet-node-<platform>`, such as `froglet-node-darwin-aarch64`. Include its own stable `version`, exact `url`, artifact `signature` and optional worker `notes`. This entry contains the BioCompass-compatible `froglet-node` binary and can have a different version from the local app. The authenticated customer hub checks the user's role for discovery and download. Organization owners and admins can download the worker and see connection guidance. Keep the generated node key and persistent state on the customer machine. A site operator enrolls compute-pool workers; an organization administrator can enroll a private-data worker with its real signing public key.

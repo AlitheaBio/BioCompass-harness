@@ -1,8 +1,12 @@
 id = "alithea/hla-interactive-explorer"
 name = "HLA Antigenic Gene Hotspot Explorer"
 version = "1.0.0"
+author = "Alithea Bio"
+icon = "icon.svg"
 description = "Interactive source-gene hotspot profiler and IC50 binding tier explorer with a custom sandboxed Vite UI bridged via @biocompass/plugin-sdk."
 category = "Target Discovery"
+execution = "either"
+requires_catalog_level = "rows"
 image = "127.0.0.1:5500/alithea/hla-interactive-explorer@sha256:d8ac5235ee9b5e7ff6538ad69651c7491b1ce46b382166c4ec3bbada47106536"
 network = "none"
 price_milli_act = 5000

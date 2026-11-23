@@ -1,5 +1,6 @@
 [package]
 name = "biocompass"
+default-run = "biocompass"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,6 +27,7 @@ clap.workspace = true
 froglet-verify.workspace = true
 futures.workspace = true
 hex.workspace = true
+html5gum = "0.9.2"
 mime_guess.workspace = true
 reqwest.workspace = true
 rust-embed.workspace = true
@@ -40,5 +42,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
-[dev-dependencies]
 tempfile.workspace = true
+minisign-verify = "0.3"
+semver = "1.0"
+base64 = "0.22"

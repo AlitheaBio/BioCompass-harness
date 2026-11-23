@@ -6,7 +6,9 @@
 //! - `> 12k`-token (`48 KB`) tool result spill into `BlobStore`.
 //! - `Model-visible <=> Logged` transcript persistence in `SessionStore`.
 
+pub mod cli_agent;
 pub mod llm;
+pub mod mcp;
 pub mod prompt;
 pub mod tools;
 
@@ -14,16 +16,18 @@ use biocompass_core_traits::{
     BlobStore, CompassError, CompassResult, DatasetGrant, RunQuote, SessionEvent, SessionEventKind,
     SessionId, SessionStore,
 };
+use cli_agent::run_cli_agent_turn;
 use llm::{
     ConversationMessage, LlmProviderConfig, LlmToolCall, build_http_client, stream_model_turn,
 };
+use mcp::ScopedMcpServer;
 use prompt::build_system_prompt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 use tools::{
     AgentExecutionPort, DEFAULT_SPILL_THRESHOLD_BYTES, allowed_tool_definitions,
     execute_agent_tool, spill_tool_output_if_needed,
@@ -33,10 +37,19 @@ use tools::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentStreamEvent {
+    ThoughtDelta(String),
     TextDelta(String),
     ToolCall { id: String, name: String, arguments: Value },
     ToolResult { id: String, name: String, preview: String },
-    RunPrepared(RunQuote),
+    ModuleDraftUpdated {
+        plugin_id: String,
+        params: Value,
+        merge: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        open_tab: Option<String>,
+    },
+    RunPrepared(Box<RunQuote>),
+    AgentAdmission(tools::AgentAdmission),
     Completed { assistant_message: String },
     Error(String),
 }
@@ -71,9 +84,11 @@ pub struct AgentTurnSummary {
 }
 
 /// Cloud-agnostic BioCompass agent runtime.
+#[derive(Clone)]
 pub struct AgentRuntime {
     http: Client,
     config: AgentConfig,
+    llm: Arc<RwLock<Option<LlmProviderConfig>>>,
     session_store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
     execution_port: Arc<dyn AgentExecutionPort>,
@@ -86,21 +101,36 @@ impl AgentRuntime {
         blob_store: Arc<dyn BlobStore>,
         execution_port: Arc<dyn AgentExecutionPort>,
     ) -> CompassResult<Self> {
+        let initial_llm = config.llm.clone();
         Ok(Self {
             http: build_http_client()?,
             config,
+            llm: Arc::new(RwLock::new(initial_llm)),
             session_store,
             blob_store,
             execution_port,
         })
     }
 
-    pub const fn is_llm_configured(&self) -> bool {
-        self.config.llm.is_some()
+    /// Use a capability bound by the caller to this one execution.
+    pub fn for_execution(&self, port: Arc<dyn AgentExecutionPort>) -> Self {
+        Self { execution_port: port, ..self.clone() }
     }
 
-    pub fn llm_model_name(&self) -> Option<&str> {
-        self.config.llm.as_ref().map(|c| c.model.as_str())
+    pub async fn is_llm_configured(&self) -> bool {
+        self.llm.read().await.is_some()
+    }
+
+    pub async fn llm_model_name(&self) -> Option<String> {
+        self.llm.read().await.as_ref().map(LlmProviderConfig::display_name)
+    }
+
+    pub async fn llm_config(&self) -> Option<LlmProviderConfig> {
+        self.llm.read().await.clone()
+    }
+
+    pub async fn set_llm_config(&self, next: Option<LlmProviderConfig>) {
+        *self.llm.write().await = next;
     }
 
     /// Execute a full multi-step tool-using turn on `session_id`, streaming live events to `stream_tx`.
@@ -111,10 +141,21 @@ impl AgentRuntime {
         active_grant: Option<&DatasetGrant>,
         stream_tx: Option<mpsc::Sender<AgentStreamEvent>>,
     ) -> CompassResult<AgentTurnSummary> {
-        let llm_cfg = self.config.llm.as_ref().ok_or_else(|| {
-            CompassError::UpstreamLlm(
-                "no upstream LLM configured; set DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or BIOCOMPASS_LLM_BASE_URL".into(),
-            )
+        self.run_turn_with_context(session_id, user_message, active_grant, None, stream_tx)
+            .await
+    }
+
+    /// Execute a full multi-step tool-using turn with optional live open-module UI context.
+    pub async fn run_turn_with_context(
+        &self,
+        session_id: &SessionId,
+        user_message: &str,
+        active_grant: Option<&DatasetGrant>,
+        active_module_context: Option<&Value>,
+        stream_tx: Option<mpsc::Sender<AgentStreamEvent>>,
+    ) -> CompassResult<AgentTurnSummary> {
+        let llm_cfg = self.llm.read().await.clone().ok_or_else(|| {
+            CompassError::UpstreamLlm("No LLM backend is configured yet.".into())
         })?;
 
         let trimmed = user_message.trim();
@@ -137,16 +178,87 @@ impl AgentRuntime {
 
         let catalogs = self.execution_port.list_catalog_manifests().await;
         let plugins = self.execution_port.list_plugins().await;
-        let system_prompt = build_system_prompt(active_grant, &catalogs, &plugins);
+        let system_prompt = build_system_prompt(
+            active_grant,
+            &catalogs,
+            &plugins,
+            active_module_context,
+        );
+
+        if llm_cfg.is_local_cli() {
+            let mcp = ScopedMcpServer::start(
+                session.org_id.clone(),
+                session_id.clone(),
+                active_grant.cloned(),
+                Arc::clone(&self.execution_port),
+                Arc::clone(&self.session_store),
+                Arc::clone(&self.blob_store),
+                self.config.scaffold_root_dir.clone(),
+                self.config.spill_threshold_bytes,
+                stream_tx.clone(),
+            )
+            .await?;
+
+            let cwd = self
+                .config
+                .scaffold_root_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| self.config.scaffold_root_dir.clone());
+            let mcp_url = mcp.url().to_owned();
+            let turn_res = run_cli_agent_turn(
+                &llm_cfg,
+                &mcp_url,
+                &cwd,
+                &system_prompt,
+                &history,
+                stream_tx.as_ref(),
+            )
+            .await;
+            let metrics = mcp.finish().await;
+            let turn_out = turn_res?;
+
+            let final_text = turn_out.text;
+            let mut assistant_meta = json!({
+                "model": llm_cfg.display_name(),
+                "protocol": llm_cfg.protocol,
+            });
+            if !turn_out.thinking.trim().is_empty() {
+                assistant_meta["thinking"] = Value::String(turn_out.thinking);
+            }
+            self.session_store
+                .append_event(
+                    session_id,
+                    SessionEventKind::AssistantMessage,
+                    &final_text,
+                    assistant_meta,
+                )
+                .await?;
+            if let Some(tx) = &stream_tx {
+                let _ = tx
+                    .send(AgentStreamEvent::Completed {
+                        assistant_message: final_text.clone(),
+                    })
+                    .await;
+            }
+            return Ok(AgentTurnSummary {
+                session_id: session_id.clone(),
+                assistant_text: final_text,
+                prepared_quotes: metrics.prepared_quotes,
+                tool_calls_executed: metrics.tool_calls_executed,
+            });
+        }
+
         let tools = allowed_tool_definitions();
 
         let mut prepared_quotes = Vec::new();
         let mut total_tool_calls = 0usize;
+        let mut accumulated_thinking = String::new();
 
         for _step in 0..self.config.max_tool_iterations {
             let turn_out = stream_model_turn(
                 &self.http,
-                llm_cfg,
+                &llm_cfg,
                 &system_prompt,
                 &history,
                 &tools,
@@ -154,14 +266,25 @@ impl AgentRuntime {
             )
             .await?;
 
+            if !turn_out.thinking.trim().is_empty() {
+                if !accumulated_thinking.is_empty() {
+                    accumulated_thinking.push_str("\n\n");
+                }
+                accumulated_thinking.push_str(turn_out.thinking.trim());
+            }
+
             if turn_out.tool_calls.is_empty() {
                 let final_text = turn_out.text;
+                let mut assistant_meta = json!({ "model": llm_cfg.model });
+                if !accumulated_thinking.is_empty() {
+                    assistant_meta["thinking"] = Value::String(accumulated_thinking);
+                }
                 self.session_store
                     .append_event(
                         session_id,
                         SessionEventKind::AssistantMessage,
                         &final_text,
-                        json!({ "model": llm_cfg.model }),
+                        assistant_meta,
                     )
                     .await?;
                 if let Some(tx) = &stream_tx {
@@ -210,19 +333,30 @@ impl AgentRuntime {
                 tool_calls: turn_out.tool_calls.clone(),
             });
 
+            let mut pause: Option<String> = None;
             for tc in &turn_out.tool_calls {
-                total_tool_calls += 1;
-                let raw_val = execute_agent_tool(
-                    tc,
-                    &session.org_id,
-                    session_id,
-                    active_grant,
-                    self.execution_port.as_ref(),
-                    self.session_store.as_ref(),
-                    &self.config.scaffold_root_dir,
-                    stream_tx.as_ref(),
-                )
-                .await;
+                let raw_val = if pause.is_some() {
+                    json!({"status": "execution_paused", "message": "Waiting for the scientist."})
+                } else {
+                    total_tool_calls += 1;
+                    execute_agent_tool(
+                        tc,
+                        &session.org_id,
+                        session_id,
+                        active_grant,
+                        self.execution_port.as_ref(),
+                        self.session_store.as_ref(),
+                        self.blob_store.as_ref(),
+                        &self.config.scaffold_root_dir,
+                        stream_tx.as_ref(),
+                    )
+                    .await
+                };
+                if raw_val["execution_id"].is_string()
+                    && matches!(raw_val["status"].as_str(), Some("prepared_awaiting_user_confirmation" | "insufficient_credits" | "admission_unavailable"))
+                {
+                    pause = raw_val["message"].as_str().map(str::to_owned);
+                }
 
                 if let Some(quote_val) = raw_val.get("quote")
                     && let Ok(q) = serde_json::from_value::<RunQuote>(quote_val.clone())
@@ -271,10 +405,24 @@ impl AgentRuntime {
                     content: model_visible_content,
                 });
             }
+            if let Some(message) = pause {
+                self.session_store.append_event(
+                    session_id, SessionEventKind::AssistantMessage, &message, json!({"model": llm_cfg.model})
+                ).await?;
+                if let Some(tx) = &stream_tx {
+                    let _ = tx.send(AgentStreamEvent::Completed {
+                        assistant_message: message.clone(),
+                    }).await;
+                }
+                return Ok(AgentTurnSummary {
+                    session_id: session_id.clone(), assistant_text: message,
+                    prepared_quotes, tool_calls_executed: total_tool_calls,
+                });
+            }
         }
 
         Err(CompassError::UpstreamLlm(format!(
-            "agent exceeded max_tool_iterations ({}) without final response",
+            "Agent exceeded the maximum tool-call steps ({}) without completing a response.",
             self.config.max_tool_iterations
         )))
     }

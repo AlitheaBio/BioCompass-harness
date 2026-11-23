@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sandbox Exploit Suite", () => {
-  test("verifies BrandWordmark, DuckDB Grant masking, real OCI Prepare->Confirm + Schnorr Receipt, and <iframe sandbox='allow-scripts'> exploit blocks", async ({
+  test("verifies BrandWordmark, DuckLake 3-level Grant governance (zero '***' masking), real OCI Prepare->Confirm + Schnorr Receipt, and <iframe sandbox='allow-scripts'> exploit blocks", async ({
     page,
     request,
   }) => {
@@ -13,63 +13,85 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     // 1. Load standalone single-binary SPA & verify BrandWordmark + live health + genesis ACT
     await page.goto("/");
     await expect(page.getByTestId("brand-wordmark")).toBeVisible();
-    await expect(page.getByTestId("health-pill")).toContainText(/docker|podman/i);
-    await expect(page.getByTestId("act-balance")).toHaveText("250.00 ACT");
+    await expect(page.getByTestId("health-pill")).toHaveText("Local");
+    await expect(page.getByTestId("health-pill")).toHaveAttribute(
+      "title",
+      /docker|podman/i,
+    );
+    const initialLedgerResp = await request.get("/api/v1/ledger");
+    expect(initialLedgerResp.ok()).toBe(true);
+    const initialLedger = (await initialLedgerResp.json()) as {
+      available_milli_act: number;
+    };
+    expect(initialLedger.available_milli_act).toBe(250_000);
 
-    // 2. Data Catalogs: verify Full Research Access vs Partner Lung Masked Grant enforcement
+    // 2. Data Catalogs: verify Full Research Access vs Scoped Partner vs Compute-Only 3-level Grant enforcement
     await page.getByTestId("nav-catalogs").click();
-    await expect(page.getByTestId("catalog-mask-indicator")).toHaveText(
-      "Unmasked Amino-Acid Sequences",
+    await expect(page.getByTestId("catalog-access-indicator")).toHaveText(
+      "Full Unmasked Row Access",
     );
     const fullTableText = await page.getByTestId("catalog-table").innerText();
     expect(fullTableText).not.toContain("***");
-    // Real IUPAC 8-14mer sequences present in Full Access mode
     expect(fullTableText).toMatch(/\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/);
 
-    // Switch to Partner Evaluation Tier (Lung & Tumor Only · Sequences Masked '***')
+    // Switch to Partner Scoped Rows (Lung Cohort · Unmasked Rows)
     const grantSelect = page.getByTestId("grant-select");
-    const maskedGrantValue = await grantSelect
-      .locator("option", { hasText: /Partner Evaluation Tier/i })
+    const scopedGrantValue = await grantSelect
+      .locator("option", { hasText: /Partner Scoped Rows/i })
       .getAttribute("value");
-    expect(maskedGrantValue).toBeTruthy();
+    expect(scopedGrantValue).toBeTruthy();
 
     const queryRespPromise = page.waitForResponse(
       (resp) =>
         resp.url().includes("/api/v1/catalogs/alithea/hla-atlas-v2026.1/query") &&
         resp.request().method() === "POST",
     );
-    await grantSelect.selectOption(maskedGrantValue!);
+    await grantSelect.selectOption(scopedGrantValue!);
     const queryResp = await queryRespPromise;
     expect(queryResp.ok()).toBe(true);
 
-    const maskedPayload = (await queryResp.json()) as {
-      sequence_masked: boolean;
+    const scopedPayload = (await queryResp.json()) as {
+      access_level: string;
+      dataset_digest: string;
       rows: { sequence: string; organ: string }[];
     };
-    expect(maskedPayload.sequence_masked).toBe(true);
-    expect(maskedPayload.rows.length).toBeGreaterThan(0);
-    for (const row of maskedPayload.rows) {
-      expect(row.sequence).toBe("***");
+    expect(scopedPayload.access_level).toBe("rows");
+    expect(scopedPayload.dataset_digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(scopedPayload.rows.length).toBeGreaterThan(0);
+    for (const row of scopedPayload.rows) {
+      expect(row.sequence).not.toBe("***");
+      expect(row.sequence).toMatch(/^[ACDEFGHIKLMNPQRSTVWY]{8,14}$/);
       expect(row.organ).toBe("Lung");
     }
 
-    await expect(page.getByTestId("catalog-mask-indicator")).toHaveText(
-      "Sequences Masked ('***')",
+    await expect(page.getByTestId("catalog-access-indicator")).toHaveText(
+      "Scoped Unmasked Rows",
     );
-    await expect(page.getByTestId("catalog-sql-view")).toContainText(
-      "'***'::VARCHAR AS sequence",
-    );
-    await expect(page.getByTestId("catalog-sql-view")).toContainText(
-      "organ IN ('Lung')",
-    );
-    const maskedTableRows = page.getByTestId("catalog-table").locator("tbody tr");
-    const rowCount = await maskedTableRows.count();
+    // Open Provenance & Policy drawer to verify typed QueryAst + row_scope
+    await page.getByTestId("open-provenance-drawer").click();
+    await expect(page.getByTestId("catalog-query-ast")).toContainText('"organ"');
+    await expect(page.getByTestId("catalog-query-ast")).toContainText('"Lung"');
+    await page.keyboard.press("Escape");
+
+    const scopedTableRows = page.getByTestId("catalog-table").locator("tbody tr");
+    const rowCount = await scopedTableRows.count();
     expect(rowCount).toBeGreaterThan(0);
     for (let i = 0; i < rowCount; i++) {
-      const cells = maskedTableRows.nth(i).locator("td");
-      await expect(cells.nth(1)).toHaveText("***");
-      await expect(cells.nth(5)).toHaveText("Lung");
+      const cells = scopedTableRows.nth(i).locator("td");
+      await expect(cells.nth(2)).not.toHaveText("***");
+      await expect(cells.nth(6)).toHaveText("Lung");
     }
+
+    // Switch to Compute-Only Partner Tier: verify SPA does NOT issue a failing queryCatalog call and renders compute-only state
+    const computeOnlyGrantValue = await grantSelect
+      .locator("option", { hasText: /Compute-Only/i })
+      .getAttribute("value");
+    expect(computeOnlyGrantValue).toBeTruthy();
+    await grantSelect.selectOption(computeOnlyGrantValue!);
+    await expect(page.getByTestId("catalog-access-indicator")).toHaveText(
+      "Compute-Only (Curated Modules)",
+    );
+    await expect(page.getByTestId("compute-only-banner")).toBeVisible();
 
     // Switch back to Full Research Access for Workbench motif run
     const fullGrantValue = await grantSelect
@@ -78,32 +100,31 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     expect(fullGrantValue).toBeTruthy();
     await grantSelect.selectOption(fullGrantValue!);
 
-    // 3. Workbench: Prepare -> Approve & Run real OCI container, stream logs, render SVG views & verify Schnorr Receipt
+    // 3. Workbench: Prepare & Run real OCI container, stream logs, render SVG views & verify Schnorr Receipt
     await page.getByTestId("nav-workbench").click();
     await page
       .getByTestId("quick-prepare-btn-alithea/hla-motif-enrichment")
       .click();
+    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 ACT");
+    await page.getByTestId("approve-paid-run").click();
 
-    await expect(page.getByTestId("pending-quote-banner")).toBeVisible();
-    await expect(page.getByTestId("pending-quote-banner")).toContainText(
-      "alithea/hla-motif-enrichment",
-    );
-    // Consent invariant: preparing a quote MUST NOT deduct ACT before confirmation
-    await expect(page.getByTestId("act-balance")).toHaveText("250.00 ACT");
-
-    await page.getByTestId("confirm-run-btn").click();
-    await expect(page.getByTestId("pending-quote-banner")).toBeHidden({
+    await expect(
+      page.getByTestId("module-window-alithea/hla-motif-enrichment"),
+    ).toBeVisible();
+    await expect(page.getByTestId("scientific-views")).toBeVisible({
       timeout: 45_000,
     });
 
     // ACT settled from 250.00 -> 245.00 ACT
-    await expect(page.getByTestId("act-balance")).toHaveText("245.00 ACT");
+    const postMotifLedger = (await (await request.get("/api/v1/ledger")).json()) as {
+      available_milli_act: number;
+    };
+    expect(postMotifLedger.available_milli_act).toBe(245_000);
     await expect(page.getByTestId("live-run-logs")).toContainText(
       "hla-motif-enrichment",
     );
 
     // Native scientific SVG charts & table rendered from /out/result.json
-    await expect(page.getByTestId("scientific-views")).toBeVisible();
     await expect(page.getByTestId("view-summary-metrics")).toBeVisible();
     await expect(page.getByTestId("view-length-dist")).toBeVisible();
     await expect(page.getByTestId("view-allele-enrichment")).toBeVisible();
@@ -148,8 +169,13 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await expect(page.getByTestId("settings-modal")).toBeHidden();
 
     // 4. Sandboxed Custom Vite Plugin UI (<iframe sandbox="allow-scripts">) Exploit & SDK RPC Suite
-    // Activate Partner Masked Grant to prove the sandboxed iframe also receives masked sequences
-    await grantSelect.selectOption(maskedGrantValue!);
+    // Minimize motif window, switch to Scoped Partner Grant (Lung Cohort) on Data Catalogs, then open sandboxed explorer
+    await page
+      .getByTestId("module-window-alithea/hla-motif-enrichment")
+      .getByRole("button", { name: "Minimize window" })
+      .click();
+    await page.getByTestId("nav-catalogs").click();
+    await grantSelect.selectOption(scopedGrantValue!);
     await page.getByTestId("nav-plugins").click();
     await page
       .getByTestId("plugin-card-alithea/hla-interactive-explorer")
@@ -175,8 +201,8 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await expect(frameLocator.getByTestId("sandbox-origin-badge")).toHaveText(
       "origin=null",
     );
-    await expect(frameLocator.getByTestId("sandbox-mask-badge")).toHaveText(
-      "Sequences Masked ('***')",
+    await expect(frameLocator.getByTestId("sandbox-access-badge")).toHaveText(
+      "Row Access (Unmasked IUPAC)",
     );
 
     const elementHandle = await iframeEl.elementHandle();
@@ -231,32 +257,63 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     const sdkRowCount = await sdkPreviewRows.count();
     expect(sdkRowCount).toBeGreaterThan(0);
     for (let i = 0; i < sdkRowCount; i++) {
-      await expect(sdkPreviewRows.nth(i).locator("td").nth(1)).toHaveText("***");
+      await expect(sdkPreviewRows.nth(i).locator("td").nth(1)).not.toHaveText("***");
       await expect(sdkPreviewRows.nth(i).locator("td").nth(4)).toHaveText("Lung");
     }
 
-    // Legitimate @biocompass/plugin-sdk RPC 2: prepareRun -> Host Consent Banner -> Real OCI Container -> Push Result Back to Iframe
+    // Switch to Compute-Only grant and verify host bridge blocks both queryCatalog RPC and requires_catalog_level="rows" prepareRun!
+    await page
+      .getByTestId("module-window-alithea/hla-interactive-explorer")
+      .getByRole("button", { name: "Minimize window" })
+      .click();
+    await page.getByTestId("nav-catalogs").click();
+    await grantSelect.selectOption(computeOnlyGrantValue!);
+    await page
+      .getByRole("toolbar", { name: "Open module windows" })
+      .getByRole("button", { name: "HLA Antigenic Gene Hotspot Explorer", exact: true })
+      .click();
+    await expect(frameLocator.getByTestId("sandbox-access-badge")).toHaveText(
+      "Compute-Only Grant (Rows Hidden)",
+    );
+    await frameLocator.getByTestId("sdk-query-btn").click();
+    await expect(frameLocator.getByTestId("sandbox-status")).toContainText(
+      /Catalog RPC error:.*compute_only/i,
+    );
+    await frameLocator.getByTestId("sdk-prepare-btn").click();
+    await expect(frameLocator.getByTestId("sandbox-status")).toContainText(
+      /Prepare RPC error:.*requires.*rows/i,
+    );
+
+    // Switch back to Scoped Partner Grant (rows) for legitimate @biocompass/plugin-sdk RPC 2:
+    // prepareRun -> Host Auto-Dispatch -> Real OCI Container -> Push Result Back to Iframe over postMessage!
+    await page
+      .getByTestId("module-window-alithea/hla-interactive-explorer")
+      .getByRole("button", { name: "Minimize window" })
+      .click();
+    await page.getByTestId("nav-catalogs").click();
+    await grantSelect.selectOption(scopedGrantValue!);
+    await page
+      .getByRole("toolbar", { name: "Open module windows" })
+      .getByRole("button", { name: "HLA Antigenic Gene Hotspot Explorer", exact: true })
+      .click();
+    await expect(frameLocator.getByTestId("sandbox-access-badge")).toHaveText(
+      "Row Access (Unmasked IUPAC)",
+    );
     await frameLocator.getByTestId("sdk-prepare-btn").click();
     await expect(frameLocator.getByTestId("sdk-quote-banner")).toBeVisible();
-    await expect(page.getByTestId("pending-quote-banner")).toBeVisible();
-    await expect(page.getByTestId("pending-quote-banner")).toContainText(
-      "alithea/hla-interactive-explorer",
-    );
-    await expect(page.getByTestId("act-balance")).toHaveText("245.00 ACT");
 
-    // User approves in the host UI
-    await page.getByTestId("confirm-run-btn").click();
-    await expect(page.getByTestId("pending-quote-banner")).toBeHidden({
-      timeout: 45_000,
-    });
-    await expect(page.getByTestId("act-balance")).toHaveText("240.00 ACT");
-
-    // Host automatically pushes completed RunRecord back into the sandboxed iframe over postMessage!
+    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 ACT");
+    await page.getByTestId("approve-paid-run").click();
     const hotspotRows = frameLocator
       .getByTestId("sdk-hotspots-table")
       .locator("tbody tr");
-    await expect(hotspotRows.first()).toBeVisible();
+    await expect(hotspotRows.first()).toBeVisible({ timeout: 45_000 });
     expect(await hotspotRows.count()).toBeGreaterThan(0);
+
+    const finalLedger = (await (await request.get("/api/v1/ledger")).json()) as {
+      available_milli_act: number;
+    };
+    expect(finalLedger.available_milli_act).toBe(240_000);
 
     // Zero uncaught page errors across the entire workbench & sandbox session
     expect(pageErrors).toEqual([]);

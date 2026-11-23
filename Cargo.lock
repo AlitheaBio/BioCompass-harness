@@ -391,6 +391,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "biocompass-agent-core",
  "biocompass-core-traits",
  "biocompass-data-engine",
@@ -402,9 +403,12 @@ dependencies = [
  "froglet-verify",
  "futures",
  "hex",
+ "html5gum",
  "mime_guess",
+ "minisign-verify",
  "reqwest",
  "rust-embed",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -450,6 +454,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_json_canonicalizer",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
@@ -463,12 +468,15 @@ name = "biocompass-data-engine"
 version = "0.2.0"
 dependencies = [
  "biocompass-core-traits",
+ "chrono",
  "duckdb",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -481,10 +489,12 @@ dependencies = [
  "biocompass-oci-runner",
  "biocompass-plugin-spec",
  "chrono",
+ "duckdb",
  "froglet-protocol",
  "froglet-verify",
  "hex",
  "mime_guess",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -508,6 +518,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
@@ -1068,7 +1079,6 @@ dependencies = [
 [[package]]
 name = "froglet-protocol"
 version = "0.5.0"
-source = "git+https://github.com/AlitheaBio/froglet.git?rev=c6c5dc53f38a2c485f95cd6776f32f4e7b33785b#c6c5dc53f38a2c485f95cd6776f32f4e7b33785b"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
@@ -1087,7 +1097,6 @@ dependencies = [
 [[package]]
 name = "froglet-verify"
 version = "0.1.0"
-source = "git+https://github.com/AlitheaBio/froglet.git?rev=c6c5dc53f38a2c485f95cd6776f32f4e7b33785b#c6c5dc53f38a2c485f95cd6776f32f4e7b33785b"
 dependencies = [
  "froglet-protocol",
  "serde",
@@ -1338,6 +1347,12 @@ checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "html5gum"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ab2ccf7fd3df0a813616f38ff8f557cdae34f06664ceb81a67241cc54bc2626"
 
 [[package]]
 name = "http"
@@ -1884,6 +1899,12 @@ dependencies = [
  "mime",
  "unicase",
 ]
+
+[[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
 
 [[package]]
 name = "miniz_oxide"
@@ -2572,6 +2593,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"

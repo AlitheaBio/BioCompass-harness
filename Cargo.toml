@@ -23,6 +23,9 @@ unsafe_code = "forbid"
 [profile.dev]
 debug = 0
 
+[profile.test]
+debug = 0
+
 [workspace.dependencies]
 # Internal crates
 biocompass-core-traits = { path = "crates/core-traits", default-features = false }
@@ -32,9 +35,10 @@ biocompass-oci-runner = { path = "crates/oci-runner" }
 biocompass-node-runtime = { path = "crates/node-runtime" }
 biocompass-agent-core = { path = "crates/agent-core" }
 
-# Pinned Froglet protocol & offline verifier by immutable commit SHA
-froglet-protocol = { git = "https://github.com/AlitheaBio/froglet.git", rev = "c6c5dc53f38a2c485f95cd6776f32f4e7b33785b" }
-froglet-verify = { git = "https://github.com/AlitheaBio/froglet.git", rev = "c6c5dc53f38a2c485f95cd6776f32f4e7b33785b", default-features = false }
+# Pinned AlitheaBio/froglet commit SHA: bc4c14b036d0d7923a652dfd439bb81da12b558b (v2-operator-ledger)
+# Switch to `{ git = "https://github.com/AlitheaBio/froglet.git", rev = "bc4c14b036d0d7923a652dfd439bb81da12b558b" }` once pushed.
+froglet-protocol = { path = "../froglet/froglet-protocol" }
+froglet-verify = { path = "../froglet/froglet-verify", default-features = false }
 
 # Async & HTTP
 tokio = { version = "1.51.6", features = [
@@ -79,7 +83,7 @@ hex = "0.4"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
-rust-embed = { version = "8.5", features = ["interpolate-folder-path", "include-exclude"] }
+rust-embed = { version = "8.5", features = ["debug-embed", "interpolate-folder-path", "include-exclude"] }
 mime_guess = "2.0"
 
 # Diagnostics & Testing

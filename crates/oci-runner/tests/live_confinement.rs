@@ -5,8 +5,8 @@
 //! immutability, UID `65532:65532` + `CapEff=0` + `NoNewPrivs=1`, hard timeout kill without zombie leak,
 //! and end-to-end execution of `alithea/hla-motif-enrichment@sha256:...` on a masked DuckDB Parquet slice.
 
-use biocompass_core_traits::{CompassError, DatasetGrant, OrgId, OciRegistryClient, RunId};
-use biocompass_data_engine::{CatalogQuery, DuckDbCatalogEngine, seed_demo_hla_catalog};
+use biocompass_core_traits::{CompassError, DatasetGrant, OciRegistryClient, OrgId, QueryAst, RunId};
+use biocompass_data_engine::{DuckDbCatalogEngine, StagingMode, seed_demo_hla_catalog};
 use biocompass_oci_runner::{
     ContainerRunSpec, OciContainerRunner, OciDistributionClient, prepare_stage_permissions,
 };
@@ -207,12 +207,12 @@ print("AUDIT_OK")
         "LEAK DETECTED: runaway container still running after timeout kill: {leaked}"
     );
 
-    // 5. Full Bio-Compute Execution of alithea/hla-motif-enrichment@sha256 on Masked DuckDB Parquet
+    // 5. Full Bio-Compute Execution of alithea/hla-motif-enrichment@sha256 on Scoped DuckLake Parquet
     let catalog_dir = tempfile::tempdir().expect("catalog dir");
     let catalog_manifest = seed_demo_hla_catalog(catalog_dir.path()).expect("seed catalog");
     let catalog_engine =
         DuckDbCatalogEngine::open_verified(catalog_dir.path()).expect("open catalog");
-    let masked_grant = DatasetGrant::restricted_partner_demo(
+    let scoped_grant = DatasetGrant::scoped_rows_partner(
         OrgId::from("org-partner"),
         catalog_manifest.id.clone(),
     );
@@ -223,14 +223,14 @@ print("AUDIT_OK")
     prepare_stage_permissions(bio_stage.path(), &bio_in, &bio_out).expect("bio perms");
 
     let slice = catalog_engine
-        .materialize_scoped_parquet(
-            &masked_grant,
-            &CatalogQuery::default(),
+        .materialize_parquet_for_run(
+            &scoped_grant,
+            &QueryAst::default(),
+            StagingMode::CustomerScoped,
             &bio_in.join("data/cohort.parquet"),
         )
-        .expect("materialize masked cohort.parquet");
+        .expect("materialize Lung-scoped cohort.parquet");
     assert!(slice.row_count > 0);
-    assert!(slice.sequence_masked);
 
     let params = json!({
         "alleles": ["HLA-A*02:01", "HLA-B*07:02"],
@@ -273,18 +273,22 @@ print("AUDIT_OK")
     let result_raw =
         std::fs::read_to_string(bio_out.join("result.json")).expect("read /out/result.json");
     let result_json: Value = serde_json::from_str(&result_raw).expect("parse /out/result.json");
-    assert_eq!(result_json["sequence_policy"], json!("masked_grant"));
+    assert_eq!(result_json["sequence_policy"], json!("unmasked_research"));
     let candidates = result_json["top_candidates"]
         .as_array()
         .expect("top_candidates array");
     assert!(!candidates.is_empty());
     assert!(
-        candidates.iter().all(|c| c["sequence"] == json!("***")),
-        "every candidate emitted by container must carry masked '***' sequence"
+        candidates.iter().all(|c| {
+            c["sequence"]
+                .as_str()
+                .is_some_and(|s| s.len() >= 8 && s != "***")
+        }),
+        "every candidate emitted under 3-level rows grant must carry unmasked IUPAC sequence"
     );
     assert!(
         candidates.iter().all(|c| c["organ"] == json!("Lung")),
-        "every candidate emitted by container must respect Lung organ allowlist"
+        "every candidate emitted by container must respect Lung row_scope"
     );
     assert!(
         bio_out.join("artifacts/allele_binding_summary.csv").is_file(),

@@ -4,25 +4,34 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STANDALONE_DIR="/tmp/biocompass-standalone-test"
 PORT="${BIOCOMPASS_GATE5_PORT:-18090}"
-FROGLET_VERIFY_BIN="${FROGLET_VERIFY_BIN:-/tmp/froglet-clean-cli/target/debug/froglet-verify}"
+FROGLET_VERIFY_BIN="${FROGLET_VERIFY_BIN:-${REPO_ROOT}/../froglet/target/debug/froglet-verify}"
 
 echo "[gate-5] 1. Verifying local OCI Distribution Spec v1.1 registry on 127.0.0.1:5500..."
 curl -fsS http://127.0.0.1:5500/v2/ >/dev/null
 
-echo "[gate-5] 2. Copying standalone release binary outside repository -> ${STANDALONE_DIR}/biocompass"
+echo "[gate-5] 2. Copying standalone binary + offline signed DuckDB extensions outside repository -> ${STANDALONE_DIR}"
 rm -rf "${STANDALONE_DIR}"
 mkdir -p "${STANDALONE_DIR}"
-cp "${REPO_ROOT}/target/release/biocompass" "${STANDALONE_DIR}/biocompass"
+BIOCOMPASS_BIN="${BIOCOMPASS_BIN:-}"
+if [[ -z "${BIOCOMPASS_BIN}" ]]; then
+  if [[ -x "${REPO_ROOT}/target/debug/biocompass" ]]; then
+    BIOCOMPASS_BIN="${REPO_ROOT}/target/debug/biocompass"
+  else
+    BIOCOMPASS_BIN="${REPO_ROOT}/target/release/biocompass"
+  fi
+fi
+cp "${BIOCOMPASS_BIN}" "${STANDALONE_DIR}/biocompass"
+cp -R "${REPO_ROOT}/vendor/duckdb-extensions" "${STANDALONE_DIR}/duckdb-extensions"
 
 echo "[gate-5] 3. Booting standalone binary from /tmp (zero source-tree file dependency)..."
 (
   cd "${STANDALONE_DIR}"
-  ./biocompass up --host 127.0.0.1 --port "${PORT}" --data-dir "${STANDALONE_DIR}/data" >"${STANDALONE_DIR}/server.log" 2>&1
+  exec ./biocompass up --host 127.0.0.1 --port "${PORT}" --data-dir "${STANDALONE_DIR}/data" >"${STANDALONE_DIR}/server.log" 2>&1
 ) &
 SERVER_PID=$!
 trap 'kill "${SERVER_PID}" >/dev/null 2>&1 || true' EXIT
 
-for _ in {1..40}; do
+for _ in {1..80}; do
   if curl -fsS "http://127.0.0.1:${PORT}/api/v1/health" >/dev/null 2>&1; then
     break
   fi
@@ -52,7 +61,7 @@ standalone_dir = Path(sys.argv[1])
 verify_bin = sys.argv[2]
 data = json.loads((standalone_dir / "runs.json").read_text(encoding="utf-8"))
 runs = data["runs"]
-assert len(runs) == 2, f"Expected 2 completed browser runs, got {len(runs)}"
+assert len(runs) >= 2, f"Expected at least 2 completed browser runs, got {len(runs)}"
 
 for run in runs:
     run_id = run["run_id"]

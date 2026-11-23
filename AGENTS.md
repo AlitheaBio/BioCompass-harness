@@ -4,7 +4,7 @@ BioCompass (`AlitheaBio/BioCompass-harness`) is a cloud-agnostic Rust 2024 + Vit
 
 ## Hard Repository Boundaries
 
-- Never modify sibling reference repositories (`HLA-Compass-platform`, `froglet`, `froglet-services`); consume `froglet-protocol` and `froglet-verify` as read-only dependencies.
+- Never modify legacy or service reference repositories (`HLA-Compass-platform`, `froglet-services`); `AlitheaBio/froglet` is consumed by pinned commit SHA and receives only the approved v2 `operator_ledger.v1` settlement addition.
 - Keep `CLAUDE.md` symlinked to `AGENTS.md`.
 
 ## Core Architectural Invariants
@@ -15,14 +15,14 @@ BioCompass (`AlitheaBio/BioCompass-harness`) is a cloud-agnostic Rust 2024 + Vit
 2. **Universal Plugin Contract (`Plugin = Module = Pipeline`):**
    - Every plugin backend is 1 OCI container (`plugin.toml` + `Dockerfile` + `SKILL.md`) reading `/in/params.json` + `/in/data/*.parquet` (`ro`) and writing `/out/result.json` + `/out/artifacts/*` (`rw`).
    - Optional custom UIs live in `ui/` (Vite build) and run inside `<iframe sandbox="allow-scripts">` communicating strictly over `postMessage` JSON-RPC 2.0 via `@biocompass/plugin-sdk`.
-3. **DuckDB Grant Enforcement (`crates/data-engine`):**
-   - Scientific datasets are immutable Parquet folders verified against `catalog.json` SHA-256 digests before query or stage-in.
-   - Row-level allowlists (`allowed_organs`, `allowed_conditions`) and column-level `***` peptide sequence masking are compiled into DuckDB `TEMP VIEW`s; callers query through typed `CatalogQuery` specs rather than raw SQL strings to prevent regex/timing side-channels on masked columns.
-   - Containers never receive database or S3 credentials; `data-engine` materializes pre-masked Parquet slices directly into `/in/data/`.
+3. **3-Level DuckLake Catalog Access & Sealed Snapshots (`crates/data-engine`):**
+   - Scientific catalogs use schema-generic Arrow `RecordBatch` tables and sealed SHA-256 snapshots (`dataset_digest`) with a verify-once content-addressed shard cache and offline-bundled DuckDB extensions.
+   - Access is strictly 3-level (`none`, `compute_only`, `rows` under `row_scope`, `daily_row_budget`, and `allow_local_export`) with zero `***` column masking; callers query through a typed `QueryAst` (never raw SQL), and only digest-approved curated modules may full-scan a `compute_only` or protected catalog.
+   - Containers never receive database or S3 credentials; `data-engine` materializes scoped or full-scan Parquet slices directly into `/in/data/` without silent row truncation.
 4. **Hardened Container Execution (`crates/oci-runner`):**
-   - Enforce rootless `podman` on Linux and VM-isolated `podman` / `docker` on macOS/Windows with `--user 65532:65532`, `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--network=none` by default, `--pids-limit`, bounded `/tmp` tmpfs (`noexec,nosuid`), `/in:ro`, and `/out:rw`.
+   - Enforce rootless `podman` on Linux and VM-isolated `podman` / `docker` on macOS/Windows with `--user 65532:65532`, `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--network=none` by default, `--pids-limit`, bounded `/tmp` tmpfs (`noexec,nosuid`), `/in:ro`, `/out:rw`, and enforced Offer input/output/runtime/memory limits.
 5. **Verifiable Froglet Receipts (`crates/node-runtime`):**
-   - Every completed run signs a `froglet/v1` RFC 8785 JCS + `secp256k1` BIP340 Schnorr artifact chain (`Descriptor -> Offer -> Quote -> Deal -> Receipt` with `settlement_method = "none"`) validated via `froglet-verify`.
+   - Every completed run signs a `froglet/v1` RFC 8785 JCS + `secp256k1` BIP340 Schnorr artifact chain (`Descriptor -> Offer -> Quote -> Deal -> Receipt` using `settlement_method = "none"` on local laptop runs and `settlement_method = "operator_ledger.v1"` on cloud/Froglet-node runs) validated via `froglet-verify`.
 
 ## Commands
 

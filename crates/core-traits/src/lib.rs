@@ -2,24 +2,30 @@
 
 pub mod fs_blob_store;
 pub mod ids;
+mod commitments;
+pub use commitments::{compute_canonical_workload_hash, result_manifest_hash};
 #[cfg(feature = "local-sqlite")]
 pub mod ledger;
 #[cfg(feature = "local-sqlite")]
 pub mod sqlite_store;
 pub mod traits;
 pub mod types;
+pub mod run_events;
 
 pub use fs_blob_store::{LocalFsBlobStore, StandardOciPolicyVerifier};
-pub use ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, RunId, SessionId};
+pub use ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
 #[cfg(feature = "local-sqlite")]
 pub use ledger::SqliteActLedger;
 #[cfg(feature = "local-sqlite")]
-pub use sqlite_store::SqliteSessionStore;
+pub use sqlite_store::{SqliteSessionStore, local_delivery};
 pub use traits::{BlobStore, OciRegistryClient, PaymentGateway, RunDispatcher, SessionStore};
 pub use types::{
-    ArtifactRef, CompassError, CompassResult, DatasetGrant, LedgerTx, LedgerTxKind, OciImageRef,
-    PrepareRunRequest, RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEvent, SessionEventKind,
-    SessionRecord,
+    ArtifactRef, AttachedCatalogPin, ColumnDescriptor, CompassError, CompassResult, DatasetGrant,
+    DatasetHostingMode, DatasetOfferRecord, DatasetOfferScope, FilterExpr, GrantLevel, IngestFormat, IngestMode,
+    LedgerTx, LedgerTxKind, OciImageRef, PrepareRunRequest, ProjectRecord, QueryAst, RunLogEvent,
+    ReservationState, RunAdmission, RunQuote, RunRecord, RunReservation, RunStatus, SavedViewPlane, SavedViewRecord, SavedViewSourcePin,
+    SavedViewStatus, SavedViewVerificationReport, ScalarValue, SessionEvent, SessionEventKind,
+    ScopedQueryDefinition, SessionRecord, SortDirection, SortSpec, TableSchema, validate_requested_plugin_version,
 };
 
 #[cfg(test)]
@@ -105,6 +111,77 @@ mod tests {
         assert_eq!(events[1].kind, SessionEventKind::AssistantMessage);
     }
 
+    #[cfg(feature = "local-sqlite")]
+    #[tokio::test]
+    async fn sqlite_session_and_project_crud_works_and_migrates_legacy_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("legacy.sqlite");
+        // Seed a legacy SQLite DB without `projects` table or `sessions.project_id` column.
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("raw sqlite");
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    session_id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    active_grant_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO sessions VALUES (
+                    'ses-legacy', 'org-alithea', 'Legacy Chat', 'full',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                );",
+            )
+            .expect("seed legacy schema");
+        }
+
+        let store = SqliteSessionStore::open(&db_path).expect("migrate legacy db");
+        let org = OrgId::new("org-alithea").expect("org");
+        let legacy_sid = SessionId::new("ses-legacy").expect("sid");
+
+        let legacy = store.get_session(&legacy_sid).await.expect("get legacy");
+        assert_eq!(legacy.title, "Legacy Chat");
+        assert!(legacy.project_id.is_none());
+
+        let project = store
+            .create_project(&org, "Melanoma Neoantigens")
+            .await
+            .expect("create project");
+        let renamed_proj = store
+            .rename_project(&project.project_id, "Melanoma Cohort Q4")
+            .await
+            .expect("rename project");
+        assert_eq!(renamed_proj.name, "Melanoma Cohort Q4");
+
+        let updated = store
+            .update_session(
+                &legacy_sid,
+                Some("Renamed Legacy Chat"),
+                None,
+                Some(Some(&project.project_id)),
+            )
+            .await
+            .expect("rename and assign project");
+        assert_eq!(updated.title, "Renamed Legacy Chat");
+        assert_eq!(updated.project_id.as_ref(), Some(&project.project_id));
+
+        // Deleting project ungroups the session rather than deleting it.
+        store
+            .delete_project(&project.project_id)
+            .await
+            .expect("delete project");
+        let after_proj_del = store.get_session(&legacy_sid).await.expect("session intact");
+        assert!(after_proj_del.project_id.is_none());
+
+        // Deleting the session removes it cleanly.
+        store
+            .delete_session(&legacy_sid)
+            .await
+            .expect("delete session");
+        assert!(store.get_session(&legacy_sid).await.is_err());
+    }
+
     #[tokio::test]
     async fn local_fs_blob_store_blocks_all_traversal_and_absolute_keys() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -184,8 +261,8 @@ mod tests {
             .settle_run(&org, &run_ok, "ed86f83b5a1b4e56")
             .await
             .expect("settle");
-        // Double settle must fail
-        assert!(ledger.settle_run(&org, &run_ok, "ed86f83b5a1b4e56").await.is_err());
+        // A different signed receipt cannot supersede a completed settlement.
+        assert!(ledger.settle_run(&org, &run_ok, "different-receipt").await.is_err());
 
         ledger
             .reserve_for_run(&org, &run_fail, CreditAmountAct::from_whole_act(25), "idem-2")
@@ -285,5 +362,46 @@ mod tests {
             ledger.available_balance(&org).await.expect("conserved"),
             CreditAmountAct::from_whole_act(40)
         );
+    }
+
+    #[test]
+    fn compass_error_formats_user_message_code_and_hint() {
+        let missing_run = CompassError::NotFound("run r-123".into());
+        assert_eq!(missing_run.code(), "NOT_FOUND");
+        assert_eq!(missing_run.user_message(), "Run r-123 not found.");
+
+        let missing_plugin = CompassError::NotFound("plugin 'x' is not registered".into());
+        assert_eq!(missing_plugin.user_message(), "Plugin 'x' is not registered");
+
+        let missing_llm = CompassError::UpstreamLlm("No LLM backend is configured yet.".into());
+        assert_eq!(missing_llm.code(), "UPSTREAM_LLM_ERROR");
+        assert_eq!(missing_llm.user_message(), "No LLM backend is configured yet.");
+        assert_eq!(
+            missing_llm.hint(),
+            Some("Open Settings -> Agent to select and configure a model provider.")
+        );
+
+        let denied = CompassError::AccessDenied("organ 'brain' is not allowed".into());
+        assert_eq!(denied.code(), "ACCESS_DENIED");
+        assert_eq!(denied.user_message(), "Access denied: Organ 'brain' is not allowed");
+        assert!(denied.hint().is_some());
+
+        let already_prefixed = CompassError::AccessDenied("Access denied by policy".into());
+        assert_eq!(already_prefixed.user_message(), "Access denied by policy");
+
+        let payment = CompassError::Payment("insufficient ACT balance".into());
+        assert_eq!(payment.code(), "PAYMENT_ERROR");
+        assert_eq!(
+            payment.user_message(),
+            "Credit & billing error: Insufficient ACT balance"
+        );
+        assert_eq!(
+            payment.hint(),
+            Some("Check your available ACT credits and daily ACT breaker in Settings -> Usage.")
+        );
+
+        let limited = CompassError::RateLimited("burst rpm exceeded".into());
+        assert_eq!(limited.code(), "RATE_LIMITED");
+        assert!(limited.hint().is_some());
     }
 }

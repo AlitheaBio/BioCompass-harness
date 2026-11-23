@@ -1,10 +1,13 @@
 //! Core domain records, error taxonomy, OCI image references, and data grants.
 
-use crate::ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, RunId, SessionId};
+use crate::ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+/// Maximum wall-clock time to prepare an immutable OCI image before its signed execution budget.
+pub const OCI_IMAGE_PREPARATION_TIMEOUT_SECS: u64 = 300;
 
 /// Structured error type shared across all BioCompass domain crates.
 #[derive(Debug, Error)]
@@ -25,6 +28,8 @@ pub enum CompassError {
     Protocol(String),
     #[error("payment or ACT ledger error: {0}")]
     Payment(String),
+    #[error("rate limit exceeded: {0}")]
+    RateLimited(String),
     #[error("upstream LLM provider error: {0}")]
     UpstreamLlm(String),
     #[error("internal error: {0}")]
@@ -33,6 +38,156 @@ pub enum CompassError {
 
 /// Result alias for BioCompass operations.
 pub type CompassResult<T> = Result<T, CompassError>;
+
+impl CompassError {
+    /// Canonical machine-readable error code for HTTP/API responses and logs.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "NOT_FOUND",
+            Self::Validation(_) => "VALIDATION_ERROR",
+            Self::AccessDenied(_) => "ACCESS_DENIED",
+            Self::IntegrityViolation(_) => "INTEGRITY_VIOLATION",
+            Self::Storage(_) => "STORAGE_ERROR",
+            Self::ContainerEngine(_) => "CONTAINER_ENGINE_ERROR",
+            Self::Protocol(_) => "PROTOCOL_ERROR",
+            Self::Payment(_) => "PAYMENT_ERROR",
+            Self::RateLimited(_) => "RATE_LIMITED",
+            Self::UpstreamLlm(_) => "UPSTREAM_LLM_ERROR",
+            Self::Internal(_) => "INTERNAL_ERROR",
+        }
+    }
+
+    /// Coherent, user-facing error summary with redundant lowercase prefixes removed
+    /// and sentence casing applied.
+    pub fn user_message(&self) -> String {
+        let raw = match self {
+            Self::NotFound(m)
+            | Self::Validation(m)
+            | Self::AccessDenied(m)
+            | Self::IntegrityViolation(m)
+            | Self::Storage(m)
+            | Self::ContainerEngine(m)
+            | Self::Protocol(m)
+            | Self::Payment(m)
+            | Self::RateLimited(m)
+            | Self::UpstreamLlm(m)
+            | Self::Internal(m) => m.trim(),
+        };
+        if raw.is_empty() {
+            return self.to_string();
+        }
+        let lower = raw.to_ascii_lowercase();
+        match self {
+            Self::NotFound(_)
+                if !lower.contains("not found")
+                    && !lower.contains("not registered")
+                    && !lower.contains("not installed")
+                    && !lower.contains("unknown")
+                    && !lower.contains("has no ")
+                    && !lower.contains("does not exist") =>
+            {
+                format!("{} not found.", capitalize_first(raw))
+            }
+            Self::AccessDenied(_) if !lower.starts_with("access denied") => {
+                format!("Access denied: {}", capitalize_first(raw))
+            }
+            Self::IntegrityViolation(_) if !lower.starts_with("integrity") => {
+                format!("Integrity check failed: {}", capitalize_first(raw))
+            }
+            Self::Payment(_) if !lower.starts_with("credit") && !lower.starts_with("payment") => {
+                format!("Credit & billing error: {}", capitalize_first(raw))
+            }
+            Self::RateLimited(_) if !lower.starts_with("rate limit") => {
+                format!("Rate limit exceeded: {}", capitalize_first(raw))
+            }
+            Self::Protocol(_) if !lower.starts_with("protocol") => {
+                format!("Protocol verification error: {}", capitalize_first(raw))
+            }
+            _ => capitalize_first(raw),
+        }
+    }
+
+    /// Optional actionable next step for resolving this error.
+    pub fn hint(&self) -> Option<&'static str> {
+        let lower = match self {
+            Self::NotFound(m)
+            | Self::Validation(m)
+            | Self::AccessDenied(m)
+            | Self::IntegrityViolation(m)
+            | Self::Storage(m)
+            | Self::ContainerEngine(m)
+            | Self::Protocol(m)
+            | Self::Payment(m)
+            | Self::RateLimited(m)
+            | Self::UpstreamLlm(m)
+            | Self::Internal(m) => m.to_ascii_lowercase(),
+        };
+        match self {
+            Self::ContainerEngine(_) => {
+                if lower.contains("not reachable") || lower.contains("docker") || lower.contains("podman") {
+                    Some("Ensure Docker Desktop or rootless Podman is running, then retry.")
+                } else if lower.contains("timeout") {
+                    Some("Increase container timeout_sec in plugin.toml or narrow input size.")
+                } else {
+                    Some("Check container logs in the Runs tab for details.")
+                }
+            }
+            Self::UpstreamLlm(_) => {
+                if lower.contains("no llm configured") || lower.contains("no llm backend") {
+                    Some("Open Settings -> Agent to select and configure a model provider.")
+                } else if lower.contains("401")
+                    || lower.contains("403")
+                    || lower.contains("unauthorized")
+                    || lower.contains("api key")
+                    || lower.contains("auth")
+                {
+                    Some("Verify your API key or CLI sign-in under Settings -> Agent.")
+                } else if lower.contains("429") || lower.contains("rate limit") {
+                    Some("The provider rate limit was reached. Wait briefly or switch models.")
+                } else if lower.contains("timed out") || lower.contains("timeout") {
+                    Some("The model timed out. Retry or try a faster model/lower reasoning effort.")
+                } else if lower.contains("not found on path") || lower.contains("no such file") {
+                    Some("Install the CLI backend on PATH or choose an HTTP/other provider in Settings -> Agent.")
+                } else {
+                    None
+                }
+            }
+            Self::AccessDenied(_) => {
+                Some("Review your active Dataset Grant policy on the Data page or adjust query filters.")
+            }
+            Self::Payment(_) => {
+                if lower.contains("insufficient") || lower.contains("daily act") {
+                    Some("Check your available ACT credits and daily ACT breaker in Settings -> Usage.")
+                } else {
+                    None
+                }
+            }
+            Self::RateLimited(_) => {
+                Some("Wait briefly before retrying; your organization's burst request rate limit was reached.")
+            }
+            Self::IntegrityViolation(_) => {
+                Some("Verify image @sha256 digests and catalog SHA-256 checksums before retrying.")
+            }
+            _ => None,
+        }
+    }
+}
+
+fn capitalize_first(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out = String::with_capacity(trimmed.len());
+            for ch in first.to_uppercase() {
+                out.push(ch);
+            }
+            out.push_str(chars.as_str());
+            out
+        }
+        None => String::new(),
+    }
+}
 
 /// Validated OCI container image reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,52 +259,389 @@ impl OciImageRef {
     }
 }
 
-/// Row-level and column-level scientific dataset access grant compiled into DuckDB SQL views.
+/// Schema-generic column descriptor for a catalog table (§5.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnDescriptor {
+    pub name: String,
+    pub data_type: String,
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+/// Validated table schema inside a sealed catalog snapshot (§5.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableSchema {
+    pub name: String,
+    pub columns: Vec<ColumnDescriptor>,
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+    #[serde(default)]
+    pub row_count: u64,
+}
+
+/// Scalar literal bound via `?` parameters in `FilterExpr` (never interpolated into raw SQL).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScalarValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+}
+
+impl From<&str> for ScalarValue {
+    fn from(v: &str) -> Self {
+        Self::Text(v.to_owned())
+    }
+}
+
+impl From<String> for ScalarValue {
+    fn from(v: String) -> Self {
+        Self::Text(v)
+    }
+}
+
+impl From<i64> for ScalarValue {
+    fn from(v: i64) -> Self {
+        Self::Int(v)
+    }
+}
+
+impl From<i32> for ScalarValue {
+    fn from(v: i32) -> Self {
+        Self::Int(i64::from(v))
+    }
+}
+
+impl From<f64> for ScalarValue {
+    fn from(v: f64) -> Self {
+        Self::Float(v)
+    }
+}
+
+impl From<bool> for ScalarValue {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+
+/// Recursive, schema-validated predicate AST compiled exclusively to `?`-bound SQL (§5.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum FilterExpr {
+    And { exprs: Vec<FilterExpr> },
+    Or { exprs: Vec<FilterExpr> },
+    Eq { column: String, value: ScalarValue },
+    Neq { column: String, value: ScalarValue },
+    In { column: String, values: Vec<ScalarValue> },
+    Lt { column: String, value: ScalarValue },
+    Lte { column: String, value: ScalarValue },
+    Gt { column: String, value: ScalarValue },
+    Gte { column: String, value: ScalarValue },
+    IsNull { column: String },
+    IsNotNull { column: String },
+    StartsWith { column: String, prefix: String },
+}
+
+impl FilterExpr {
+    pub fn eq(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Eq {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn neq(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Neq {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn in_values<I, V>(column: impl Into<String>, values: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<ScalarValue>,
+    {
+        Self::In {
+            column: column.into(),
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn lt(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Lt {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn lte(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Lte {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn gt(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Gt {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn gte(column: impl Into<String>, value: impl Into<ScalarValue>) -> Self {
+        Self::Gte {
+            column: column.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn starts_with(column: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Self::StartsWith {
+            column: column.into(),
+            prefix: prefix.into(),
+        }
+    }
+
+    /// Combine two optional predicates with canonical flattened/deduplicated `AND` semantics
+    /// so repeated policy intersections (`intersect_grants`) are strictly idempotent.
+    pub fn combine_and(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        let mut terms = Vec::new();
+        fn push_flattened(expr: FilterExpr, out: &mut Vec<FilterExpr>) {
+            match expr {
+                FilterExpr::And { exprs } => {
+                    for sub in exprs {
+                        push_flattened(sub, out);
+                    }
+                }
+                other => {
+                    if !out.contains(&other) {
+                        out.push(other);
+                    }
+                }
+            }
+        }
+        if let Some(l) = left {
+            push_flattened(l, &mut terms);
+        }
+        if let Some(r) = right {
+            push_flattened(r, &mut terms);
+        }
+        match terms.len() {
+            0 => None,
+            1 => terms.into_iter().next(),
+            _ => Some(Self::And { exprs: terms }),
+        }
+    }
+}
+
+/// Sort direction for `QueryAst` `order_by` clauses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// Validated sort column specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortSpec {
+    pub column: String,
+    #[serde(default)]
+    pub direction: SortDirection,
+}
+
+/// Additional same-plane catalog attached at a pinned sealed snapshot (§5.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedCatalogPin {
+    pub catalog_id: CatalogId,
+    pub grant_id: String,
+    #[serde(default)]
+    pub snapshot_id: Option<u64>,
+}
+
+/// Schema-generic, SQL-free query AST over one or more pinned same-plane catalogs (§5.2).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueryAst {
+    /// Target table name (`None` selects the catalog's primary table).
+    #[serde(default)]
+    pub table: Option<String>,
+    /// Projected column names (`empty` selects all columns in schema order).
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// Optional recursive bound predicate tree.
+    #[serde(default)]
+    pub filter: Option<FilterExpr>,
+    /// Optional sort specifications validated against schema columns.
+    #[serde(default)]
+    pub order_by: Vec<SortSpec>,
+    /// Maximum rows to return (clamped by `grant.max_rows_per_query`).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Zero-based row offset.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Optional pinned sealed snapshot ID (`None` selects latest sealed snapshot).
+    #[serde(default)]
+    pub snapshot_id: Option<u64>,
+    /// Optional additional same-plane catalogs unioned by schema-compatible table.
+    #[serde(default)]
+    pub additional_sources: Vec<AttachedCatalogPin>,
+}
+
+/// Non-zero catalog access level (`none` = no `DatasetGrant` exists; `compute_only < rows`, §2.1 / §5.3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantLevel {
+    #[default]
+    ComputeOnly,
+    Rows,
+}
+
+impl GrantLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ComputeOnly => "compute_only",
+            Self::Rows => "rows",
+        }
+    }
+}
+
+/// A reviewed module selects a numeric measure and, optionally, a publisher-approved membership path.
+/// The original string form remains the wire representation for an unfiltered measure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ScopedQueryDefinition {
+    Sum(String),
+    WhereExists { measure: String, where_exists: String },
+}
+
+impl ScopedQueryDefinition {
+    pub fn measure(&self) -> &str {
+        match self {
+            Self::Sum(measure) | Self::WhereExists { measure, .. } => measure,
+        }
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::Sum(_) => None,
+            Self::WhereExists { where_exists, .. } => Some(where_exists),
+        }
+    }
+}
+
+/// Three-level scientific dataset access grant (`compute_only` vs `rows`, zero `***` column masking, §5.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatasetGrant {
     pub grant_id: String,
     pub label: String,
     pub org_id: OrgId,
     pub catalog_id: CatalogId,
-    /// Explicit organ allowlist (`None` = all organs permitted).
-    pub allowed_organs: Option<Vec<String>>,
-    /// Explicit sample condition allowlist (`None` = all conditions permitted).
-    pub allowed_conditions: Option<Vec<String>>,
-    /// When `true`, peptide amino-acid sequences are replaced with `'***'` in SQL projection
-    /// and filtering/grouping on `sequence` is forbidden to prevent oracle side-channels.
-    pub mask_peptide_sequences: bool,
-    /// Hard ceiling on rows returned or staged into `/in/data/`.
-    pub max_rows: usize,
+    pub level: GrantLevel,
+    /// Optional row-level predicate enforced before user queries or custom module staging.
+    #[serde(default)]
+    pub row_scope: Option<FilterExpr>,
+    /// Optional daily row budget across `QueryCatalog` / custom staging (`None` = unlimited).
+    #[serde(default)]
+    pub daily_row_budget: Option<u64>,
+    /// Hard ceiling on rows returned per query or staged into a custom module (`0` when `compute_only`).
+    pub max_rows_per_query: usize,
+    /// Whether slices from this catalog may be exported to local laptop runs or downloaded locally.
+    #[serde(default)]
+    pub allow_local_export: bool,
 }
 
 impl DatasetGrant {
-    /// Construct a full unmasked grant for local single-tenant scientist mode or dataset owners.
+    /// Full `rows` access for local single-tenant scientist mode or catalog owners.
     pub fn full_access(org_id: OrgId, catalog_id: CatalogId) -> Self {
         Self {
             grant_id: format!("grant-full-{}", catalog_id.as_str()),
-            label: "Full Research Access (Unmasked All-Tissue Cohort)".into(),
+            label: "Full Research Access (Unmasked Rows · Local Export Enabled)".into(),
             org_id,
             catalog_id,
-            allowed_organs: None,
-            allowed_conditions: None,
-            mask_peptide_sequences: false,
-            max_rows: 100_000,
+            level: GrantLevel::Rows,
+            row_scope: None,
+            daily_row_budget: None,
+            max_rows_per_query: 100_000,
+            allow_local_export: true,
         }
     }
 
-    /// Construct a partner-restricted grant demonstrating organ row-scoping and `***` sequence masking.
-    pub fn restricted_partner_demo(org_id: OrgId, catalog_id: CatalogId) -> Self {
+    /// Scoped `rows` partner grant (`organ = 'Lung'` & NSCLC/Adjacent cohorts, daily row budget, no local export).
+    pub fn scoped_rows_partner(org_id: OrgId, catalog_id: CatalogId) -> Self {
         Self {
-            grant_id: format!("grant-partner-lung-masked-{}", catalog_id.as_str()),
-            label: "Partner Evaluation Tier (Lung & Tumor Only · Sequences Masked '***')".into(),
+            grant_id: format!("grant-partner-lung-rows-{}", catalog_id.as_str()),
+            label: "Partner Scoped Rows (Lung Cohort · 5,000 Rows/Day · Cloud Only)".into(),
             org_id,
             catalog_id,
-            allowed_organs: Some(vec!["Lung".into()]),
-            allowed_conditions: Some(vec!["NSCLC_Tumor".into(), "Healthy_Adjacent".into()]),
-            mask_peptide_sequences: true,
-            max_rows: 10_000,
+            level: GrantLevel::Rows,
+            row_scope: Some(FilterExpr::And {
+                exprs: vec![
+                    FilterExpr::eq("organ", "Lung"),
+                    FilterExpr::in_values("condition", ["NSCLC_Tumor", "Healthy_Adjacent"]),
+                ],
+            }),
+            daily_row_budget: Some(5_000),
+            max_rows_per_query: 1_000,
+            allow_local_export: false,
         }
     }
+
+    /// `compute_only` grant: org sees catalog card/facets and runs curated modules, with zero row queries.
+    pub fn compute_only_partner(org_id: OrgId, catalog_id: CatalogId) -> Self {
+        Self {
+            grant_id: format!("grant-compute-only-{}", catalog_id.as_str()),
+            label: "Partner Compute-Only Access (Curated Modules Only · Zero Row Queries)".into(),
+            org_id,
+            catalog_id,
+            level: GrantLevel::ComputeOnly,
+            row_scope: None,
+            daily_row_budget: None,
+            max_rows_per_query: 0,
+            allow_local_export: false,
+        }
+    }
+
+    /// Concise human-readable summary included on `RunQuote` consent cards.
+    pub fn summary_line(&self) -> String {
+        let budget = match self.daily_row_budget {
+            Some(b) => format!("{b} rows/day"),
+            None => "unlimited/day".into(),
+        };
+        format!(
+            "{} (catalog={}, level={}, max_rows_per_query={}, budget={budget}, local_export={})",
+            self.label,
+            self.catalog_id,
+            self.level.as_str(),
+            self.max_rows_per_query,
+            self.allow_local_export
+        )
+    }
+
+    /// Deterministic SHA-256 digest of `(level, row_scope)` used to detect access-scope changes on Saved Views (§7.1).
+    pub fn scope_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = serde_json::json!({
+            "catalog_id": self.catalog_id.as_str(),
+            "level": self.level.as_str(),
+            "row_scope": FilterExpr::combine_and(self.row_scope.clone(), None),
+        });
+        let encoded = serde_json::to_vec(&canonical).unwrap_or_default();
+        hex::encode(Sha256::digest(&encoded))
+    }
+}
+
+/// Durable workspace project folder grouping chat sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub project_id: ProjectId,
+    pub org_id: OrgId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Durable agent conversation session summary.
@@ -157,6 +649,8 @@ impl DatasetGrant {
 pub struct SessionRecord {
     pub session_id: SessionId,
     pub org_id: OrgId,
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
     pub title: String,
     pub active_grant_id: String,
     pub created_at: DateTime<Utc>,
@@ -205,8 +699,34 @@ pub struct PrepareRunRequest {
     pub org_id: OrgId,
     pub session_id: Option<SessionId>,
     pub plugin_id: PluginId,
+    /// An exact published version. Omission keeps the installation's default selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
+    #[serde(default)]
+    pub offer_id: Option<String>,
     pub params: Value,
     pub dataset_grant: Option<DatasetGrant>,
+}
+
+/// Reject an invalid exact selector before looking up a plugin or waking a worker.
+/// Version identifiers are opaque and must match the published spelling.
+pub fn validate_requested_plugin_version(version: Option<&str>) -> CompassResult<()> {
+    if let Some(value) = version
+        && (value.is_empty() || value.trim() != value)
+    {
+        return Err(CompassError::Validation(
+            "plugin_version must be nonempty and have no surrounding whitespace".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn default_offer_id() -> String {
+    "default".into()
+}
+
+fn default_offer_name() -> String {
+    "Standard Run".into()
 }
 
 /// Pre-execution quote returned before user consent (`Prepare -> Confirm` two-step gate).
@@ -217,11 +737,54 @@ pub struct RunQuote {
     pub plugin_version: String,
     pub image_ref: String,
     pub target_node_id: NodeId,
+    #[serde(default = "default_offer_id")]
+    pub offer_id: String,
+    #[serde(default = "default_offer_name")]
+    pub offer_name: String,
+    #[serde(default)]
+    pub base_fee_act: CreditAmountAct,
     pub estimated_cost_act: CreditAmountAct,
+    #[serde(default)]
+    pub max_input_bytes: u64,
+    #[serde(default)]
+    pub max_output_bytes: u64,
+    #[serde(default)]
+    pub max_runtime_sec: u64,
+    #[serde(default)]
+    pub max_memory_mb: u64,
     pub workload_hash: String,
     pub dataset_grant_summary: Option<String>,
     pub froglet_quote: Value,
     pub expires_at: DateTime<Utc>,
+}
+
+impl RunQuote {
+    /// Check the returned selection before offering a quote for approval or saving it for a workspace.
+    pub fn validate_selection(
+        &self,
+        plugin_id: &PluginId,
+        plugin_version: Option<&str>,
+        offer_id: Option<&str>,
+    ) -> CompassResult<()> {
+        let offer_id = offer_id.map(str::trim).filter(|value| !value.is_empty());
+        if &self.plugin_id != plugin_id
+            || plugin_version.is_some_and(|version| version != self.plugin_version)
+            || offer_id.is_some_and(|offer| offer != self.offer_id)
+        {
+            return Err(CompassError::IntegrityViolation(format!(
+                "quote returned module '{}' version '{}' offer '{}' outside requested selection for '{}' (version {:?}, offer {:?})",
+                self.plugin_id, self.plugin_version, self.offer_id, plugin_id, plugin_version, offer_id
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Admission of a user-approved hosted run before the worker signs a Deal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunAdmission {
+    pub state: String,
+    pub requested_at: DateTime<Utc>,
 }
 
 /// Persisted execution record including outputs and signed Froglet v1 artifacts.
@@ -233,6 +796,8 @@ pub struct RunRecord {
     pub plugin_id: PluginId,
     pub plugin_version: String,
     pub status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<RunAdmission>,
     pub params: Value,
     pub grant: Option<DatasetGrant>,
     pub quote: RunQuote,
@@ -247,6 +812,15 @@ pub struct RunRecord {
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl RunRecord {
+    /// The server has accepted confirmation and the run can still advance.
+    pub fn confirmation_pending(&self) -> bool {
+        self.status == RunStatus::Running
+            || (self.status == RunStatus::Prepared
+                && self.admission.as_ref().is_some_and(|approval| approval.state == "at_capacity"))
+    }
 }
 
 /// Output file artifact produced in `/out/artifacts/*` and stored in `BlobStore`.
@@ -289,6 +863,271 @@ pub struct LedgerTx {
     pub kind: LedgerTxKind,
     pub delta_act: CreditAmountAct,
     pub balance_after_act: CreditAmountAct,
+    #[serde(default)]
+    pub receipt_hash: Option<String>,
     pub reference: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservationState {
+    Reserved,
+    Settled,
+    Refunded,
+}
+
+/// Durable confirmation terms for one organization's original run attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunReservation {
+    pub idempotency_key: String,
+    pub amount: CreditAmountAct,
+    pub state: ReservationState,
+}
+
+/// Execution/storage plane of a reproducible Saved View (§7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedViewPlane {
+    Local,
+    Cloud,
+}
+
+impl SavedViewPlane {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Cloud => "cloud",
+        }
+    }
+}
+
+/// On-demand verification status of a Saved View (§7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedViewStatus {
+    Verified,
+    AccessChanged,
+    DataChanged,
+}
+
+impl SavedViewStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::AccessChanged => "access_changed",
+            Self::DataChanged => "data_changed",
+        }
+    }
+
+    pub fn parse(raw: &str) -> CompassResult<Self> {
+        match raw.trim() {
+            "verified" => Ok(Self::Verified),
+            "access_changed" => Ok(Self::AccessChanged),
+            "data_changed" => Ok(Self::DataChanged),
+            other => Err(CompassError::Validation(format!(
+                "invalid saved view status '{other}'"
+            ))),
+        }
+    }
+}
+
+/// Pinned catalog snapshot & grant scope recorded inside a `SavedViewRecord` (§7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedViewSourcePin {
+    pub catalog_id: CatalogId,
+    pub table_name: String,
+    pub snapshot_id: u64,
+    pub dataset_digest: String,
+    pub grant_id: String,
+    pub grant_scope_digest: String,
+}
+
+/// Reproducible Saved View binding a typed `QueryAst`, pinned snapshot(s), and PK `selection_digest` (§7.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedViewRecord {
+    pub view_id: String,
+    pub org_id: OrgId,
+    pub created_by: String,
+    pub name: String,
+    pub plane: SavedViewPlane,
+    pub primary_source: SavedViewSourcePin,
+    #[serde(default)]
+    pub additional_sources: Vec<SavedViewSourcePin>,
+    pub primary_key_columns: Vec<String>,
+    pub query_ast: QueryAst,
+    pub row_count: u64,
+    pub selection_digest: String,
+    #[serde(default)]
+    pub last_status: Option<SavedViewStatus>,
+    #[serde(default)]
+    pub last_verified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_detail: Option<String>,
+    /// True on the local plane — UI badge explicitly states verification ran on the user's own machine (§7.1).
+    #[serde(default)]
+    pub local_provenance: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Result of verifying / reloading a Saved View (`verified | access_changed | data_changed`, §7.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedViewVerificationReport {
+    pub view_id: String,
+    pub status: SavedViewStatus,
+    pub cached: bool,
+    pub local_provenance: bool,
+    pub provenance_label: String,
+    pub saved_row_count: u64,
+    pub saved_selection_digest: String,
+    #[serde(default)]
+    pub current_row_count: Option<u64>,
+    #[serde(default)]
+    pub current_selection_digest: Option<String>,
+    pub detail: String,
+    pub verified_at: DateTime<Utc>,
+}
+
+/// Tabular file format accepted by `biocompass catalog import` and the Quarantine Import Wizard (§7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestFormat {
+    Parquet,
+    Csv,
+    Tsv,
+}
+
+impl IngestFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parquet => "parquet",
+            Self::Csv => "csv",
+            Self::Tsv => "tsv",
+        }
+    }
+
+    pub fn parse(raw: &str) -> CompassResult<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "parquet" | "pq" => Ok(Self::Parquet),
+            "csv" => Ok(Self::Csv),
+            "tsv" | "tab" => Ok(Self::Tsv),
+            other => Err(CompassError::Validation(format!(
+                "unsupported ingest format '{other}'; expected parquet, csv, or tsv"
+            ))),
+        }
+    }
+
+    pub fn from_filename(filename: &str) -> CompassResult<Self> {
+        let lower = filename.trim().to_ascii_lowercase();
+        if lower.ends_with(".parquet") || lower.ends_with(".pq") {
+            Ok(Self::Parquet)
+        } else if lower.ends_with(".csv") {
+            Ok(Self::Csv)
+        } else if lower.ends_with(".tsv") || lower.ends_with(".tab") {
+            Ok(Self::Tsv)
+        } else {
+            Err(CompassError::Validation(format!(
+                "cannot infer ingest format from '{filename}'; specify --format parquet|csv|tsv"
+            )))
+        }
+    }
+}
+
+/// Commit semantics for catalog table import (`append | replace | edit`, §7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestMode {
+    Append,
+    Replace,
+    Edit,
+}
+
+impl IngestMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Replace => "replace",
+            Self::Edit => "edit",
+        }
+    }
+
+    pub fn parse(raw: &str) -> CompassResult<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "append" => Ok(Self::Append),
+            "replace" => Ok(Self::Replace),
+            "edit" | "upsert" => Ok(Self::Edit),
+            other => Err(CompassError::Validation(format!(
+                "unsupported ingest mode '{other}'; expected append, replace, or edit"
+            ))),
+        }
+    }
+}
+
+/// Hosting plane for a published Froglet Dataset Offer (§7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetHostingMode {
+    CloudHosted,
+    NodeHosted,
+}
+
+impl DatasetHostingMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CloudHosted => "cloud_hosted",
+            Self::NodeHosted => "node_hosted",
+        }
+    }
+
+    pub fn parse(raw: &str) -> CompassResult<Self> {
+        match raw.trim() {
+            "cloud_hosted" => Ok(Self::CloudHosted),
+            "node_hosted" => Ok(Self::NodeHosted),
+            other => Err(CompassError::Validation(format!(
+                "invalid dataset hosting mode '{other}'; expected cloud_hosted or node_hosted"
+            ))),
+        }
+    }
+}
+
+/// Discovery audience for a signed dataset offer. Legacy listings retain their
+/// original authenticated visibility during migration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetOfferScope {
+    #[default]
+    Private,
+    CustomShared,
+    Global,
+    LegacySessionOnly,
+}
+
+/// Published Froglet Dataset Offer (`cloud_hosted` or `node_hosted`, §7.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetOfferRecord {
+    pub offer_id: String,
+    pub publisher_org_id: OrgId,
+    #[serde(default)]
+    pub scope: DatasetOfferScope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_orgs: Vec<OrgId>,
+    #[serde(default)]
+    pub approval_required: bool,
+    pub catalog_id: CatalogId,
+    pub hosting_mode: DatasetHostingMode,
+    #[serde(default)]
+    pub node_id: Option<NodeId>,
+    pub title: String,
+    pub description: String,
+    pub default_level: GrantLevel,
+    #[serde(default)]
+    pub row_scope: Option<FilterExpr>,
+    #[serde(default)]
+    pub daily_row_budget: Option<u64>,
+    pub max_rows_per_query: usize,
+    pub price_milli_act: u64,
+    pub provider_pubkey: String,
+    pub descriptor_doc: Value,
+    pub froglet_offer_doc: Value,
+    pub active: bool,
     pub created_at: DateTime<Utc>,
 }

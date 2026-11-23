@@ -1,9 +1,8 @@
-//! Deterministic generator for the reference Alithea HLA-I Multi-Tissue Immunopeptidomics Parquet catalog.
+//! Deterministic generator for reference DuckLake HLA-I immunopeptidomics catalogs.
 
-use crate::{CatalogColumnSpec, CatalogManifest, ParquetShardEntry};
+use crate::{CatalogSummary, DuckLakeCatalogEngine};
 use biocompass_core_traits::{CatalogId, CompassError, CompassResult};
-use duckdb::Connection;
-use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 struct SeedAntigen {
@@ -109,25 +108,13 @@ const SEED_ANTIGENS: &[SeedAntigen] = &[
     },
 ];
 
-/// Materialize the realistic multi-organ HLA-I immunopeptidomics Parquet dataset and `catalog.json`
-/// in `catalog_dir` if not already present.
-pub fn seed_demo_hla_catalog(catalog_dir: &Path) -> CompassResult<CatalogManifest> {
-    let manifest_path = catalog_dir.join("catalog.json");
-    if manifest_path.is_file() {
-        let raw = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| CompassError::Storage(format!("read existing catalog.json: {e}")))?;
-        return serde_json::from_str(&raw)
-            .map_err(|e| CompassError::Storage(format!("parse existing catalog.json: {e}")));
-    }
-
-    std::fs::create_dir_all(catalog_dir)
-        .map_err(|e| CompassError::Storage(format!("create catalog dir: {e}")))?;
-
-    let conn = Connection::open_in_memory()
-        .map_err(|e| CompassError::Storage(format!("open duckdb for seed: {e}")))?;
-
+/// Populate `<alias>.peptides` with the deterministic 135-row HLA-I multi-tissue reference dataset.
+pub(crate) fn populate_demo_peptides_table(
+    conn: &duckdb::Connection,
+    ducklake_alias: &str,
+) -> CompassResult<()> {
     conn.execute_batch(
-        "CREATE TABLE raw_peptides (
+        "CREATE TABLE temp_seed_peptides (
             peptide_id VARCHAR NOT NULL,
             sequence VARCHAR NOT NULL,
             peptide_length INTEGER NOT NULL,
@@ -141,15 +128,14 @@ pub fn seed_demo_hla_catalog(catalog_dir: &Path) -> CompassResult<CatalogManifes
             donor_count INTEGER NOT NULL
         );",
     )
-    .map_err(|e| CompassError::Storage(format!("create seed table: {e}")))?;
+    .map_err(|e| CompassError::Storage(format!("create temp_seed_peptides: {e}")))?;
 
     let mut row_idx = 0u64;
     {
         let mut appender = conn
-            .appender("raw_peptides")
+            .appender("temp_seed_peptides")
             .map_err(|e| CompassError::Storage(format!("duckdb appender: {e}")))?;
 
-        // Generate 3 biological replicate cohorts across all antigen groups (~135 rows)
         for cohort_rep in 0..3u32 {
             for group in SEED_ANTIGENS {
                 for (p_idx, pep) in group.base_peptides.iter().enumerate() {
@@ -159,7 +145,8 @@ pub fn seed_demo_hla_catalog(catalog_dir: &Path) -> CompassResult<CatalogManifes
                     let pep_id = format!("PEP-{row_idx:04}");
                     let jitter = (cohort_rep as f64 * 3.7) + (p_idx as f64 * 4.9);
                     let affinity = ((group.base_affinity_nm + jitter) * 10.0).round() / 10.0;
-                    let rank_pct = ((affinity / 220.0).clamp(0.05, 1.95) * 100.0).round() / 100.0;
+                    let rank_pct =
+                        ((affinity / 220.0).clamp(0.05, 1.95) * 100.0).round() / 100.0;
                     let intensity = if group.tumor_enriched {
                         23.4 + (p_idx as f64 * 0.65) - (cohort_rep as f64 * 0.25)
                     } else {
@@ -194,50 +181,166 @@ pub fn seed_demo_hla_catalog(catalog_dir: &Path) -> CompassResult<CatalogManifes
             .map_err(|e| CompassError::Storage(format!("flush seed rows: {e}")))?;
     }
 
-    let shard_rel = "peptides_part_000.parquet";
-    let shard_path = catalog_dir.join(shard_rel);
-    let escaped_shard = shard_path.to_string_lossy().replace('\'', "''");
     conn.execute_batch(&format!(
-        "COPY (SELECT * FROM raw_peptides ORDER BY peptide_id) TO '{escaped_shard}' (FORMAT PARQUET, COMPRESSION ZSTD);"
+        "DROP TABLE IF EXISTS {ducklake_alias}.peptides;
+         CREATE TABLE {ducklake_alias}.peptides AS SELECT * FROM temp_seed_peptides ORDER BY peptide_id;
+         DROP TABLE temp_seed_peptides;"
     ))
-    .map_err(|e| CompassError::Storage(format!("export parquet shard: {e}")))?;
+    .map_err(|e| CompassError::Storage(format!("populate {ducklake_alias}.peptides: {e}")))?;
+    Ok(())
+}
 
-    let parquet_bytes = std::fs::read(&shard_path)
-        .map_err(|e| CompassError::Storage(format!("read parquet shard for sha256: {e}")))?;
-    let sha256 = hex::encode(Sha256::digest(&parquet_bytes));
+/// Populate `<alias>.peptides` with a synthetic 30-row public CEF viral/benchmark HLA-I dataset
+/// (`alithea/hla-public-demo-v1`, physically isolated from proprietary `alithea/hla-atlas-v2026.1` cohorts, §6.3).
+pub(crate) fn populate_public_demo_peptides_table(
+    conn: &duckdb::Connection,
+    ducklake_alias: &str,
+) -> CompassResult<()> {
+    const PUBLIC_CEF_GROUPS: &[SeedAntigen] = &[
+        SeedAntigen {
+            organ: "Blood_PBMC",
+            condition: "Public_CEF_Control",
+            hla_allele: "HLA-A*02:01",
+            gene_symbol: "IAV_M1",
+            base_peptides: &["GILGFVFTL", "FMYSDFHFI", "VLSDFKTWL", "AIMDKNIIL", "ILGFVFTLT"],
+            base_affinity_nm: 9.4,
+            tumor_enriched: false,
+        },
+        SeedAntigen {
+            organ: "Blood_PBMC",
+            condition: "Public_CEF_Control",
+            hla_allele: "HLA-A*02:01",
+            gene_symbol: "CMV_UL83",
+            base_peptides: &["NLVPMVATV", "VLAELVKQI", "MLNIPSINV", "RIFAELEGV", "YSEHPTFTSQ"],
+            base_affinity_nm: 14.2,
+            tumor_enriched: false,
+        },
+        SeedAntigen {
+            organ: "Lymph_Node",
+            condition: "Public_CEF_Control",
+            hla_allele: "HLA-B*07:02",
+            gene_symbol: "CMV_UL83",
+            base_peptides: &["TPRVTGGGAM", "RPHERNGFTV", "IPSIQSRAL", "APSHVAAAL", "KPAVTTVGL"],
+            base_affinity_nm: 19.8,
+            tumor_enriched: false,
+        },
+    ];
 
-    let manifest = CatalogManifest {
-        id: CatalogId::from("alithea/hla-atlas-v2026.1"),
-        name: "Alithea HLA-I Multi-Tissue Immunopeptidomics Atlas".into(),
-        version: "2026.1.0".into(),
-        description: "LC-MS/MS eluted HLA Class I ligandome across Lung NSCLC, Primary Melanoma, CRC, and healthy human tissues with NetMHCpan-4.1 binding affinities.".into(),
-        organism: "Homo sapiens (GRCh38)".into(),
-        row_count: row_idx,
-        columns: vec![
-            CatalogColumnSpec { name: "peptide_id".into(), sql_type: "VARCHAR".into(), maskable: false },
-            CatalogColumnSpec { name: "sequence".into(), sql_type: "VARCHAR".into(), maskable: true },
-            CatalogColumnSpec { name: "peptide_length".into(), sql_type: "INTEGER".into(), maskable: false },
-            CatalogColumnSpec { name: "hla_allele".into(), sql_type: "VARCHAR".into(), maskable: false },
-            CatalogColumnSpec { name: "gene_symbol".into(), sql_type: "VARCHAR".into(), maskable: false },
-            CatalogColumnSpec { name: "organ".into(), sql_type: "VARCHAR".into(), maskable: false },
-            CatalogColumnSpec { name: "condition".into(), sql_type: "VARCHAR".into(), maskable: false },
-            CatalogColumnSpec { name: "affinity_nm".into(), sql_type: "DOUBLE".into(), maskable: false },
-            CatalogColumnSpec { name: "eluted_rank_pct".into(), sql_type: "DOUBLE".into(), maskable: false },
-            CatalogColumnSpec { name: "ms_intensity_log2".into(), sql_type: "DOUBLE".into(), maskable: false },
-            CatalogColumnSpec { name: "donor_count".into(), sql_type: "INTEGER".into(), maskable: false },
-        ],
-        parquet_files: vec![ParquetShardEntry {
-            relative_path: shard_rel.into(),
-            sha256,
-            size_bytes: parquet_bytes.len() as u64,
-            row_count: row_idx,
-        }],
-    };
+    conn.execute_batch(
+        "CREATE TABLE temp_public_demo_peptides (
+            peptide_id VARCHAR NOT NULL,
+            sequence VARCHAR NOT NULL,
+            peptide_length INTEGER NOT NULL,
+            hla_allele VARCHAR NOT NULL,
+            gene_symbol VARCHAR NOT NULL,
+            organ VARCHAR NOT NULL,
+            condition VARCHAR NOT NULL,
+            affinity_nm DOUBLE NOT NULL,
+            eluted_rank_pct DOUBLE NOT NULL,
+            ms_intensity_log2 DOUBLE NOT NULL,
+            donor_count INTEGER NOT NULL
+        );",
+    )
+    .map_err(|e| CompassError::Storage(format!("create temp_public_demo_peptides: {e}")))?;
 
-    let manifest_json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| CompassError::Storage(format!("serialize catalog.json: {e}")))?;
-    std::fs::write(&manifest_path, manifest_json)
-        .map_err(|e| CompassError::Storage(format!("write catalog.json: {e}")))?;
+    let mut row_idx = 0u64;
+    {
+        let mut appender = conn
+            .appender("temp_public_demo_peptides")
+            .map_err(|e| CompassError::Storage(format!("duckdb appender: {e}")))?;
 
-    Ok(manifest)
+        for rep in 0..2u32 {
+            for group in PUBLIC_CEF_GROUPS {
+                for (p_idx, pep) in group.base_peptides.iter().enumerate() {
+                    row_idx += 1;
+                    let clean_seq = pep.to_ascii_uppercase();
+                    let pep_len = clean_seq.len() as i32;
+                    let pep_id = format!("DEMO-{row_idx:04}");
+                    let affinity = ((group.base_affinity_nm + (rep as f64 * 2.5) + (p_idx as f64 * 3.8)) * 10.0).round() / 10.0;
+                    let rank_pct = ((affinity / 200.0).clamp(0.05, 1.50) * 100.0).round() / 100.0;
+                    let intensity = ((21.2 + (p_idx as f64 * 0.5) - (rep as f64 * 0.2)) * 100.0).round() / 100.0;
+                    let donors = 8 + ((p_idx as i32 + rep as i32) % 7);
+                    appender
+                        .append_row(duckdb::params![
+                            pep_id,
+                            clean_seq,
+                            pep_len,
+                            group.hla_allele,
+                            group.gene_symbol,
+                            group.organ,
+                            group.condition,
+                            affinity,
+                            rank_pct,
+                            intensity,
+                            donors,
+                        ])
+                        .map_err(|e| CompassError::Storage(format!("append public demo row: {e}")))?;
+                }
+            }
+        }
+        appender
+            .flush()
+            .map_err(|e| CompassError::Storage(format!("flush public demo rows: {e}")))?;
+    }
+
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {ducklake_alias}.peptides;
+         CREATE TABLE {ducklake_alias}.peptides AS SELECT * FROM temp_public_demo_peptides ORDER BY peptide_id;
+         DROP TABLE temp_public_demo_peptides;"
+    ))
+    .map_err(|e| CompassError::Storage(format!("populate {ducklake_alias}.peptides: {e}")))?;
+    Ok(())
+}
+
+/// Materialize a local DuckLake HLA-I immunopeptidomics catalog + sealed snapshot under an explicit `catalog_id`.
+pub fn seed_local_hla_catalog_with_id(
+    catalog_dir: &Path,
+    catalog_id: CatalogId,
+    name: &str,
+    version: &str,
+    description: &str,
+) -> CompassResult<CatalogSummary> {
+    let manifest_path = catalog_dir.join("catalog.json");
+    if manifest_path.is_file()
+        && let Ok(raw) = std::fs::read_to_string(&manifest_path)
+        && let Ok(existing) = serde_json::from_str::<CatalogSummary>(&raw)
+        && existing.id == catalog_id
+    {
+        return Ok(existing);
+    }
+
+    if catalog_dir.exists() {
+        let _ = std::fs::remove_dir_all(catalog_dir);
+    }
+    std::fs::create_dir_all(catalog_dir)
+        .map_err(|e| CompassError::Storage(format!("create catalog dir: {e}")))?;
+
+    let mut primary_keys = BTreeMap::new();
+    primary_keys.insert("peptides".to_string(), vec!["peptide_id".to_string()]);
+
+    let engine = DuckLakeCatalogEngine::create_local_catalog(
+        catalog_dir,
+        catalog_id,
+        name,
+        version,
+        description,
+        "Homo sapiens (GRCh38)",
+        primary_keys,
+        format!("Initial sealed {version} cohort"),
+        |conn| populate_demo_peptides_table(conn, "dl"),
+    )?;
+
+    Ok(engine.summary().clone())
+}
+
+/// Materialize the reference multi-organ HLA-I immunopeptidomics DuckLake catalog + sealed snapshot
+/// in `catalog_dir` if not already present (re-seeding automatically if a pre-v2 legacy `catalog.json` is detected).
+pub fn seed_demo_hla_catalog(catalog_dir: &Path) -> CompassResult<CatalogSummary> {
+    seed_local_hla_catalog_with_id(
+        catalog_dir,
+        CatalogId::from("alithea/hla-atlas-v2026.1"),
+        "Alithea HLA-I Multi-Tissue Immunopeptidomics Atlas",
+        "2026.1.0",
+        "LC-MS/MS eluted HLA Class I ligandome across Lung NSCLC, Primary Melanoma, CRC, and healthy human tissues with NetMHCpan-4.1 binding affinities.",
+    )
 }

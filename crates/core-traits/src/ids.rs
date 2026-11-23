@@ -48,11 +48,46 @@ macro_rules! define_id {
 }
 
 define_id!(OrgId, "Organization tenant identifier.");
+define_id!(ProjectId, "Workspace project folder identifier grouping sessions.");
 define_id!(SessionId, "Durable agent conversation session identifier.");
 define_id!(RunId, "Plugin container execution run identifier.");
 define_id!(PluginId, "Universal BioCompass plugin identifier (`namespace/name`).");
 define_id!(CatalogId, "Immutable scientific Parquet catalog identifier.");
 define_id!(NodeId, "Froglet execution node BIP340 x-only public key or node identifier.");
+
+impl CatalogId {
+    /// Legacy table import and mutation must never create or change a managed private release.
+    pub fn ensure_legacy_writable(&self) -> crate::CompassResult<()> {
+        let id = self.as_str();
+        if id.contains('\\') || id.split('/').any(|s| matches!(s, "" | "." | "..")) {
+            return Err(crate::CompassError::Validation("invalid catalog path".into()));
+        }
+        if id.split_once('/').is_some_and(|(namespace, _)| namespace.eq_ignore_ascii_case("bc-private-v1")) {
+            return Err(crate::CompassError::AccessDenied(format!(
+                "catalog '{id}' requires the private dataset publication workflow"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod private_catalog_tests {
+    use super::CatalogId;
+
+    #[test]
+    fn only_the_private_namespace_is_reserved_for_writes() {
+        for id in ["bc-private-v1/study", "BC-PRIVATE-V1/study"] {
+            assert!(matches!(CatalogId::from(id).ensure_legacy_writable(), Err(crate::CompassError::AccessDenied(_))));
+        }
+        for id in ["legacy", "org/study", "org/bc-private-v1", "bc-private-v10/study"] {
+            CatalogId::from(id).ensure_legacy_writable().unwrap();
+        }
+        for id in ["/absolute", "org/../study", "org//study", "org/./study"] {
+            assert!(CatalogId::from(id).ensure_legacy_writable().is_err());
+        }
+    }
+}
 
 /// Integer minor units of Alithea Compute Tokens (`1 ACT = 1_000 milli-ACT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]

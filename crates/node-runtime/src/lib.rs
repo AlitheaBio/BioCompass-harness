@@ -6,15 +6,35 @@
 //! RFC 8785 JCS + `secp256k1` BIP340 Schnorr 5-artifact (`Descriptor -> Offer -> Quote -> Deal -> Receipt`)
 //! chain signing & verification via `froglet-protocol` and `froglet-verify`.
 
+mod native_recovery;
+mod recovered_result;
+mod released_result;
+mod run_lock;
+mod target_validation;
+pub use released_result::{
+    verify_released_artifact, verify_released_result, verify_released_result_commitment,
+};
+mod live_query;
+pub use live_query::{LiveQueryAuthority, LiveQueryBinding, LiveQuerySession};
+pub use target_validation::{
+    NamedReadPage, RuntimeReadParams, direct_named_read_page, is_runtime_read, named_read as private_named_read,
+    runtime_named_read, runtime_named_read_on_catalog, sample_scope as private_sample_scope,
+    reviewed_hla_input_tables,
+};
+
 use async_trait::async_trait;
 use biocompass_core_traits::{
-    ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, NodeId, OciImageRef,
-    OciRegistryClient, PaymentGateway, PluginId, PrepareRunRequest, RunDispatcher, RunId,
-    RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEventKind, SessionStore,
+    ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant, FilterExpr, GrantLevel,
+    NodeId, OciImageRef, OciRegistryClient, PaymentGateway, PluginId, PrepareRunRequest, QueryAst,
+    RunDispatcher, RunId, RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEventKind,
+    SessionStore,
 };
-use biocompass_data_engine::{CatalogQuery, DuckDbCatalogEngine};
+use biocompass_data_engine::{DuckDbCatalogEngine, SealedSnapshot, StagingMode};
 use biocompass_oci_runner::{ContainerRunSpec, OciContainerRunner, prepare_stage_permissions};
-use biocompass_plugin_spec::LoadedPlugin;
+use biocompass_plugin_spec::{
+    LoadedPlugin, PluginExecutionPlane,
+    reviewed_hla_input_contract,
+};
 use chrono::{TimeZone, Utc};
 use froglet_protocol::ExecutionRuntime;
 use froglet_protocol::canonical_json;
@@ -32,15 +52,14 @@ use froglet_protocol::protocol::{
 };
 use froglet_verify::{ChainDocumentsReport, validate_chain_documents};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 const CONTAINER_SERVICE_KIND: &str = "compute.container.v1";
 const CONTAINER_ABI_VERSION: &str = "biocompass.oci.io.v1";
-const MAX_STAGE_IO_BYTES: usize = 1_073_741_824; // 1 GiB
 
 /// Verify a `froglet/v1` artifact chain offline without network or node state.
 pub fn verify_froglet_chain_offline(
@@ -158,6 +177,100 @@ pub struct NodeRuntimeDeps {
     pub allow_local_dev_tags: bool,
 }
 
+/// Last-registered version is the unpinned default. Every registered version remains addressable.
+#[derive(Default)]
+struct PluginReleases {
+    default_version: String,
+    versions: HashMap<String, LoadedPlugin>,
+    registration_order: Vec<String>,
+    installed: HashSet<String>,
+}
+
+impl PluginReleases {
+    fn select(&self, version: Option<&str>) -> Option<&LoadedPlugin> {
+        self.versions.get(version.unwrap_or(&self.default_version))
+    }
+}
+
+/// Bind execution policy and commercial terms separately from editable presentation metadata.
+/// This digest occupies the signed Froglet Offer's optional terms_hash and is inherited by its Quote.
+pub fn release_terms_hash(plugin: &LoadedPlugin) -> CompassResult<String> {
+    let m = &plugin.manifest;
+    let mut terms = json!({
+        "format": "biocompass.native-module-terms.v1",
+        "id": m.id, "version": m.version, "image": m.image, "execution": m.execution,
+        "requires_catalog_level": m.requires_catalog_level, "network": m.network,
+        "resources": m.resources, "inputs": m.inputs, "offers": m.offers, "price_milli_act": m.price_milli_act
+    });
+    if let Some(contract) = m.dataset_input_contract.as_deref() {
+        terms["dataset_input_contract"] = json!(contract);
+    }
+    if !m.runtime_queries.is_empty() {
+        terms["runtime_queries"] = json!(m.runtime_queries);
+    }
+    if !m.runtime_join_queries.is_empty() {
+        terms["runtime_join_queries"] = json!(m.runtime_join_queries);
+    }
+    let bytes = canonical_json::to_vec(&terms)
+        .map_err(|e| CompassError::Protocol(format!("canonicalize native module terms: {e}")))?;
+    Ok(crypto::sha256_hex(&bytes))
+}
+
+enum WorkspacePackage {
+    Authored {
+        manifest: PathBuf,
+        detached: PathBuf,
+    },
+    Managed {
+        receipt: PathBuf,
+    },
+}
+
+struct WorkspacePackageFiles {
+    lock: PathBuf,
+    package: WorkspacePackage,
+}
+
+impl WorkspacePackageFiles {
+    fn present(&self) -> bool {
+        match &self.package {
+            WorkspacePackage::Managed { receipt } => receipt.is_file(),
+            WorkspacePackage::Authored { manifest, detached } => {
+                manifest.is_file() && !detached.try_exists().unwrap_or(true)
+            }
+        }
+    }
+
+    fn guard(&self, exclusive: bool) -> CompassResult<std::fs::File> {
+        let storage = |e: std::io::Error| CompassError::Storage(e.to_string());
+        std::fs::create_dir_all(
+            self.lock
+                .parent()
+                .expect("workspace package lock directory"),
+        )
+        .map_err(storage)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.lock)
+            .map_err(storage)?;
+        let lock = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        lock.map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => {
+                CompassError::IntegrityViolation("this module version is currently in use".into())
+            }
+            std::fs::TryLockError::Error(error) => storage(error),
+        })?;
+        Ok(file)
+    }
+}
+
 /// Local / single-node `RunDispatcher` executing real hardened OCI containers and signing
 /// verifiable 5-artifact `froglet/v1` chains.
 pub struct InProcessNodeRuntime {
@@ -168,11 +281,13 @@ pub struct InProcessNodeRuntime {
     oci_registry: Arc<dyn OciRegistryClient>,
     payment_gateway: Arc<dyn PaymentGateway>,
     oci_runner: Arc<OciContainerRunner>,
-    plugins: RwLock<HashMap<PluginId, LoadedPlugin>>,
+    plugins: RwLock<HashMap<PluginId, PluginReleases>>,
     catalogs: RwLock<HashMap<CatalogId, DuckDbCatalogEngine>>,
+    approved_curated_modules: RwLock<HashSet<(PluginId, String, String)>>,
     stage_root_dir: PathBuf,
     allow_local_dev_tags: bool,
     log_tx: broadcast::Sender<RunLogEvent>,
+    terminal_tx: broadcast::Sender<biocompass_core_traits::run_events::TerminalNotice>,
 }
 
 impl InProcessNodeRuntime {
@@ -184,6 +299,7 @@ impl InProcessNodeRuntime {
                 deps.stage_root_dir.display()
             ))
         })?;
+        let runner = deps.oci_runner.for_native_workspace(&deps.stage_root_dir, &deps.keys.provider_id())?;
         let provider_prefix: String = deps.keys.provider_id().chars().take(12).collect();
         let node_id = NodeId::new(format!("froglet-node-{provider_prefix}"))
             .map_err(CompassError::Validation)?;
@@ -196,13 +312,19 @@ impl InProcessNodeRuntime {
             blob_store: deps.blob_store,
             oci_registry: deps.oci_registry,
             payment_gateway: deps.payment_gateway,
-            oci_runner: deps.oci_runner,
+            oci_runner: Arc::new(runner),
             plugins: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
+            approved_curated_modules: RwLock::new(HashSet::new()),
             stage_root_dir: deps.stage_root_dir,
             allow_local_dev_tags: deps.allow_local_dev_tags,
             log_tx,
+            terminal_tx: broadcast::channel(256).0,
         })
+    }
+
+    pub fn subscribe_terminal(&self) -> broadcast::Receiver<biocompass_core_traits::run_events::TerminalNotice> {
+        self.terminal_tx.subscribe()
     }
 
     pub fn node_id(&self) -> &NodeId {
@@ -217,32 +339,335 @@ impl InProcessNodeRuntime {
         self.keys.requester_id()
     }
 
-    /// Register or replace a `LoadedPlugin`.
+    /// Bind a private local family to this Froglet node. Older workbenches recorded
+    /// their requester key as the original publisher, so that key signs its delegation.
+    pub fn sign_dataset_owner(&self, original_actor: &str, claim: Value) -> CompassResult<Value> {
+        let now = Utc::now().timestamp();
+        let kind = "biocompass.dataset-owner.v1";
+        let artifact = if original_actor == self.provider_id() {
+            self.sign_provider(kind, now, claim)?
+        } else if original_actor == self.requester_id() {
+            self.sign_requester(kind, now, claim)?
+        } else {
+            return Err(CompassError::AccessDenied("original local publisher key unavailable".into()));
+        };
+        serde_json::to_value(artifact).map_err(|e| CompassError::Protocol(e.to_string()))
+    }
+
+    /// Sign one domain-separated native dataset action with the existing node key.
+    pub fn sign_dataset_action(&self, claim: Value) -> CompassResult<Value> {
+        let artifact = self.sign_provider("biocompass.dataset-change.v1", Utc::now().timestamp(), claim)?;
+        serde_json::to_value(artifact).map_err(|e| CompassError::Protocol(e.to_string()))
+    }
+
+    pub fn verify_dataset_action(signer: &str, claim: &Value, proof: &Value) -> CompassResult<()> {
+        Self::verify_dataset_claim("biocompass.dataset-change.v1", signer, claim, proof)
+    }
+
+    pub fn verify_dataset_owner(signer: &str, claim: &Value, proof: &Value) -> CompassResult<()> {
+        Self::verify_dataset_claim("biocompass.dataset-owner.v1", signer, claim, proof)
+    }
+
+    fn verify_dataset_claim(kind: &str, signer: &str, claim: &Value, proof: &Value) -> CompassResult<()> {
+        let invalid = || CompassError::IntegrityViolation("invalid Froglet dataset attestation".into());
+        let artifact: SignedArtifact<Value> = serde_json::from_value(proof.clone()).map_err(|_| invalid())?;
+        if artifact.artifact_type != kind || artifact.signer != signer || &artifact.payload != claim
+            || !froglet_protocol::protocol::verify_artifact(&artifact) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    fn workspace_module(&self, p: &LoadedPlugin) -> CompassResult<Option<WorkspacePackageFiles>> {
+        let (Some(root), Some(dir)) = (self.stage_root_dir.parent(), p.root_dir.as_deref()) else {
+            return Ok(None);
+        };
+        let scope = serde_json::to_vec(&(&p.manifest.id, &p.manifest.version))
+            .map_err(|e| CompassError::Protocol(e.to_string()))?;
+        let key = crypto::sha256_hex(&scope);
+        let managed = root.join("module-releases").join(&key);
+        let package = if dir == managed.join("content") {
+            WorkspacePackage::Managed {
+                receipt: managed.join("release.json"),
+            }
+        } else if dir.parent() == Some(root.join("plugins").as_path()) {
+            WorkspacePackage::Authored {
+                manifest: dir.join("plugin.toml"),
+                detached: root.join("detached-modules").join(&key),
+            }
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(WorkspacePackageFiles {
+            lock: root.join("module-locks").join(key),
+            package,
+        }))
+    }
+
+    /// CLI and HTTP processes sharing a data directory take independent OS locks for each release.
+    fn module_guard(
+        &self,
+        p: &LoadedPlugin,
+        exclusive: bool,
+    ) -> CompassResult<Option<std::fs::File>> {
+        self.workspace_module(p)?
+            .map(|files| files.guard(exclusive))
+            .transpose()
+    }
+
+    fn module_present(&self, plugin: &LoadedPlugin) -> bool {
+        self.workspace_module(plugin)
+            .is_ok_and(|files| files.is_none_or(|f| f.present()))
+    }
+
+    fn select_present<'a>(
+        &self,
+        releases: &'a PluginReleases,
+        version: Option<&str>,
+    ) -> Option<&'a LoadedPlugin> {
+        if let Some(v) = version {
+            return releases.select(Some(v)).filter(|p| self.module_present(p));
+        }
+        releases
+            .registration_order
+            .iter()
+            .rev()
+            .filter_map(|v| releases.versions.get(v))
+            .find(|p| self.module_present(p))
+    }
+
+    /// Register a release. Re-registering its immutable execution terms can update its local UI location.
     pub async fn register_plugin(&self, plugin: LoadedPlugin) -> CompassResult<()> {
+        self.register_plugin_with(plugin, false, |_| Ok(())).await
+    }
+
+    pub async fn register_workspace_plugin_with(
+        &self,
+        plugin: LoadedPlugin,
+        commit: impl FnOnce(Option<&LoadedPlugin>) -> CompassResult<()>,
+    ) -> CompassResult<()> {
+        self.register_plugin_with(plugin, false, commit).await
+    }
+
+    /// Publish a local package and its registry entry under one release lock.
+    /// A failed durable commit leaves the existing in-memory release untouched.
+    pub async fn register_installed_plugin(
+        &self,
+        plugin: LoadedPlugin,
+        commit: impl FnOnce(Option<&LoadedPlugin>) -> CompassResult<()>,
+    ) -> CompassResult<()> {
+        self.register_plugin_with(plugin, true, commit).await
+    }
+
+    async fn register_plugin_with(
+        &self,
+        plugin: LoadedPlugin,
+        installed: bool,
+        commit: impl FnOnce(Option<&LoadedPlugin>) -> CompassResult<()>,
+    ) -> CompassResult<()> {
         plugin.manifest.validate(self.allow_local_dev_tags)?;
-        self.plugins
+        let id = &plugin.manifest.id;
+        let version = &plugin.manifest.version;
+        let mut plugins = self.plugins.write().await;
+        let releases = plugins.entry(id.clone()).or_default();
+        let _file_guard = self.module_guard(&plugin, false)?;
+        if releases.installed.contains(version) && !installed {
+            return Err(CompassError::IntegrityViolation(format!(
+                "module '{id}' version '{version}' is an installed marketplace release"
+            )));
+        }
+        if let Some(previous) = releases.versions.get(version) {
+            if release_terms_hash(previous)? != release_terms_hash(&plugin)? {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "module '{id}' version '{version}' is already registered with different execution terms"
+                )));
+            }
+        }
+        commit(releases.versions.get(version))?;
+        if installed {
+            releases.installed.insert(version.clone());
+        }
+        if !releases.versions.contains_key(version) {
+            releases.default_version = version.clone();
+            releases.registration_order.push(version.clone());
+        }
+        releases.versions.insert(version.clone(), plugin);
+        Ok(())
+    }
+
+    /// Approve a specific `(plugin_id, version, canonical_module_hash)` tuple as a curated module
+    /// permitted to perform full-scan staging on `compute_only` or row-capped catalogs (§5.3).
+    pub async fn approve_curated_module(
+        &self,
+        plugin_id: PluginId,
+        version: impl Into<String>,
+        module_hash: impl Into<String>,
+    ) {
+        self.approved_curated_modules
             .write()
             .await
-            .insert(plugin.manifest.id.clone(), plugin);
-        Ok(())
+            .insert((plugin_id, version.into(), module_hash.into()));
+    }
+
+    /// Check whether `(plugin_id, version, canonical_module_hash)` is approved for curated full-scan staging.
+    pub async fn is_curated_module_approved(
+        &self,
+        plugin_id: &PluginId,
+        version: &str,
+        module_hash: &str,
+    ) -> bool {
+        let guard = self.approved_curated_modules.read().await;
+        guard.contains(&(
+            plugin_id.clone(),
+            version.to_owned(),
+            module_hash.to_owned(),
+        ))
     }
 
     /// List all registered plugins sorted deterministically by `PluginId`.
     pub async fn list_plugins(&self) -> Vec<LoadedPlugin> {
         let map = self.plugins.read().await;
-        let mut items: Vec<LoadedPlugin> = map.values().cloned().collect();
+        let mut items: Vec<LoadedPlugin> = map.values().filter_map(|releases| self.select_present(releases,None).cloned()).collect();
         items.sort_by(|a, b| a.manifest.id.as_str().cmp(b.manifest.id.as_str()));
         items
     }
 
+    /// Enumerate the exact registered releases in commit order, including authored ones.
+    pub async fn plugin_releases(&self, id: &PluginId) -> Vec<LoadedPlugin> {
+        let plugins = self.plugins.read().await;
+        plugins
+            .get(id)
+            .map(|r| {
+                r.registration_order
+                    .iter()
+                    .filter_map(|v| {
+                        r.versions
+                            .get(v)
+                            .filter(|p| self.module_present(p))
+                            .cloned()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Serialize removal with registration and quote creation. A scientific operation holds its
+    /// exact-version usage guard throughout prepare/confirm, independent of other versions.
+    pub async fn remove_plugin_with(
+        &self,
+        id: &PluginId,
+        version: &str,
+        commit: impl AsyncFnOnce(Option<&LoadedPlugin>) -> CompassResult<bool>,
+    ) -> CompassResult<bool> {
+        let mut plugins = self.plugins.write().await;
+        let Some(releases) = plugins.get_mut(id) else {
+            commit(None).await?;
+            return Ok(false);
+        };
+        let existing = releases.versions.get(version);
+        let _file_guard = existing.map(|p| self.module_guard(p, true)).transpose()?;
+        let removed = commit(existing).await?;
+        if existing.is_none() {
+            return Ok(false);
+        }
+        releases.versions.remove(version);
+        releases.installed.remove(version);
+        releases.registration_order.retain(|v| v != version);
+        if let Some(last) = releases.registration_order.last() {
+            releases.default_version = last.clone();
+        } else {
+            plugins.remove(id);
+        }
+        Ok(removed)
+    }
+
     /// Fetch a registered plugin by ID.
     pub async fn get_plugin(&self, id: &PluginId) -> CompassResult<LoadedPlugin> {
-        self.plugins
-            .read()
-            .await
+        self.get_plugin_version(id, None).await
+    }
+
+    /// Fetch the exact installed release if requested. Only an omitted version selects the default.
+    pub async fn get_plugin_version(
+        &self,
+        id: &PluginId,
+        version: Option<&str>,
+    ) -> CompassResult<LoadedPlugin> {
+        biocompass_core_traits::validate_requested_plugin_version(version)?;
+        let plugins = self.plugins.read().await;
+        let releases = plugins
             .get(id)
+            .ok_or_else(|| CompassError::NotFound(format!("plugin '{id}' is not registered")))?;
+        self.select_present(releases, version)
             .cloned()
-            .ok_or_else(|| CompassError::NotFound(format!("plugin '{id}' is not registered")))
+            .ok_or_else(|| {
+                CompassError::NotFound(format!(
+                    "plugin '{id}' version '{}' is not installed",
+                    version.unwrap_or_default()
+                ))
+            })
+    }
+
+    /// CLI, HTTP and MCP share this native dispatcher. Catalog browsing can list hosted-only modules.
+    pub async fn local_execution_plugin(
+        &self,
+        id: &PluginId,
+        version: Option<&str>,
+    ) -> CompassResult<(LoadedPlugin, Option<std::fs::File>)> {
+        biocompass_core_traits::validate_requested_plugin_version(version)?;
+        let plugins = self.plugins.read().await;
+        let releases = plugins
+            .get(id)
+            .ok_or_else(|| CompassError::NotFound(format!("plugin '{id}' is not registered")))?;
+        let plugin = self.select_present(releases, version).ok_or_else(|| {
+            CompassError::NotFound(format!(
+                "plugin '{id}' version '{}' is not installed",
+                version.unwrap_or_default()
+            ))
+        })?;
+        if plugin.manifest.execution == PluginExecutionPlane::CloudOnly {
+            return Err(CompassError::AccessDenied(format!(
+                "plugin '{id}' version '{}' declares execution='cloud_only' and cannot run locally",
+                plugin.manifest.version
+            )));
+        }
+        let file = self.module_guard(plugin, false)?;
+        if !self.module_present(plugin) {
+            return Err(CompassError::NotFound(format!("module '{id}' was removed")));
+        }
+        if let Some(files) = self.workspace_module(plugin)? {
+            let manifest = match files.package {
+                WorkspacePackage::Managed { receipt } => {
+                    #[derive(serde::Deserialize)]
+                    struct Metadata {
+                        manifest: biocompass_plugin_spec::PluginManifest,
+                    }
+                    let input = std::fs::File::open(receipt)
+                        .map_err(|e| CompassError::Storage(e.to_string()))?;
+                    serde_json::from_reader::<_, Metadata>(input)
+                        .map_err(|e| CompassError::Storage(e.to_string()))?
+                        .manifest
+                }
+                WorkspacePackage::Authored { manifest, .. } => {
+                    let text = std::fs::read_to_string(manifest)
+                        .map_err(|e| CompassError::Storage(e.to_string()))?;
+                    biocompass_plugin_spec::PluginManifest::from_toml_str(
+                        &text,
+                        self.allow_local_dev_tags,
+                    )?
+                }
+            };
+            let current = LoadedPlugin {
+                manifest,
+                skill: None,
+                root_dir: None,
+            };
+            if release_terms_hash(&current)? != release_terms_hash(plugin)? {
+                return Err(CompassError::IntegrityViolation(
+                    "workspace module terms changed; reload the workspace".into(),
+                ));
+            }
+        }
+        Ok((plugin.clone(), file))
     }
 
     /// Register an integrity-verified `DuckDbCatalogEngine`.
@@ -252,6 +677,23 @@ impl InProcessNodeRuntime {
             .write()
             .await
             .insert(catalog.manifest().id.clone(), catalog);
+        Ok(())
+    }
+
+    /// Keep a registered physical catalog bound to one immutable seal.
+    pub async fn register_immutable_catalog(&self, catalog: DuckDbCatalogEngine) -> CompassResult<()> {
+        catalog.verify_integrity()?;
+        let id = catalog.summary().id.clone();
+        let mut catalogs = self.catalogs.write().await;
+        if let Some(existing) = catalogs.get(&id) {
+            if existing.summary().latest_sealed != catalog.summary().latest_sealed {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "physical catalog '{id}' is already bound to a different immutable seal"
+                )));
+            }
+        } else {
+            catalogs.insert(id, catalog);
+        }
         Ok(())
     }
 
@@ -271,6 +713,67 @@ impl InProcessNodeRuntime {
             .get(id)
             .cloned()
             .ok_or_else(|| CompassError::NotFound(format!("catalog '{id}' is not registered")))
+    }
+
+    /// Mutate a registered catalog engine in place (e.g., pin/unpin/expire/rollback/commit_mutation).
+    pub async fn mutate_catalog<F, R>(&self, id: &CatalogId, f: F) -> CompassResult<R>
+    where
+        F: FnOnce(&mut DuckDbCatalogEngine) -> CompassResult<R>,
+    {
+        let mut map = self.catalogs.write().await;
+        let eng = map
+            .get_mut(id)
+            .ok_or_else(|| CompassError::NotFound(format!("catalog '{id}' is not registered")))?;
+        f(eng)
+    }
+
+    async fn stage_private_hla_inputs(
+        &self,
+        plugin_id: PluginId,
+        grant: &DatasetGrant,
+        params: &Value,
+        input_dir: &Path,
+        max_input_bytes: usize,
+    ) -> CompassResult<()> {
+        let catalog = self.get_catalog(&grant.catalog_id).await?;
+        let params = params.clone();
+        let scope = grant.row_scope.clone();
+        let data_dir = input_dir.join("data");
+        let input_dir = input_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let (version, sealed) = private_hla_pin(&catalog, &plugin_id, &params)?;
+            let storage_error = |e: std::io::Error| CompassError::Storage(e.to_string());
+            std::fs::create_dir(&data_dir).map_err(storage_error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755))
+                    .map_err(storage_error)?;
+            }
+            materialize_reviewed_hla_inputs(
+                &catalog,
+                &plugin_id,
+                version,
+                sealed.snapshot_id,
+                &sealed.dataset_digest,
+                &params,
+                scope.as_ref(),
+                &data_dir,
+            )?;
+            for entry in std::fs::read_dir(&data_dir).map_err(storage_error)? {
+                let path = entry.map_err(storage_error)?.path();
+                set_world_readable_file(&path)?;
+            }
+            let bytes = measure_dir_regular_bytes(&input_dir).map_err(CompassError::Storage)?;
+            if bytes > max_input_bytes as u64 {
+                return Err(CompassError::Validation(format!(
+                    "INPUT_LIMIT_EXCEEDED: staged inputs are {bytes} bytes, exceeding signed max_input_bytes ({max_input_bytes})"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| CompassError::Internal(format!("Private HLA input staging task: {e}")))?
     }
 
     fn emit_stage_log(&self, run_id: &RunId, line: impl Into<String>) {
@@ -331,6 +834,8 @@ impl InProcessNodeRuntime {
         quote_doc: Value,
         deal: &SignedArtifact<DealPayload>,
         deal_doc: Value,
+        revoked: Option<&AtomicBool>,
+        queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
     ) -> CompassResult<RunRecord> {
         let run_id = run.run_id.clone();
         let stage_dir = self
@@ -344,8 +849,25 @@ impl InProcessNodeRuntime {
 
         let started_at = Utc::now().timestamp();
         let outcome = self
-            .stage_and_run_container(&mut run, plugin, verified_image, &stage_dir, &in_dir, &out_dir)
+            .stage_and_run_container(
+                &mut run,
+                plugin,
+                verified_image,
+                &quote.payload.execution_limits,
+                &stage_dir,
+                &in_dir,
+                &out_dir,
+                revoked,
+                queries,
+            )
             .await;
+        let outcome = if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            match outcome {
+                Err((_, message, engine)) if message.contains("OCI_CLEANUP_UNCONFIRMED") =>
+                    Err(("DATASET_ACCESS_REVOKED".into(), format!("Dataset access revoked. {message}"), engine)),
+                _ => Err(("DATASET_ACCESS_REVOKED".into(), "Dataset access revoked during execution".into(), self.oci_runner.engine().server_version.clone())),
+            }
+        } else { outcome };
         let finished_at = Utc::now().timestamp().max(started_at);
 
         let capabilities = quote.payload.capabilities_granted.clone();
@@ -355,7 +877,7 @@ impl InProcessNodeRuntime {
             "egress_allowlist".to_string()
         };
 
-        let (status, result_json, artifacts, engine_version, receipt_payload, err_opt) =
+        let (status, result_json, artifacts, receipt_payload, err_opt) =
             match outcome {
                 Ok(success) => {
                     let payload = ReceiptPayload {
@@ -394,7 +916,6 @@ impl InProcessNodeRuntime {
                         RunStatus::Succeeded,
                         Some(success.result_value),
                         success.artifacts,
-                        success.engine_version,
                         payload,
                         None,
                     )
@@ -436,25 +957,13 @@ impl InProcessNodeRuntime {
                         RunStatus::Failed,
                         None,
                         Vec::new(),
-                        engine_ver,
                         payload,
                         Some(message),
                     )
                 }
             };
 
-        let receipt = match self.sign_provider(ARTIFACT_TYPE_RECEIPT, finished_at, receipt_payload)
-        {
-            Ok(r) => r,
-            Err(sign_err) => {
-                let _ = self
-                    .payment_gateway
-                    .refund_run(&run.org_id, &run_id, &format!("receipt sign error: {sign_err}"))
-                    .await;
-                return Err(sign_err);
-            }
-        };
-
+        let receipt = self.sign_provider(ARTIFACT_TYPE_RECEIPT, finished_at, receipt_payload)?;
         let receipt_doc = serde_json::to_value(&receipt)
             .map_err(|e| CompassError::Internal(format!("serialize receipt: {e}")))?;
         let chain_docs = vec![
@@ -471,10 +980,6 @@ impl InProcessNodeRuntime {
                 "froglet-verify self-check rejected generated chain: {}",
                 serde_json::to_string(&chain_report).unwrap_or_default()
             );
-            let _ = self
-                .payment_gateway
-                .refund_run(&run.org_id, &run_id, &reason)
-                .await;
             return Err(CompassError::Protocol(reason));
         }
 
@@ -487,45 +992,6 @@ impl InProcessNodeRuntime {
             )
             .await?;
 
-        match status {
-            RunStatus::Succeeded => {
-                self.emit_stage_log(
-                    &run_id,
-                    format!(
-                        "Verified froglet/v1 Schnorr receipt {} (engine={engine_version}); settling ACT reservation",
-                        &receipt.hash[..12]
-                    ),
-                );
-                if let Err(settle_err) = self
-                    .payment_gateway
-                    .settle_run(&run.org_id, &run_id, &receipt.hash)
-                    .await
-                {
-                    let _ = self
-                        .payment_gateway
-                        .refund_run(
-                            &run.org_id,
-                            &run_id,
-                            &format!("settle failed: {settle_err}"),
-                        )
-                        .await;
-                    return Err(settle_err);
-                }
-            }
-            _ => {
-                let refund_reason = err_opt
-                    .clone()
-                    .unwrap_or_else(|| "container execution failed".into());
-                self.emit_stage_log(
-                    &run_id,
-                    format!("Run failed ({refund_reason}); refunding reserved ACT credits"),
-                );
-                self.payment_gateway
-                    .refund_run(&run.org_id, &run_id, &refund_reason)
-                    .await?;
-            }
-        }
-
         run.status = status;
         run.result_json = result_json;
         run.artifacts = artifacts;
@@ -535,45 +1001,21 @@ impl InProcessNodeRuntime {
         run.error_message = err_opt;
         run.completed_at = Some(Utc::now());
 
-        self.session_store.save_run(&run).await?;
-        if let Some(session_id) = &run.session_id {
-            let summary = match run.status {
-                RunStatus::Succeeded => format!(
-                    "Plugin '{}' completed with verified Froglet receipt `{}`.",
-                    run.plugin_id,
-                    &receipt.hash[..16]
-                ),
-                _ => format!(
-                    "Plugin '{}' failed ({}); reserved ACT refunded.",
-                    run.plugin_id,
-                    run.error_message.as_deref().unwrap_or("unknown error")
-                ),
-            };
-            self.session_store
-                .append_event(
-                    session_id,
-                    SessionEventKind::RunCompleted,
-                    &summary,
-                    json!({
-                        "run_id": run.run_id,
-                        "status": run.status,
-                        "receipt_hash": receipt.hash,
-                    }),
-                )
-                .await?;
-        }
-
-        Ok(run)
+        self.post_and_finish(run).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn stage_and_run_container(
         &self,
         run: &mut RunRecord,
         plugin: &LoadedPlugin,
         verified_image: &OciImageRef,
+        limits: &ExecutionLimits,
         stage_dir: &Path,
         in_dir: &Path,
         out_dir: &Path,
+        revoked: Option<&AtomicBool>,
+        queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
     ) -> Result<StageSuccessOutcome, (String, String, String)> {
         let default_engine_ver = format!(
             "{}:{}",
@@ -584,7 +1026,7 @@ impl InProcessNodeRuntime {
         prepare_stage_permissions(stage_dir, in_dir, out_dir)
             .map_err(|e| ("STAGE_PREPARE_ERROR".into(), e.to_string(), default_engine_ver.clone()))?;
 
-        // 1. Write canonical /in/params.json (world-readable inside 0700 stage_dir for UID 65532).
+        // 1. Write canonical /in/params.json and enforce signed max_input_bytes (§6.2).
         let params_bytes = canonical_json::to_vec(&run.params).map_err(|e| {
             (
                 "PARAMS_ENCODE_ERROR".into(),
@@ -592,6 +1034,17 @@ impl InProcessNodeRuntime {
                 default_engine_ver.clone(),
             )
         })?;
+        if params_bytes.len() > limits.max_input_bytes {
+            return Err((
+                "INPUT_LIMIT_EXCEEDED".into(),
+                format!(
+                    "canonical params.json is {} bytes, exceeding signed max_input_bytes ({})",
+                    params_bytes.len(),
+                    limits.max_input_bytes
+                ),
+                default_engine_ver,
+            ));
+        }
         let params_path = in_dir.join("params.json");
         std::fs::write(&params_path, &params_bytes).map_err(|e| {
             (
@@ -608,8 +1061,18 @@ impl InProcessNodeRuntime {
             )
         })?;
 
-        // 2. Materialize pre-masked DuckDB Parquet slice into /in/data/cohort.parquet when a Grant is attached.
-        if let Some(grant) = &run.grant {
+        // 2. Supply private named projections or the legacy single-table Parquet slice.
+        if queries.is_some() {
+            // The reviewed live protocol delivers only the declared read responses.
+        } else if let Some(grant) = run.grant.as_ref().filter(|grant| is_private_catalog(grant)) {
+            self.stage_private_hla_inputs(
+                plugin.manifest.id.clone(), grant, &run.params, in_dir, limits.max_input_bytes,
+            )
+                .await
+                .map_err(|e| (
+                    "PRIVATE_DATASET_STAGE_ERROR".into(), e.to_string(), default_engine_ver.clone()
+                ))?;
+        } else if let Some(grant) = &run.grant {
             let catalog = self.get_catalog(&grant.catalog_id).await.map_err(|e| {
                 (
                     "CATALOG_LOOKUP_ERROR".into(),
@@ -617,7 +1080,7 @@ impl InProcessNodeRuntime {
                     default_engine_ver.clone(),
                 )
             })?;
-            let filter_query: CatalogQuery = run
+            let filter_query: QueryAst = run
                 .params
                 .get("cohort_filter")
                 .cloned()
@@ -631,6 +1094,19 @@ impl InProcessNodeRuntime {
                     )
                 })?
                 .unwrap_or_default();
+
+            let is_curated = self
+                .is_curated_module_approved(
+                    &plugin.manifest.id,
+                    &plugin.manifest.version,
+                    &verified_image.canonical_module_hash(),
+                )
+                .await;
+            let staging_mode = if is_curated {
+                StagingMode::CuratedFullScan
+            } else {
+                StagingMode::CustomerScoped
+            };
 
             let data_dir = in_dir.join("data");
             std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -647,7 +1123,7 @@ impl InProcessNodeRuntime {
             }
             let cohort_parquet = data_dir.join("cohort.parquet");
             let slice = catalog
-                .materialize_scoped_parquet(grant, &filter_query, &cohort_parquet)
+                .materialize_parquet_for_run(grant, &filter_query, staging_mode, &cohort_parquet)
                 .map_err(|e| {
                     (
                         "DUCKDB_STAGE_ERROR".into(),
@@ -662,42 +1138,57 @@ impl InProcessNodeRuntime {
                     default_engine_ver.clone(),
                 )
             })?;
+            let _ = self
+                .mutate_catalog(&grant.catalog_id, |c| c.pin_snapshot(slice.snapshot_id))
+                .await;
             let stage_msg = format!(
-                "Staged DuckDB cohort slice ({} rows, masked={}, sha256={})",
+                "Staged DuckLake cohort slice ({} rows, level={}, snapshot={}, sha256={})",
                 slice.row_count,
-                slice.sequence_masked,
+                grant.level.as_str(),
+                slice.snapshot_id,
                 &slice.sha256[..12]
             );
             run.logs.push(format!("[stage] {stage_msg}"));
             self.emit_stage_log(&run.run_id, stage_msg);
         }
 
-        // 3. Execute hardened OCI container.
+        // 3. Execute hardened OCI container enforcing signed Offer runtime & memory limits (§6.2).
+        let mut enforced_resources = plugin.manifest.resources.clone();
+        enforced_resources.timeout_sec = (limits.max_runtime_ms / 1_000).max(1);
+        enforced_resources.memory_mb = ((limits.max_memory_bytes / (1024 * 1024)) as u64).max(64);
+
         self.emit_stage_log(
             &run.run_id,
-            format!("Launching hardened OCI container {}", verified_image.raw),
+            format!(
+                "Launching hardened OCI container {} (timeout={}s, memory={}MB)",
+                verified_image.raw, enforced_resources.timeout_sec, enforced_resources.memory_mb
+            ),
         );
         let spec = ContainerRunSpec {
             run_id: run.run_id.clone(),
             image: verified_image.clone(),
             in_dir: in_dir.to_path_buf(),
             out_dir: out_dir.to_path_buf(),
-            resources: plugin.manifest.resources.clone(),
+            resources: enforced_resources,
             network: plugin.manifest.network.clone(),
             command_override: None,
         };
 
         let report = self
             .oci_runner
-            .execute(&spec, Some(self.log_tx.clone()))
+            .execute_with_queries(&spec, Some(self.log_tx.clone()), revoked, queries)
             .await
             .map_err(|e| {
-                run.logs.push(format!("[error] {e}"));
-                (
-                    "CONTAINER_EXECUTION_ERROR".into(),
-                    e.to_string(),
-                    default_engine_ver.clone(),
-                )
+                let msg = e.to_string();
+                run.logs.push(format!("[error] {msg}"));
+                let code = if msg.contains("DATASET_ACCESS_REVOKED:") {
+                    "DATASET_ACCESS_REVOKED"
+                } else if msg.contains("CONTAINER_TIMEOUT:") {
+                    "CONTAINER_TIMEOUT"
+                } else {
+                    "CONTAINER_EXECUTION_ERROR"
+                };
+                (code.into(), msg, default_engine_ver.clone())
             })?;
 
         let engine_version = format!("{}:{}", report.engine.as_str(), report.engine_version);
@@ -708,6 +1199,26 @@ impl InProcessNodeRuntime {
             run.logs.push(format!("[stderr] {line}"));
         }
 
+        // Enforce signed max_output_bytes across ALL /out files + stdout/stderr BEFORE reading into RAM (§6.2).
+        let out_dir_bytes = measure_dir_regular_bytes(out_dir).map_err(|msg| {
+            (
+                "INVALID_OUTPUT_TREE".into(),
+                msg,
+                engine_version.clone(),
+            )
+        })?;
+        let total_output_bytes = out_dir_bytes.saturating_add(report.log_bytes_total);
+        if total_output_bytes > (limits.max_output_bytes as u64) {
+            return Err((
+                "OUTPUT_LIMIT_EXCEEDED".into(),
+                format!(
+                    "combined /out ({out_dir_bytes} B) + stdout/stderr ({} B) = {total_output_bytes} B exceeds signed max_output_bytes ({} B)",
+                    report.log_bytes_total, limits.max_output_bytes
+                ),
+                engine_version,
+            ));
+        }
+
         if report.exit_code != 0 {
             let tail = report
                 .stderr_lines
@@ -715,10 +1226,15 @@ impl InProcessNodeRuntime {
                 .or_else(|| report.stdout_lines.last())
                 .cloned()
                 .unwrap_or_else(|| "no stderr output".into());
+            let code = if report.exit_code == 137 {
+                "MEMORY_OR_KILL_EXIT_137".to_string()
+            } else {
+                format!("EXIT_CODE_{}", report.exit_code)
+            };
             return Err((
-                format!("EXIT_CODE_{}", report.exit_code),
+                code,
                 format!(
-                    "container exited with non-zero code {}: {tail}",
+                    "Container exited with non-zero code {}: {tail}",
                     report.exit_code
                 ),
                 engine_version,
@@ -774,23 +1290,8 @@ impl InProcessNodeRuntime {
             .await
             .map_err(|e| ("ARTIFACT_STAGE_OUT_ERROR".into(), e.to_string(), engine_version.clone()))?;
 
-        // Canonical result_hash commits to both /out/result.json and all /out/artifacts/* digests!
-        let canonical_result_manifest = canonical_json::to_vec(&json!({
-            "result_json_sha256": result_sha256,
-            "artifacts": artifacts.iter().map(|a| json!({
-                "name": a.name,
-                "sha256": a.sha256,
-                "size_bytes": a.size_bytes,
-            })).collect::<Vec<_>>(),
-        }))
-        .map_err(|e| {
-            (
-                "RESULT_HASH_ERROR".into(),
-                format!("canonicalize result manifest: {e}"),
-                engine_version.clone(),
-            )
-        })?;
-        let result_hash = sha256_hex(&canonical_result_manifest);
+        let result_hash = biocompass_core_traits::result_manifest_hash(&result_sha256, &artifacts)
+            .map_err(|error| ("RESULT_HASH_ERROR".into(), error.to_string(), engine_version.clone()))?;
 
         Ok(StageSuccessOutcome {
             result_value,
@@ -840,6 +1341,29 @@ struct StageSuccessOutcome {
     artifacts: Vec<ArtifactRef>,
     result_hash: String,
     engine_version: String,
+}
+
+pub fn measure_dir_regular_bytes(dir: &Path) -> Result<u64, String> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut total: u64 = 0;
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing symlink inside /out: {}", path.display()));
+        }
+        if meta.is_dir() {
+            total = total.saturating_add(measure_dir_regular_bytes(&path)?);
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
 }
 
 fn collect_regular_files_recursive(
@@ -905,11 +1429,139 @@ fn empty_free_settlement_refs() -> ReceiptSettlementRefs {
     }
 }
 
+fn is_private_catalog(grant: &DatasetGrant) -> bool {
+    grant.catalog_id.as_str().split_once('/').is_some_and(|(namespace, _)| {
+        namespace.eq_ignore_ascii_case("bc-private-v1")
+    })
+}
+
+fn live_query_grant(plugin: &LoadedPlugin, grant: &DatasetGrant) -> bool {
+    if plugin.manifest.runtime_join_queries.is_empty() {
+        is_private_catalog(grant)
+    } else {
+        !is_private_catalog(grant)
+            && grant.level == GrantLevel::ComputeOnly
+            && grant.row_scope.is_some()
+            && grant.daily_row_budget.is_none()
+            && grant.max_rows_per_query == 0
+            && !grant.allow_local_export
+    }
+}
+
+pub fn require_reviewed_hla_module(
+    plugin: &LoadedPlugin,
+    image: &OciImageRef,
+    grant: &DatasetGrant,
+) -> CompassResult<()> {
+    let contract = reviewed_hla_input_contract(&plugin.manifest.id);
+    if contract.is_none()
+        || plugin.manifest.dataset_input_contract.as_deref() != contract
+        || !plugin.manifest.network.is_airgapped()
+        || image.sha256_digest.is_none()
+        || grant.level != GrantLevel::ComputeOnly
+        || grant.daily_row_budget.is_some()
+        || grant.max_rows_per_query != 0
+        || grant.allow_local_export
+    {
+        return Err(CompassError::AccessDenied(
+            "private datasets require a reviewed, digest-pinned HLA module and a compute-only grant".into(),
+        ));
+    }
+    target_validation::SampleScope::parse(grant.row_scope.as_ref())?;
+    Ok(())
+}
+
+fn private_hla_pin(
+    catalog: &DuckDbCatalogEngine,
+    plugin_id: &PluginId,
+    params: &Value,
+) -> CompassResult<(u64, SealedSnapshot)> {
+    let version = params.get("dataset_version").and_then(Value::as_u64).filter(|n| *n > 0)
+        .ok_or_else(|| CompassError::Validation("private dataset_version must be pinned".into()))?;
+    let snapshot_id = params.pointer("/cohort_filter/snapshot_id").and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| CompassError::Validation("private cohort_filter.snapshot_id must be pinned".into()))?;
+    if params.get("cohort_filter").and_then(Value::as_object).is_none_or(|fields| fields.len() != 1) {
+        return Err(CompassError::Validation("private cohort_filter accepts only snapshot_id".into()));
+    }
+    if catalog.summary().version != version.to_string() || catalog.summary().latest_snapshot_id != snapshot_id {
+        return Err(CompassError::IntegrityViolation(
+            "private dataset version and snapshot do not identify the registered release".into(),
+        ));
+    }
+    let sealed = catalog.load_sealed_snapshot(Some(snapshot_id))?;
+    validate_reviewed_hla_inputs(plugin_id, &sealed, params)?;
+    Ok((version, sealed))
+}
+
+fn hla_contract(plugin_id: &PluginId) -> CompassResult<&'static str> {
+    reviewed_hla_input_contract(plugin_id)
+        .ok_or_else(|| CompassError::AccessDenied("unsupported private HLA module".into()))
+}
+
+/// Validate physical sealed columns before creating a private run quote.
+pub fn validate_reviewed_hla_inputs(
+    plugin_id: &PluginId,
+    snapshot: &SealedSnapshot,
+    params: &Value,
+) -> CompassResult<()> {
+    target_validation::validate_scientific_schema(hla_contract(plugin_id)?, snapshot, params)
+}
+
+pub use biocompass_plugin_spec::validate_reviewed_hla_capabilities;
+
+/// Supply scoped, named inputs using sealed shards, also usable with the worker's cached engine.
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_reviewed_hla_inputs(
+    engine: &DuckDbCatalogEngine,
+    plugin_id: &PluginId,
+    dataset_version: u64,
+    snapshot_id: u64,
+    digest: &str,
+    params: &Value,
+    row_scope: Option<&FilterExpr>,
+    out_dir: &Path,
+) -> CompassResult<()> {
+    target_validation::materialize_scientific(
+        engine, engine.summary().id.as_str(), dataset_version, snapshot_id, digest,
+        hla_contract(plugin_id)?, params, out_dir, row_scope,
+    )
+}
+
+fn compute_canonical_workload_hash(
+    plugin: &LoadedPlugin,
+    verified_image: &OciImageRef,
+    params: &Value,
+    dataset_digest: Option<&str>,
+    grant: Option<&DatasetGrant>,
+) -> CompassResult<String> {
+    let workload_descriptor = json!({
+        "plugin_id": plugin.manifest.id,
+        "plugin_version": plugin.manifest.version,
+        "image_digest": verified_image.canonical_module_hash(),
+        "params": params,
+        "dataset_digest": dataset_digest,
+        "grant_id": grant.map(|g| &g.grant_id),
+        "access_level": grant.map(|g| g.level.as_str()),
+        "row_scope": grant.and_then(|g| g.row_scope.as_ref()),
+    });
+    let workload_bytes = canonical_json::to_vec(&workload_descriptor)
+        .map_err(|e| CompassError::Protocol(format!("canonicalize workload: {e}")))?;
+    Ok(crypto::sha256_hex(&workload_bytes))
+}
+
 #[async_trait]
 impl RunDispatcher for InProcessNodeRuntime {
     async fn prepare_run(&self, req: PrepareRunRequest) -> CompassResult<RunQuote> {
-        let plugin = self.get_plugin(&req.plugin_id).await?;
-        plugin.manifest.validate_inputs(&req.params)?;
+        let (plugin, _active_release) = self.local_execution_plugin(&req.plugin_id, req.plugin_version.as_deref()).await?;
+        plugin.manifest.validate_dataset_binding(req.dataset_grant.is_some())?;
+        if plugin.manifest.has_live_queries()
+            && !req.dataset_grant.as_ref().is_some_and(|grant| live_query_grant(&plugin, grant))
+        {
+            return Err(CompassError::AccessDenied(
+                "live reads require a trusted private dataset provider".into(),
+            ));
+        }
 
         let verified_image = self
             .oci_registry
@@ -925,27 +1577,67 @@ impl RunDispatcher for InProcessNodeRuntime {
                     grant.grant_id, grant.org_id, req.org_id
                 )));
             }
+            if grant.level < plugin.manifest.requires_catalog_level {
+                return Err(CompassError::AccessDenied(format!(
+                    "plugin '{}' requires '{}' catalog access, but grant '{}' is '{}'",
+                    plugin.manifest.id,
+                    plugin.manifest.requires_catalog_level.as_str(),
+                    grant.grant_id,
+                    grant.level.as_str()
+                )));
+            }
+            if grant.level == GrantLevel::ComputeOnly
+                && !self
+                    .is_curated_module_approved(
+                        &plugin.manifest.id,
+                        &plugin.manifest.version,
+                        &verified_image.canonical_module_hash(),
+                    )
+                    .await
+            {
+                return Err(CompassError::AccessDenied(format!(
+                    "compute_only catalog '{}' only permits approved curated modules; '{}' is not approved for full-scan execution",
+                    grant.catalog_id, plugin.manifest.id
+                )));
+            }
             let catalog = self.get_catalog(&grant.catalog_id).await?;
             catalog.verify_integrity()?;
-            dataset_digest = Some(catalog.manifest().dataset_digest());
-            grant_summary = Some(format!(
-                "{} (catalog={}, sequence_masked={}, max_rows={})",
-                grant.label, grant.catalog_id, grant.mask_peptide_sequences, grant.max_rows
-            ));
+            let requested_sid = req
+                .params
+                .get("cohort_filter")
+                .and_then(|v| v.get("snapshot_id"))
+                .and_then(Value::as_u64);
+            let sealed = if is_private_catalog(grant) {
+                require_reviewed_hla_module(&plugin, &verified_image, grant)?;
+                let (_, sealed) = private_hla_pin(&catalog, &plugin.manifest.id, &req.params)?;
+                sealed
+            } else {
+                catalog.load_sealed_snapshot(requested_sid)?
+            };
+            dataset_digest = Some(sealed.dataset_digest);
+            grant_summary = Some(grant.summary_line());
         }
 
-        let workload_descriptor = json!({
-            "plugin_id": plugin.manifest.id,
-            "plugin_version": plugin.manifest.version,
-            "image_digest": verified_image.canonical_module_hash(),
-            "params": req.params,
-            "dataset_digest": dataset_digest,
-            "grant_id": req.dataset_grant.as_ref().map(|g| &g.grant_id),
-            "sequence_masked": req.dataset_grant.as_ref().map(|g| g.mask_peptide_sequences),
-        });
-        let workload_bytes = canonical_json::to_vec(&workload_descriptor)
-            .map_err(|e| CompassError::Protocol(format!("canonicalize workload: {e}")))?;
-        let workload_hash = crypto::sha256_hex(&workload_bytes);
+        plugin.manifest.validate_inputs(&req.params)?;
+        let selected_offer = plugin.manifest.resolve_offer(req.offer_id.as_deref())?;
+        let canonical_params = canonical_json::to_vec(&req.params)
+            .map_err(|e| CompassError::Validation(format!("canonicalize params.json: {e}")))?;
+        if (canonical_params.len() as u64) > selected_offer.max_input_bytes {
+            return Err(CompassError::Validation(format!(
+                "INPUT_LIMIT_EXCEEDED: canonical params.json is {} bytes, exceeding offer '{}' max_input_bytes ({})",
+                canonical_params.len(),
+                selected_offer.id,
+                selected_offer.max_input_bytes
+            )));
+        }
+
+        let workload_hash = compute_canonical_workload_hash(
+            &plugin,
+            &verified_image,
+            &req.params,
+            dataset_digest.as_deref(),
+            req.dataset_grant.as_ref(),
+        )?;
 
         let now = Utc::now().timestamp();
         let quote_expires_ts = now + 600;
@@ -964,11 +1656,11 @@ impl RunDispatcher for InProcessNodeRuntime {
         };
 
         let limits = ExecutionLimits {
-            max_input_bytes: MAX_STAGE_IO_BYTES,
-            max_runtime_ms: plugin.manifest.resources.timeout_sec.saturating_mul(1_000),
-            max_memory_bytes: (plugin.manifest.resources.memory_mb as usize)
+            max_input_bytes: selected_offer.max_input_bytes as usize,
+            max_runtime_ms: selected_offer.max_runtime_sec.saturating_mul(1_000),
+            max_memory_bytes: (selected_offer.max_memory_mb as usize)
                 .saturating_mul(1024 * 1024),
-            max_output_bytes: MAX_STAGE_IO_BYTES,
+            max_output_bytes: selected_offer.max_output_bytes as usize,
             fuel_limit: 0,
         };
 
@@ -996,7 +1688,7 @@ impl RunDispatcher for InProcessNodeRuntime {
             now,
             OfferPayload {
                 provider_id: provider_id.clone(),
-                offer_id: plugin.manifest.id.as_str().to_owned(),
+                offer_id: format!("{}:{}", plugin.manifest.id.as_str(), selected_offer.id),
                 descriptor_hash: descriptor.hash.clone(),
                 expires_at: Some(now + 3_600),
                 offer_kind: CONTAINER_SERVICE_KIND.into(),
@@ -1019,7 +1711,7 @@ impl RunDispatcher for InProcessNodeRuntime {
                     base_fee_msat: 0,
                     success_fee_msat: 0,
                 },
-                terms_hash: None,
+                terms_hash: Some(release_terms_hash(&plugin)?),
                 confidential_profile_hash: None,
             },
         )?;
@@ -1061,14 +1753,21 @@ impl RunDispatcher for InProcessNodeRuntime {
 
         let run_id =
             RunId::new(format!("run-{}", Uuid::new_v4().simple())).map_err(CompassError::Internal)?;
-        let estimated_cost_act = plugin.manifest.estimated_cost_act();
+        let estimated_cost_act = selected_offer.total_cost_act();
         let quote = RunQuote {
             run_id: run_id.clone(),
             plugin_id: plugin.manifest.id.clone(),
             plugin_version: plugin.manifest.version.clone(),
             image_ref: verified_image.raw.clone(),
             target_node_id: self.node_id.clone(),
+            offer_id: selected_offer.id.clone(),
+            offer_name: selected_offer.name.clone(),
+            base_fee_act: selected_offer.base_fee_act(),
             estimated_cost_act,
+            max_input_bytes: selected_offer.max_input_bytes,
+            max_output_bytes: selected_offer.max_output_bytes,
+            max_runtime_sec: selected_offer.max_runtime_sec,
+            max_memory_mb: selected_offer.max_memory_mb,
             workload_hash,
             dataset_grant_summary: grant_summary,
             froglet_quote: quote_json.clone(),
@@ -1082,6 +1781,7 @@ impl RunDispatcher for InProcessNodeRuntime {
             plugin_id: plugin.manifest.id.clone(),
             plugin_version: plugin.manifest.version.clone(),
             status: RunStatus::Prepared,
+            admission: None,
             params: req.params,
             grant: req.dataset_grant,
             quote: quote.clone(),
@@ -1121,9 +1821,38 @@ impl RunDispatcher for InProcessNodeRuntime {
     }
 
     async fn confirm_run(&self, run_id: &RunId, idempotency_key: &str) -> CompassResult<RunRecord> {
+        self.confirm_run_guarded(run_id, idempotency_key, None).await
+    }
+
+    fn subscribe_logs(&self) -> broadcast::Receiver<RunLogEvent> {
+        self.log_tx.subscribe()
+    }
+}
+
+impl InProcessNodeRuntime {
+    pub async fn confirm_run_guarded(&self, run_id: &RunId, idempotency_key: &str,
+        revoked: Option<&AtomicBool>) -> CompassResult<RunRecord> {
+        self.confirm_run_with_queries(run_id, idempotency_key, revoked, None).await
+    }
+
+    pub async fn confirm_run_with_queries(
+        &self,
+        run_id: &RunId,
+        idempotency_key: &str,
+        revoked: Option<&AtomicBool>,
+        queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
+    ) -> CompassResult<RunRecord> {
+        let idempotency_key = idempotency_key.trim();
+        if idempotency_key.is_empty() {
+            return Err(CompassError::Validation("idempotency_key is required".into()));
+        }
+        // Only persisted runs need a lock inode. Read the authoritative state again once
+        // any confirmation or recovery already in progress has released that inode.
+        self.session_store.get_run(run_id).await?;
+        let _run_lock = run_lock::acquire(&self.stage_root_dir, run_id).await?;
         let mut run = self.session_store.get_run(run_id).await?;
-        if run.status == RunStatus::Succeeded {
-            return Ok(run);
+        if let Some(reconciled) = self.reconcile_confirmation(&run, idempotency_key).await? {
+            return Ok(reconciled);
         }
         if run.status != RunStatus::Prepared {
             return Err(CompassError::Validation(format!(
@@ -1151,26 +1880,111 @@ impl RunDispatcher for InProcessNodeRuntime {
         let signed_quote: SignedArtifact<QuotePayload> = serde_json::from_value(quote_doc.clone())
             .map_err(|e| CompassError::Protocol(format!("decode prepared Quote: {e}")))?;
 
-        let plugin = self.get_plugin(&run.plugin_id).await?;
+        let (plugin, _active_release) = self.local_execution_plugin(&run.plugin_id, Some(&run.plugin_version)).await?;
+        let requires_live_queries = plugin.manifest.has_live_queries();
+        if queries.is_some() != requires_live_queries
+            || (requires_live_queries && !run.grant.as_ref().is_some_and(|grant| live_query_grant(&plugin, grant)))
+        {
+            return Err(CompassError::AccessDenied(
+                "reviewed live reads require the corresponding private provider".into(),
+            ));
+        }
+        let signed_offer: SignedArtifact<OfferPayload> = serde_json::from_value(offer_doc.clone())
+            .map_err(|e| CompassError::Protocol(format!("decode prepared Offer: {e}")))?;
+        if run.quote.plugin_version != run.plugin_version
+            || run.quote.plugin_id != run.plugin_id
+            || run.quote.run_id != *run_id
+            || run.quote.froglet_quote != quote_doc
+            || signed_offer.artifact_type != ARTIFACT_TYPE_OFFER
+            || signed_quote.artifact_type != ARTIFACT_TYPE_QUOTE
+            || signed_offer.signer != self.provider_id()
+            || signed_quote.signer != signed_offer.signer
+            || signed_quote.payload.offer_hash != signed_offer.hash
+            || !froglet_protocol::protocol::verify_artifact(&signed_offer)
+            || !froglet_protocol::protocol::verify_artifact(&signed_quote)
+        {
+            return Err(CompassError::IntegrityViolation(format!("invalid signed offer or quote for run '{run_id}'")));
+        }
+        // Original native offers lacked terms_hash. All new offers sign it, so removing it
+        // from a stored offer invalidates both its signature and the quote's offer hash.
+        if let Some(expected) = &signed_offer.payload.terms_hash {
+            let selected = plugin.manifest.resolve_offer(Some(&run.quote.offer_id))?;
+            if *expected != release_terms_hash(&plugin)?
+                || signed_offer.payload.offer_id != format!("{}:{}", run.plugin_id, selected.id)
+                || selected.total_cost_act() != run.quote.estimated_cost_act
+            {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "installed module or stored price differs from the signed offer for run '{run_id}'"
+                )));
+            }
+        }
+        if plugin.manifest.image.trim() != run.quote.image_ref {
+            return Err(CompassError::IntegrityViolation(format!(
+                "installed module image differs from the quoted image for run '{run_id}'"
+            )));
+        }
         let verified_image = self.oci_registry.verify_image(&run.quote.image_ref).await?;
 
-        // Reserve ACT credits BEFORE launching any compute.
-        self.payment_gateway
-            .reserve_for_run(
-                &run.org_id,
-                run_id,
-                run.quote.estimated_cost_act,
-                idempotency_key,
-            )
-            .await?;
+        // Recompute canonical workload_hash at confirm time before starting container (B6).
+        let confirm_dataset_digest = if let Some(grant) = &run.grant {
+            let catalog = self.get_catalog(&grant.catalog_id).await?;
+            let requested_sid = run
+                .params
+                .get("cohort_filter")
+                .and_then(|v| v.get("snapshot_id"))
+                .and_then(Value::as_u64);
+            if is_private_catalog(grant) {
+                require_reviewed_hla_module(&plugin, &verified_image, grant)?;
+                if !self.is_curated_module_approved(
+                    &plugin.manifest.id, &plugin.manifest.version, &verified_image.canonical_module_hash()
+                ).await {
+                    return Err(CompassError::AccessDenied(
+                        "reviewed HLA module approval is required for this private release".into(),
+                    ));
+                }
+                let (_, sealed) = private_hla_pin(&catalog, &plugin.manifest.id, &run.params)?;
+                Some(sealed.dataset_digest)
+            } else {
+                if requires_live_queries && !self.is_curated_module_approved(
+                    &plugin.manifest.id, &plugin.manifest.version, &verified_image.canonical_module_hash()
+                ).await {
+                    return Err(CompassError::AccessDenied(
+                        "reviewed module approval is required for these scoped reads".into(),
+                    ));
+                }
+                Some(catalog.load_sealed_snapshot(requested_sid)?.dataset_digest)
+            }
+        } else {
+            None
+        };
+        let recomputed_wh = compute_canonical_workload_hash(
+            &plugin,
+            &verified_image,
+            &run.params,
+            confirm_dataset_digest.as_deref(),
+            run.grant.as_ref(),
+        )?;
+        if recomputed_wh != signed_quote.payload.workload_hash
+            || recomputed_wh != run.quote.workload_hash
+        {
+            return Err(CompassError::IntegrityViolation(format!(
+                "workload_hash mismatch at confirm: quote='{}', recomputed='{recomputed_wh}'",
+                signed_quote.payload.workload_hash
+            )));
+        }
 
         let deal_now = Utc::now().timestamp();
         let admission_deadline = (deal_now + 60).min(signed_quote.payload.expires_at);
-        let completion_deadline =
-            admission_deadline + (plugin.manifest.resources.timeout_sec as i64).max(60);
+        let quote_runtime_sec = (signed_quote.payload.execution_limits.max_runtime_ms / 1_000).max(1) as i64;
+        let preparation_secs = if verified_image.sha256_digest.is_some() {
+            biocompass_core_traits::types::OCI_IMAGE_PREPARATION_TIMEOUT_SECS as i64
+        } else {
+            0
+        };
+        let completion_deadline = admission_deadline + preparation_secs + quote_runtime_sec.max(60);
         let acceptance_deadline = completion_deadline + 300;
 
-        let signed_deal = match self.sign_requester(
+        let signed_deal = self.sign_requester(
             ARTIFACT_TYPE_DEAL,
             deal_now,
             DealPayload {
@@ -1188,36 +2002,23 @@ impl RunDispatcher for InProcessNodeRuntime {
                 completion_deadline,
                 acceptance_deadline,
             },
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = self
-                    .payment_gateway
-                    .refund_run(&run.org_id, run_id, &format!("deal sign failed: {e}"))
-                    .await;
-                return Err(e);
-            }
-        };
+        )?;
+        let deal_doc = serde_json::to_value(&signed_deal)
+            .map_err(|e| CompassError::Internal(format!("serialize deal: {e}")))?;
 
-        let deal_doc = match serde_json::to_value(&signed_deal) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = self
-                    .payment_gateway
-                    .refund_run(&run.org_id, run_id, "deal serialize failed")
-                    .await;
-                return Err(CompassError::Internal(format!("serialize deal: {e}")));
-            }
-        };
+        // Reserve ACT credits BEFORE launching any compute.
+        self.payment_gateway
+            .reserve_for_run(
+                &run.org_id,
+                run_id,
+                run.quote.estimated_cost_act,
+                idempotency_key,
+            )
+            .await?;
 
         run.status = RunStatus::Running;
-        if let Err(save_err) = self.session_store.save_run(&run).await {
-            let _ = self
-                .payment_gateway
-                .refund_run(&run.org_id, run_id, "save running state failed")
-                .await;
-            return Err(save_err);
-        }
+        run.froglet_chain.push(deal_doc.clone());
+        self.session_store.save_run(&run).await?;
 
         self.execute_confirmed_deal(
             run,
@@ -1229,11 +2030,10 @@ impl RunDispatcher for InProcessNodeRuntime {
             quote_doc,
             &signed_deal,
             deal_doc,
+            revoked,
+            queries,
         )
         .await
     }
 
-    fn subscribe_logs(&self) -> broadcast::Receiver<RunLogEvent> {
-        self.log_tx.subscribe()
-    }
 }

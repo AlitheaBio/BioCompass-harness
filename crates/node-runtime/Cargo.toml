@@ -15,6 +15,7 @@ biocompass-data-engine.workspace = true
 biocompass-oci-runner.workspace = true
 biocompass-plugin-spec.workspace = true
 chrono.workspace = true
+duckdb.workspace = true
 froglet-protocol.workspace = true
 froglet-verify.workspace = true
 hex.workspace = true
@@ -27,5 +28,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 biocompass-core-traits = { workspace = true, features = ["local-sqlite"] }
 tempfile.workspace = true
