@@ -136,15 +136,37 @@ pub async fn detect_container_engine() -> CompassResult<DetectedEngine> {
         "/usr/bin/docker",
         "docker",
     ];
+    detect_engine_with_candidates(cfg!(target_os = "linux"), &podman_candidates, &docker_candidates)
+        .await
+}
 
-    if cfg!(target_os = "linux") {
+async fn detect_engine_with_candidates(
+    is_linux: bool,
+    podman_candidates: &[&str],
+    docker_candidates: &[&str],
+) -> CompassResult<DetectedEngine> {
+    if is_linux {
         for bin in podman_candidates {
             if let Some(eng) = probe_podman(bin).await {
+                if !eng.rootless {
+                    tracing::warn!(
+                        binary = %eng.binary_path.display(),
+                        version = %eng.server_version,
+                        "Podman on Linux is running in rootful mode; rootless Podman is recommended for stronger host user-namespace isolation"
+                    );
+                }
                 return Ok(eng);
             }
         }
         for bin in docker_candidates {
             if let Some(eng) = probe_docker(bin).await {
+                if !eng.rootless {
+                    tracing::warn!(
+                        binary = %eng.binary_path.display(),
+                        version = %eng.server_version,
+                        "Rootless Podman unavailable on Linux; falling back to standard Docker engine (rootless=false) — rootless Podman is recommended for stronger host user-namespace isolation"
+                    );
+                }
                 return Ok(eng);
             }
         }
@@ -220,10 +242,20 @@ async fn probe_docker(bin: &str) -> Option<DetectedEngine> {
 }
 
 /// Construct hardened `podman run` / `docker run` CLI arguments enforcing all security invariants.
+/// By default (cloud / marketplace / edge workers), non-airgapped network policies are rejected (`SEC-12`).
 pub fn build_hardened_oci_args(
     engine: &DetectedEngine,
     container_name: &str,
     spec: &ContainerRunSpec,
+) -> CompassResult<Vec<String>> {
+    build_hardened_oci_args_with_local_allowance(engine, container_name, spec, false)
+}
+
+fn build_hardened_oci_args_with_local_allowance(
+    engine: &DetectedEngine,
+    container_name: &str,
+    spec: &ContainerRunSpec,
+    allow_local_bridge_egress: bool,
 ) -> CompassResult<Vec<String>> {
     if !spec.in_dir.is_absolute() || !spec.out_dir.is_absolute() {
         return Err(CompassError::Validation(
@@ -261,9 +293,20 @@ pub fn build_hardened_oci_args(
 
     if spec.network.is_airgapped() {
         args.push("--network=none".into());
-    } else {
-        // Explicit domain allowlists require egress proxy network; default bridge only when declared.
+    } else if allow_local_bridge_egress
+        && let NetworkPolicy::Allowlist { allow_domains } = &spec.network
+        && !allow_domains.is_empty()
+    {
+        tracing::warn!(
+            run_id = %spec.run_id,
+            ?allow_domains,
+            "Local mode allow_domains enabled: running container with --network=bridge (domain-level egress filtering is not enforced locally)"
+        );
         args.push("--network=bridge".into());
+    } else {
+        return Err(CompassError::AccessDenied(
+            "non-airgapped container network policy is rejected outside local mode (--network=none required)".into(),
+        ));
     }
 
     if spec.resources.gpu > 0 {
@@ -696,7 +739,12 @@ impl OciContainerRunner {
             ));
         }
         let container_name = self.container_name(&spec.run_id);
-        let mut args = build_hardened_oci_args(&self.engine, &container_name, spec)?;
+        let mut args = build_hardened_oci_args_with_local_allowance(
+            &self.engine,
+            &container_name,
+            spec,
+            self.workspace_scope.is_some(),
+        )?;
         self.label_native_job(&mut args);
         let wait_for_revocation = async {
             match revoked {
@@ -1153,5 +1201,143 @@ esac
         assert!(args.contains(&"/tmp:rw,noexec,nosuid,nodev,size=512m".to_string()));
         assert!(args.contains(&"/tmp/stage/in:/in:ro".to_string()));
         assert!(args.contains(&"/tmp/stage/out:/out:rw".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sec_12_non_airgapped_network_rejected_outside_local_mode_and_warns_in_local_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine_bin = tmp.path().join("fake-docker");
+        std::fs::write(
+            &engine_bin,
+            r#"#!/bin/sh
+if [ "$1" = "run" ]; then
+  exit 0
+fi
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&engine_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let engine = DetectedEngine {
+            kind: EngineKind::Docker,
+            binary_path: engine_bin,
+            server_version: "29.10.0".into(),
+            rootless: false,
+        };
+        let in_dir = tmp.path().join("in");
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let spec = ContainerRunSpec {
+            run_id: RunId::from("run-sec-12"),
+            image: OciImageRef::parse("local/test:dev", true).unwrap(),
+            in_dir,
+            out_dir,
+            resources: PluginResources {
+                cpus: 1,
+                memory_mb: 256,
+                gpu: 0,
+                timeout_sec: 10,
+                pids_limit: 32,
+            },
+            network: NetworkPolicy::Allowlist {
+                allow_domains: vec!["eutils.ncbi.nlm.nih.gov".into()],
+            },
+            command_override: None,
+        };
+
+        // 1. Default cloud/edge build_hardened_oci_args and non-workspace runner MUST reject non-airgapped!
+        let err = build_hardened_oci_args(&engine, "biocompass-cloud-job", &spec)
+            .expect_err("cloud/edge must reject allow_domains / non-airgapped execution");
+        assert!(matches!(err, CompassError::AccessDenied(_)));
+
+        let cloud_runner = OciContainerRunner::from_engine(engine.clone());
+        let exec_err = cloud_runner
+            .execute(&spec, None)
+            .await
+            .expect_err("cloud/edge runner must reject non-airgapped execution");
+        assert!(matches!(exec_err, CompassError::AccessDenied(_)));
+
+        // 2. Local native workspace runner permits allow_domains -> --network=bridge and emits a WARN.
+        let stage_root = tmp.path().join("stages");
+        std::fs::create_dir_all(&stage_root).unwrap();
+        let local_runner = cloud_runner
+            .for_native_workspace(&stage_root, "provider-pubkey")
+            .unwrap();
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer_buf = Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_writer(move || SharedVecWriter(Arc::clone(&writer_buf)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let report = local_runner
+            .execute(&spec, None)
+            .await
+            .expect("local workstation runner permits allow_domains with warning");
+        assert_eq!(report.exit_code, 0);
+        let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("WARN") && logs.contains("--network=bridge"),
+            "expected local bridge egress warning, got: {logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sec_13_linux_docker_fallback_emits_startup_warning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_podman = tmp.path().join("no-podman");
+        let fake_docker = tmp.path().join("fake-docker");
+        std::fs::write(
+            &fake_docker,
+            "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then printf '29.10.0|[name=seccomp]\\n'; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer_buf = Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_writer(move || SharedVecWriter(Arc::clone(&writer_buf)))
+            .finish();
+        let detected = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            detect_engine_with_candidates(
+                true,
+                &[missing_podman.to_str().unwrap()],
+                &[fake_docker.to_str().unwrap()],
+            )
+            .await
+            .expect("detect standard docker fallback on Linux")
+        };
+        assert_eq!(detected.kind, EngineKind::Docker);
+        assert!(!detected.rootless);
+        let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("WARN") && logs.to_ascii_lowercase().contains("podman") && logs.to_ascii_lowercase().contains("docker"),
+            "expected Linux Podman->Docker fallback WARN, got: {logs}"
+        );
+    }
+
+    struct SharedVecWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedVecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }
