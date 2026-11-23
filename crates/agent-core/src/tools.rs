@@ -406,6 +406,12 @@ pub async fn execute_agent_tool_with_options(
                         } else {
                             None
                         },
+                        inputs: Vec::new(),
+                        parent_run_id: None,
+                        agent_credential_id: None,
+                        agent_tool_call_id: Some(call.id.clone()),
+                        doc_id: None,
+                        doc_version: None,
                     })
                     .await?;
 

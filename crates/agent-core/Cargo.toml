@@ -13,6 +13,7 @@ async-trait.workspace = true
 axum.workspace = true
 biocompass-core-traits.workspace = true
 biocompass-data-engine.workspace = true
+biocompass-mcp-core.workspace = true
 biocompass-node-runtime.workspace = true
 biocompass-plugin-spec.workspace = true
 chrono.workspace = true

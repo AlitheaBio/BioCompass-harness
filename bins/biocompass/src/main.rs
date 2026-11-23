@@ -378,6 +378,12 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                     offer_id,
                     params: params_val,
                     dataset_grant,
+                    inputs: Vec::new(),
+                    parent_run_id: None,
+                    agent_credential_id: None,
+                    agent_tool_call_id: None,
+                    doc_id: None,
+                    doc_version: None,
                 })
                 .await?;
 
@@ -925,7 +931,7 @@ fn collect_ui_bundle_files(
     total_bytes: &mut u64,
     out: &mut Vec<UiBundleFileUploadDto>,
 ) -> CompassResult<()> {
-    const MAX_UI_BUNDLE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
+    let max_ui_bundle_bytes = biocompass_plugin_spec::MAX_UI_BUNDLE_BYTES;
     let entries = std::fs::read_dir(current)
         .map_err(|e| CompassError::Storage(format!("read UI dir {}: {e}", current.display())))?;
     for entry in entries {
@@ -943,9 +949,9 @@ fn collect_ui_bundle_files(
             collect_ui_bundle_files(root, &path, total_bytes, out)?;
         } else if meta.is_file() {
             *total_bytes = total_bytes.saturating_add(meta.len());
-            if *total_bytes > MAX_UI_BUNDLE_BYTES {
+            if *total_bytes > max_ui_bundle_bytes {
                 return Err(CompassError::Validation(format!(
-                    "plugin UI bundle exceeds maximum size of {MAX_UI_BUNDLE_BYTES} bytes"
+                    "plugin UI bundle exceeds maximum size of {max_ui_bundle_bytes} bytes"
                 )));
             }
             let rel = path

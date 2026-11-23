@@ -207,6 +207,12 @@ image = "127.0.0.1:1/customer/unbundled@sha256:{}"
             offer_id: None,
             params: json!({}),
             dataset_grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
         })
         .await
         .expect_err("non-bundled plugin must fail closed when pinned registry is unreachable");
@@ -227,6 +233,12 @@ image = "127.0.0.1:1/customer/unbundled@sha256:{}"
             offer_id: None,
             params: json!({}),
             dataset_grant: Some(compute_only_grant),
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
         })
         .await
         .expect("bundled plugin should build from bundled Dockerfile when registry is unreachable");

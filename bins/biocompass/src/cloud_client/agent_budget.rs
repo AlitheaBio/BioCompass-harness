@@ -134,18 +134,31 @@ impl BudgetedAgentPort {
             StatusCode::PAYMENT_REQUIRED => {
                 #[derive(Deserialize)]
                 struct PaymentFailure {
+                    #[serde(default)]
+                    code: Option<String>,
                     error: String,
                 }
                 let body: PaymentFailure = resp
                     .json()
                     .await
                     .map_err(|e| CompassError::Internal(format!("decode payment error: {e}")))?;
-                // The current ledger also uses 402 for billing limits and storage faults.
-                if !body
-                    .error
-                    .starts_with("payment or ACT ledger error: insufficient ACT balance: need ")
-                {
-                    return Err(CompassError::Payment(body.error));
+                let parsed_code = body
+                    .code
+                    .as_deref()
+                    .and_then(biocompass_core_traits::ErrorCode::parse);
+                let is_insufficient = parsed_code
+                    == Some(biocompass_core_traits::ErrorCode::InsufficientFunds)
+                    || (parsed_code.is_none()
+                        && body
+                            .error
+                            .contains(biocompass_core_traits::ERR_INSUFFICIENT_FUNDS));
+                if !is_insufficient {
+                    return Err(match parsed_code {
+                        Some(code) if code.is_domain_specific() => {
+                            CompassError::coded(code, body.error)
+                        }
+                        _ => CompassError::Payment(body.error),
+                    });
                 }
                 Ok((
                     AdmissionStatus::InsufficientCredits,

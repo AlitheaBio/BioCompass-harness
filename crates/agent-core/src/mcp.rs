@@ -1,7 +1,8 @@
 //! Ephemeral per-turn loopback Streamable HTTP MCP server (`127.0.0.1:0/mcp/<token>`).
 //!
-//! Exposes BioCompass's `allowed_tool_definitions()` to local ACP / subscription CLI agents
-//! strictly through `execute_agent_tool(...)`, preserving:
+//! Thin loopback adapter delegating JSON-RPC 2.0 framing, protocol version negotiation,
+//! and method dispatch to `biocompass-mcp-core`, while exposing `allowed_tool_definitions_for(...)`
+//! strictly through `execute_agent_tool_with_options(...)`, preserving:
 //! - DatasetGrant + DuckDB masking enforcement
 //! - BlobStore spill above `spill_threshold_bytes`
 //! - `SessionStore` audit logging (`ToolCall` / `ToolResult`)
@@ -14,6 +15,7 @@ use crate::tools::{
     AgentExecutionPort, allowed_tool_definitions_for, execute_agent_tool_with_options,
     spill_tool_output_if_needed,
 };
+use async_trait::async_trait;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -23,7 +25,10 @@ use biocompass_core_traits::{
     BlobStore, CompassError, CompassResult, DatasetGrant, OrgId, RunQuote, SessionEventKind,
     SessionId, SessionStore,
 };
-use serde::Deserialize;
+use biocompass_mcp_core::{
+    CallToolResult, DispatchOutcome, JsonRpcErrorObject, JsonRpcRequest, McpErrorCode, ServerInfo,
+    ToolAnnotations, ToolDefinition, ToolHost, dispatch_jsonrpc,
+};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -185,51 +190,180 @@ async fn method_not_allowed() -> StatusCode {
     StatusCode::METHOD_NOT_ALLOWED
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-fn json_rpc_ok(id: Value, result: Value) -> Response {
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    });
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        )],
-        Json(body),
-    )
-        .into_response()
-}
-
-fn json_rpc_err(id: Value, code: i64, message: impl Into<String>) -> Response {
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message.into(),
+#[async_trait]
+impl ToolHost for McpAppState {
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo {
+            name: "biocompass-mcp".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
         }
-    });
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        )],
-        Json(body),
-    )
-        .into_response()
+    }
+
+    async fn list_tools(&self) -> Result<Vec<ToolDefinition>, JsonRpcErrorObject> {
+        let tools = allowed_tool_definitions_for(self.allow_scaffold)
+            .into_iter()
+            .map(|t| {
+                let read_only = matches!(
+                    t.name.as_str(),
+                    "list_catalogs"
+                        | "query_catalog"
+                        | "list_plugins"
+                        | "get_plugin_details"
+                        | "list_session_artifacts"
+                );
+                ToolDefinition {
+                    name: t.name,
+                    description: t.description,
+                    input_schema: t.input_schema,
+                    annotations: Some(if read_only {
+                        ToolAnnotations::read_only()
+                    } else {
+                        ToolAnnotations::mutating(false)
+                    }),
+                }
+            })
+            .collect();
+        Ok(tools)
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+    ) -> Result<CallToolResult, JsonRpcErrorObject> {
+        if !allowed_tool_definitions_for(self.allow_scaffold)
+            .iter()
+            .any(|t| t.name == name)
+        {
+            let err_text = serde_json::to_string(&json!({
+                "error": format!("tool '{name}' is not allowed or requires explicit user consent")
+            }))
+            .unwrap_or_default();
+            return Ok(CallToolResult::error_text(err_text));
+        }
+
+        let call_id = format!("mcp_{}", Uuid::new_v4().simple());
+        let tc = LlmToolCall {
+            id: call_id,
+            name: name.to_owned(),
+            arguments,
+        };
+
+        self.session_store
+            .append_event(
+                &self.session_id,
+                SessionEventKind::ToolCall,
+                &tc.name,
+                json!({
+                    "id": tc.id,
+                    "arguments": tc.arguments,
+                    "via": "mcp",
+                }),
+            )
+            .await
+            .map_err(|err| {
+                JsonRpcErrorObject::new(
+                    McpErrorCode::InternalError,
+                    format!("persist ToolCall: {err}"),
+                )
+            })?;
+
+        if let Some(tx) = &self.stream_tx {
+            let _ = tx
+                .send(AgentStreamEvent::ToolCall {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                })
+                .await;
+        }
+
+        let raw_val = execute_agent_tool_with_options(
+            &tc,
+            &self.org_id,
+            &self.session_id,
+            self.active_grant.as_ref(),
+            self.execution_port.as_ref(),
+            self.session_store.as_ref(),
+            self.blob_store.as_ref(),
+            &self.scaffold_root_dir,
+            self.stream_tx.as_ref(),
+            self.allow_scaffold,
+        )
+        .await;
+
+        {
+            let mut metrics = self.metrics.lock().await;
+            metrics.tool_calls_executed += 1;
+            if let Some(quote_val) = raw_val.get("quote")
+                && let Ok(q) = serde_json::from_value::<RunQuote>(quote_val.clone())
+            {
+                metrics.prepared_quotes.push(q);
+            }
+        }
+
+        let raw_str = serde_json::to_string(&raw_val).map_err(|err| {
+            JsonRpcErrorObject::new(
+                McpErrorCode::InternalError,
+                format!("encode tool result: {err}"),
+            )
+        })?;
+
+        let model_visible = spill_tool_output_if_needed(
+            self.blob_store.as_ref(),
+            &self.session_id,
+            &tc.id,
+            &raw_str,
+            self.spill_threshold_bytes,
+        )
+        .await
+        .map_err(|err| {
+            JsonRpcErrorObject::new(
+                McpErrorCode::InternalError,
+                format!("spill tool result: {err}"),
+            )
+        })?;
+
+        self.session_store
+            .append_event(
+                &self.session_id,
+                SessionEventKind::ToolResult,
+                &model_visible,
+                json!({
+                    "tool_call_id": tc.id,
+                    "tool_name": tc.name,
+                    "raw_bytes": raw_str.len(),
+                    "via": "mcp",
+                }),
+            )
+            .await
+            .map_err(|err| {
+                JsonRpcErrorObject::new(
+                    McpErrorCode::InternalError,
+                    format!("persist ToolResult: {err}"),
+                )
+            })?;
+
+        if let Some(tx) = &self.stream_tx {
+            let short_preview: String = model_visible.chars().take(240).collect();
+            let _ = tx
+                .send(AgentStreamEvent::ToolResult {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    preview: short_preview,
+                })
+                .await;
+        }
+
+        let is_error = raw_val.get("error").is_some()
+            && raw_val.get("ok").and_then(Value::as_bool) != Some(true);
+
+        Ok(if is_error {
+            CallToolResult::error_text(model_visible)
+        } else {
+            CallToolResult::text(model_visible)
+        })
+    }
 }
 
 async fn handle_mcp_post(
@@ -241,205 +375,16 @@ async fn handle_mcp_post(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    // Notifications (no `id`) do not expect a JSON-RPC response body.
-    let Some(id) = req.id else {
-        return StatusCode::ACCEPTED.into_response();
-    };
-
-    match req.method.as_str() {
-        "initialize" => {
-            let requested = req
-                .params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .filter(|v| v.starts_with("2024-") || v.starts_with("2025-"))
-                .unwrap_or("2024-11-05");
-            json_rpc_ok(
-                id,
-                json!({
-                    "protocolVersion": requested,
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": "biocompass-mcp",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    }
-                }),
-            )
-        }
-        "ping" => json_rpc_ok(id, json!({})),
-        "tools/list" => {
-            let tools: Vec<Value> = allowed_tool_definitions_for(state.allow_scaffold)
-                .into_iter()
-                .map(|t| {
-                    let read_only = matches!(
-                        t.name.as_str(),
-                        "list_catalogs"
-                            | "query_catalog"
-                            | "list_plugins"
-                            | "get_plugin_details"
-                            | "list_session_artifacts"
-                    );
-                    json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "inputSchema": t.input_schema,
-                        "annotations": {
-                            "readOnlyHint": read_only,
-                            "destructiveHint": false,
-                            "openWorldHint": false,
-                        }
-                    })
-                })
-                .collect();
-            json_rpc_ok(id, json!({ "tools": tools }))
-        }
-        "tools/call" => handle_tools_call(&state, id, &req.params).await,
-        _ => json_rpc_err(id, -32601, format!("method not found: {}", req.method)),
-    }
-}
-
-async fn handle_tools_call(state: &McpAppState, id: Value, params: &Value) -> Response {
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
-        return json_rpc_err(id, -32602, "tools/call requires params.name");
-    };
-
-    if !allowed_tool_definitions_for(state.allow_scaffold)
-        .iter()
-        .any(|t| t.name == name)
-    {
-        return json_rpc_ok(
-            id,
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&json!({
-                        "error": format!("tool '{name}' is not allowed or requires explicit user consent")
-                    })).unwrap_or_default(),
-                }],
-                "isError": true,
-            }),
-        );
-    }
-
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    let call_id = format!("mcp_{}", Uuid::new_v4().simple());
-    let tc = LlmToolCall {
-        id: call_id.clone(),
-        name: name.to_owned(),
-        arguments: arguments.clone(),
-    };
-
-    if let Err(err) = state
-        .session_store
-        .append_event(
-            &state.session_id,
-            SessionEventKind::ToolCall,
-            &tc.name,
-            json!({
-                "id": tc.id,
-                "arguments": tc.arguments,
-                "via": "mcp",
-            }),
+    match dispatch_jsonrpc(&state, req).await {
+        DispatchOutcome::Notification => StatusCode::ACCEPTED.into_response(),
+        DispatchOutcome::Response { response, .. } => (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(response),
         )
-        .await
-    {
-        return json_rpc_err(id, -32603, format!("persist ToolCall: {err}"));
+            .into_response(),
     }
-
-    if let Some(tx) = &state.stream_tx {
-        let _ = tx
-            .send(AgentStreamEvent::ToolCall {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            })
-            .await;
-    }
-
-    let raw_val = execute_agent_tool_with_options(
-        &tc,
-        &state.org_id,
-        &state.session_id,
-        state.active_grant.as_ref(),
-        state.execution_port.as_ref(),
-        state.session_store.as_ref(),
-        state.blob_store.as_ref(),
-        &state.scaffold_root_dir,
-        state.stream_tx.as_ref(),
-        state.allow_scaffold,
-    )
-    .await;
-
-    {
-        let mut metrics = state.metrics.lock().await;
-        metrics.tool_calls_executed += 1;
-        if let Some(quote_val) = raw_val.get("quote")
-            && let Ok(q) = serde_json::from_value::<RunQuote>(quote_val.clone())
-        {
-            metrics.prepared_quotes.push(q);
-        }
-    }
-
-    let raw_str = match serde_json::to_string(&raw_val) {
-        Ok(s) => s,
-        Err(err) => return json_rpc_err(id, -32603, format!("encode tool result: {err}")),
-    };
-
-    let model_visible = match spill_tool_output_if_needed(
-        state.blob_store.as_ref(),
-        &state.session_id,
-        &tc.id,
-        &raw_str,
-        state.spill_threshold_bytes,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(err) => return json_rpc_err(id, -32603, format!("spill tool result: {err}")),
-    };
-
-    if let Err(err) = state
-        .session_store
-        .append_event(
-            &state.session_id,
-            SessionEventKind::ToolResult,
-            &model_visible,
-            json!({
-                "tool_call_id": tc.id,
-                "tool_name": tc.name,
-                "raw_bytes": raw_str.len(),
-                "via": "mcp",
-            }),
-        )
-        .await
-    {
-        return json_rpc_err(id, -32603, format!("persist ToolResult: {err}"));
-    }
-
-    if let Some(tx) = &state.stream_tx {
-        let short_preview: String = model_visible.chars().take(240).collect();
-        let _ = tx
-            .send(AgentStreamEvent::ToolResult {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                preview: short_preview,
-            })
-            .await;
-    }
-
-    let is_error = raw_val.get("error").is_some()
-        && raw_val.get("ok").and_then(Value::as_bool) != Some(true);
-
-    json_rpc_ok(
-        id,
-        json!({
-            "content": [{
-                "type": "text",
-                "text": model_visible,
-            }],
-            "isError": is_error,
-        }),
-    )
 }

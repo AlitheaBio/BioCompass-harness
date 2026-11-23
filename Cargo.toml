@@ -5,6 +5,7 @@ members = [
     "crates/data-engine",
     "crates/oci-runner",
     "crates/node-runtime",
+    "crates/mcp-core",
     "crates/agent-core",
     "bins/biocompass",
 ]
@@ -33,6 +34,7 @@ biocompass-plugin-spec = { path = "crates/plugin-spec" }
 biocompass-data-engine = { path = "crates/data-engine" }
 biocompass-oci-runner = { path = "crates/oci-runner" }
 biocompass-node-runtime = { path = "crates/node-runtime" }
+biocompass-mcp-core = { path = "crates/mcp-core" }
 biocompass-agent-core = { path = "crates/agent-core" }
 
 # Pinned AlitheaBio/froglet commit SHA: bc4c14b036d0d7923a652dfd439bb81da12b558b (tag: v2-operator-ledger.1)

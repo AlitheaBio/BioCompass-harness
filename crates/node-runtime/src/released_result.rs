@@ -113,6 +113,7 @@ pub fn verify_released_result_commitment(
             dataset_digest,
             run.grant.as_ref(),
             curated,
+            &run.inputs,
         )? == run.quote.workload_hash)
     };
     if !workload_matches(false)? && !workload_matches(true)? {

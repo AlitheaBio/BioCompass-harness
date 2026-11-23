@@ -283,6 +283,12 @@ type="object"
                     offer_id: None,
                     params: json!({}),
                     dataset_grant: None,
+                    inputs: Vec::new(),
+                    parent_run_id: None,
+                    agent_credential_id: None,
+                    agent_tool_call_id: None,
+                    doc_id: None,
+                    doc_version: None,
                 }
             })
             .await?;
