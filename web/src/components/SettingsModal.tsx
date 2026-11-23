@@ -1,4 +1,5 @@
 import { AppDistributionSettings } from "./AppDistributionSettings";
+import { MarketplaceSyncCard } from "./MarketplaceSyncCard";
 import { PersonalAccountSettings } from "./PersonalAccountSettings";
 import React, { useEffect, useState } from "react";
 import { WorkspaceSettings } from "./WorkspaceSettings";
@@ -35,6 +36,7 @@ import {
   type LedgerState,
   type LlmConfigResponse,
   type LlmWireProtocol,
+  type MarketplaceStatus,
   type PluginVersionRecord,
   type ProviderControlSpec,
   type ScaffoldResult,
@@ -73,6 +75,8 @@ export function SettingsModal({
   scaffoldOutput,
   onOpenPluginInIde,
   onLlmConfigChanged,
+  marketplaceStatus,
+  onMarketplaceStatusChanged,
   onClose,
 }: {
   open: boolean;
@@ -100,6 +104,8 @@ export function SettingsModal({
     options?: { ide?: string; custom_command?: string },
   ) => Promise<string>;
   onLlmConfigChanged?: (updated?: LlmConfigResponse) => Promise<void> | void;
+  marketplaceStatus?: MarketplaceStatus | null;
+  onMarketplaceStatusChanged?: (updated: MarketplaceStatus) => void;
   onClose: () => void;
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -639,6 +645,11 @@ export function SettingsModal({
               bearer={workspaceBearer} onBearer={onWorkspaceBearer} />}
             {section === "general" && (
               <div className="bc-settings-stack">
+                <MarketplaceSyncCard
+                  isLocalMode={health?.mode === "local"}
+                  status={marketplaceStatus ?? health?.marketplace_status ?? null}
+                  onStatusChanged={onMarketplaceStatusChanged}
+                />
                 <AppDistributionSettings local={health?.mode === "local"} />
                 <div>
                   <div className="bc-field-label" style={{ marginBottom: 8 }}>

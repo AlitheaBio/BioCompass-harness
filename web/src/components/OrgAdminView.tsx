@@ -464,14 +464,14 @@ export function OrgAdminView({
     try {
       const res = await enrollNode({
         node_id: nodeIdInput.trim(),
-        mode: "hospital-edge",
+        mode: "provider-edge",
         org_id: principal.org_id,
         provider_pubkey: publicKey,
       });
       setCreatedNode(res);
       setNodeIdInput("");
       setNodePublicKey("");
-      setStatusMsg(`Enrolled hospital-edge node ${res.node_id}.`);
+      setStatusMsg(`Enrolled provider-edge node ${res.node_id}.`);
       await refreshAdminLists();
     } catch (err: unknown) {
       setError(formatErrorInline(err));
@@ -501,7 +501,7 @@ export function OrgAdminView({
     { id: "grants", label: "Dataset Grants", adminOnly: true },
     { id: "offers", label: "Dataset Offers" },
     { id: "module-offers", label: "Module Offers" },
-    { id: "nodes", label: "Hospital-Edge Nodes", adminOnly: true },
+    { id: "nodes", label: "Provider-Edge Nodes", adminOnly: true },
     { id: "audit", label: "Audit Trail", adminOnly: true },
   ];
 
@@ -1496,9 +1496,12 @@ export function OrgAdminView({
             <div className="bc-card">
               <div className="bc-card-header">
                 <div>
-                  <span className="bc-card-title">Enroll Hospital-Edge Worker Node</span>
+                  <span className="bc-card-title">Enroll Provider-Edge Worker Node</span>
                   <p className="bc-caption" style={{ marginTop: 2 }}>
-                    Register the worker’s own signing key to issue its outbound connection credential.
+                    Self-enroll an org-isolated <code className="mono">provider-edge</code> node bound to{" "}
+                    <span className="mono">{principal.org_id}</span>. Provider nodes receive zero Alithea
+                    database or S3 credentials and execute only this organization&apos;s offers or
+                    consented buyer inputs (non-demo tiers only).
                   </p>
                 </div>
               </div>
@@ -1520,7 +1523,7 @@ export function OrgAdminView({
                     required
                     data-testid="enroll-edge-node-id"
                     className="bc-input mono"
-                    placeholder="hospital-edge-node-01"
+                    placeholder="provider-edge-node-01"
                     value={nodeIdInput}
                     onChange={(e) => setNodeIdInput(e.target.value)}
                   />
@@ -1546,7 +1549,7 @@ export function OrgAdminView({
                   disabled={busy}
                 >
                   <IconFrogletNode size={14} />
-                  <span>Enroll Edge Node</span>
+                  <span>Enroll Provider-Edge Node</span>
                 </button>
               </form>
 
@@ -1590,7 +1593,7 @@ export function OrgAdminView({
                 <span className="bc-card-title">Organization Nodes ({nodes.length})</span>
               </div>
               {nodes.length === 0 ? (
-                <div className="bc-empty-note">No hospital-edge nodes enrolled yet.</div>
+                <div className="bc-empty-note">No provider-edge nodes enrolled yet.</div>
               ) : (
                 <div className="table-scroll">
                   <table className="data-table">

@@ -1,3 +1,30 @@
+export type MarketplaceSyncState = "air-gapped" | "disconnected" | "connected" | "stale";
+
+export type MarketplaceConsentDecision = "unset" | "accepted" | "declined";
+
+export interface MarketplaceOfferSummary {
+  id: string;
+  kind: string;
+  title: string;
+  version?: string | null;
+  provider_org?: string | null;
+}
+
+export interface MarketplaceStatus {
+  state: MarketplaceSyncState;
+  consent: MarketplaceConsentDecision;
+  consent_source: string;
+  prompt_required: boolean;
+  airgapped: boolean;
+  hub_url: string;
+  default_hub_url: string;
+  decided_at?: string | null;
+  last_synced_at?: string | null;
+  last_error?: string | null;
+  feed_offer_count: number;
+  offers_preview?: MarketplaceOfferSummary[];
+}
+
 export interface HealthStatus {
   status: string;
   version: string;
@@ -11,6 +38,8 @@ export interface HealthStatus {
   catalog_count: number;
   plugin_count: number;
   workspace_hub_url?: string | null;
+  marketplace_prompt_required?: boolean;
+  marketplace_status?: MarketplaceStatus | null;
 }
 
 export type GrantAccessLevel = "none" | "compute_only" | "rows";
@@ -323,6 +352,9 @@ export interface RunQuote {
   workload_hash: string;
   dataset_grant_summary: string | null;
   execution_notice?: string | null;
+  serving_org_id?: string | null;
+  external_provider_org?: string | null;
+  external_provider_notice?: string | null;
   froglet_quote: Record<string, unknown>;
   expires_at: string;
 }
@@ -862,7 +894,7 @@ export interface UpdateTierInput {
   default_dataset_offer_ids?: string[];
 }
 
-export type NodeMode = "cloud-pool" | "hospital-edge";
+export type NodeMode = "cloud-pool" | "query-provider" | "provider-edge" | "hospital-edge";
 
 export interface NodeSummaryRecord {
   node_id: string;
@@ -883,6 +915,29 @@ export interface CreatedNodeEnrollment {
   provider_pubkey: string;
   mode: NodeMode;
   raw_credential: string;
+}
+
+export type FederationPeerStatus = "pending" | "approved" | "rejected" | "suspended";
+
+export interface FederationPeerRecord {
+  id: string;
+  peer_url: string;
+  peer_pubkey: string;
+  org_name: string;
+  status: FederationPeerStatus;
+  requested_at: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  last_sync_at?: string | null;
+  last_error?: string | null;
+  enabled: boolean;
+  role: string;
+  label: string;
+  origin: string;
+  backchannel: string;
+  home_org: string;
+  destination_org: string;
+  archive_enabled: boolean;
 }
 
 export interface EnumerationMonitorEntry {

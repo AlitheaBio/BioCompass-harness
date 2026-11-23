@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cancelRun, confirmRun, formatErrorInline, prepareRun } from "../api";
+import { getExternalProviderConsentInfo } from "../milestoneBPolicy";
 import { IconCheck, IconCopy, IconRuns, IconShield } from "./Icons";
 import { ScientificViews } from "./ScientificViews";
 import {
@@ -274,8 +275,16 @@ export function ModuleApiTab({
   currentReviewInputs.current = reviewInputs;
   const [reviewed, setReviewed] = useState<{ quote: RunQuote; inputs: string } | null>(null);
   const preparedQuote = reviewed?.inputs === reviewInputs ? reviewed.quote : null;
+  const preparedExternalProvider = preparedQuote
+    ? getExternalProviderConsentInfo(preparedQuote)
+    : null;
+  const [externalQuoteConsentAck, setExternalQuoteConsentAck] = useState(false);
   const confirmingQuote = useRef<string | null>(null);
   const [preparingQuote, setPreparingQuote] = useState(false);
+
+  useEffect(() => {
+    setExternalQuoteConsentAck(false);
+  }, [preparedQuote?.run_id]);
 
   const [snippetLang, setSnippetLang] = useState<SnippetLanguage>("curl");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -668,6 +677,41 @@ export function ModuleApiTab({
                 )}
             </div>
 
+            {preparedExternalProvider && (
+              <div
+                data-testid="quote-external-provider-banner"
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: "var(--bc-radius-sm)",
+                  background: "var(--bc-danger-soft)",
+                  border: "1px solid var(--bc-danger)",
+                  fontSize: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>
+                  External Provider Node · {preparedExternalProvider.providerLabel} (
+                  <span className="mono">{preparedExternalProvider.nodeId}</span>)
+                </div>
+                <div>{preparedExternalProvider.notice}</div>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 6, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    data-testid="quote-external-provider-checkbox"
+                    checked={externalQuoteConsentAck}
+                    onChange={(e) => setExternalQuoteConsentAck(e.target.checked)}
+                    disabled={testing}
+                  />
+                  <span>
+                    I consent to sending my parameters/uploads to{" "}
+                    <strong>{preparedExternalProvider.providerLabel}</strong>.
+                  </span>
+                </label>
+              </div>
+            )}
+
             {preparedQuote.execution_notice && (
               <div
                 data-testid="quote-execution-notice"
@@ -697,7 +741,7 @@ export function ModuleApiTab({
                 type="button"
                 data-testid={isFocused ? "confirm-quote-run-btn" : undefined}
                 className="bc-btn bc-btn-primary bc-btn-sm"
-                disabled={testing}
+                disabled={testing || (preparedExternalProvider !== null && !externalQuoteConsentAck)}
                 onClick={() => void handleConfirmPreparedQuote()}
               >
                 {testing ? "Executing Container…" : "Confirm & Execute"}

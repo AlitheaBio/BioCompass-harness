@@ -20,6 +20,7 @@ import type {
   DatasetOfferRequest,
   DatasetOfferSubscription,
   EnumerationMonitorEntry,
+  FederationPeerRecord,
   FilterExpr,
   FrogletVerifyReport,
   GrantAccessLevel,
@@ -31,6 +32,7 @@ import type {
   LedgerState,
   LedgerTx,
   LlmConfigResponse,
+  MarketplaceStatus,
   ModuleDownload,
   ModuleOffer,
   FederatedModuleOffer,
@@ -1875,5 +1877,79 @@ export async function fetchEnumerationMonitor(days = 30): Promise<{
 }> {
   return apiFetch<{ lookback_days: number; entries: EnumerationMonitorEntry[] }>(
     `/api/v1/admin/enumeration-monitor?days=${encodeURIComponent(String(days))}`,
+  );
+}
+
+export async function fetchMarketplaceStatus(): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/status");
+}
+
+export async function updateMarketplaceConsent(payload: {
+  decision: "accepted" | "declined";
+  hub_url?: string;
+  sync_now?: boolean;
+}): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/consent", {
+    method: "PUT",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function syncMarketplaceNow(): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/sync", {
+    method: "POST",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchAdminFederationPeers(): Promise<FederationPeerRecord[]> {
+  const data = await apiFetch<{ peers: FederationPeerRecord[] }>("/api/v1/admin/federation/peers");
+  return data.peers;
+}
+
+export async function approveAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function rejectAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function suspendAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/suspend`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function syncAdminFederationPeer(
+  peerId: string,
+): Promise<{ peer: FederationPeerRecord; synced_offers: number }> {
+  return apiFetch<{ peer: FederationPeerRecord; synced_offers: number }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/sync`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
   );
 }

@@ -1,4 +1,10 @@
 import { setPrepareCaller } from "./prepareRequest";
+import {
+  formatMarketplaceSyncBadge,
+  requiresExternalProviderConsent,
+  shouldPromptQuoteConsent,
+  shouldShowMarketplaceConsentModal,
+} from "./milestoneBPolicy";
 import { buildStagedPluginChatDraft } from "./pluginBridgePolicy";
 import { useWorkspaceReadHandle, workspaceReadStorageChanged } from "./workspaceReadSession";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -55,6 +61,7 @@ import { ShareResultButton, SharedResultFiles } from "./components/ResultSharing
 import { SavedRunDialog } from "./components/SavedRunDialog";
 import { WorkspaceModuleVersions } from "./components/WorkspaceModuleVersions";
 import { ArchiveResult } from "./components/ArchiveResult";
+import { MarketplaceConsentModal } from "./components/MarketplaceConsentModal";
 import { PaidRunConsent } from "./components/PaidRunConsent";
 import { InstalledWorkspaceResults } from "./components/InstalledWorkspaceResults";
 import { WorkspaceModuleDownloads } from "./components/WorkspaceModuleDownloads";
@@ -114,6 +121,7 @@ import {
   type HealthStatus,
   type LedgerState,
   type LlmConfigResponse,
+  type MarketplaceStatus,
   type PeptideRecord,
   type PluginSummary,
   type ModuleOffer,
@@ -548,6 +556,16 @@ export function App() {
   const isCloudMode = health?.mode === "cloud-web" || health?.mode === "cloud";
   useEffect(() => { setPrepareCaller(isCloudMode ? principal : null); }, [isCloudMode, principal]);
 
+  const [marketplaceStatus, setMarketplaceStatus] = useState<MarketplaceStatus | null>(null);
+  const [marketplaceModalDismissed, setMarketplaceModalDismissed] = useState(false);
+  const effectiveMarketplaceStatus = marketplaceStatus ?? health?.marketplace_status ?? null;
+  const marketplaceBadge = formatMarketplaceSyncBadge(effectiveMarketplaceStatus);
+  const showMarketplaceConsentModal = shouldShowMarketplaceConsentModal(
+    health,
+    effectiveMarketplaceStatus,
+    marketplaceModalDismissed,
+  );
+
   const [availableUpdate, setAvailableUpdate] = useState<string>();
   useEffect(() => {
     if (health?.mode !== "local") return;
@@ -834,6 +852,9 @@ export function App() {
       try {
         const h = await fetchHealth();
         setHealth(h);
+        if (h.marketplace_status) {
+          setMarketplaceStatus(h.marketplace_status);
+        }
         const cloud = h.mode === "cloud-web" || h.mode === "cloud";
         try {
           const me = await fetchWhoami();
@@ -1159,7 +1180,7 @@ export function App() {
           w.pluginId === quote.plugin_id && w.plugin?.manifest.version === quote.plugin_version
             ? { ...w, params: cleanParams } : w));
       }
-      if (quote.estimated_cost_act !== 0) {
+      if (shouldPromptQuoteConsent(quote)) {
         queuePaidQuote(quote, params);
         if (!params) {
           void fetchRun(quote.run_id).then((run) => {
@@ -1235,7 +1256,7 @@ export function App() {
         marketplace_offer_id: plugin.marketplace_offer_id,
       });
       if (!approvalScope || currentApprovalScope.current !== approvalScope || approvalSession.current !== sessionGeneration) return null;
-      if (quote.estimated_cost_act !== 0) {
+      if (shouldPromptQuoteConsent(quote)) {
         queuePaidQuote(quote, effectiveParams);
         return null;
       }
@@ -3154,6 +3175,45 @@ export function App() {
             )}
           </div>
 
+          {health && effectiveMarketplaceStatus && (
+            <button
+              type="button"
+              className="bc-nav-item"
+              data-testid="sidebar-marketplace-sync-pill"
+              data-sync-state={marketplaceBadge.state}
+              onClick={() => openSettings("general")}
+              title={`Global Marketplace: ${marketplaceBadge.label}${effectiveMarketplaceStatus.last_synced_at ? ` · Last synced ${new Date(effectiveMarketplaceStatus.last_synced_at).toLocaleString()}` : ""}`}
+            >
+              <span className="bc-nav-item-left" style={{ minWidth: 0 }}>
+                <span
+                  aria-hidden="true"
+                  className="bc-status-dot"
+                  style={{
+                    background:
+                      marketplaceBadge.tone === "success"
+                        ? "var(--bc-success, #22c55e)"
+                        : marketplaceBadge.tone === "warn"
+                          ? "var(--bc-warn, #f59e0b)"
+                          : "var(--bc-text-muted, #94a3b8)",
+                  }}
+                />
+                {!sidebarCollapsed && (
+                  <span
+                    className="mono"
+                    style={{
+                      fontSize: 11.5,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Marketplace · {marketplaceBadge.label}
+                  </span>
+                )}
+              </span>
+            </button>
+          )}
+
           {isCloudMode && principal && (
             <div data-testid="cloud-principal-pill">
               {profileUserId && (
@@ -3423,7 +3483,7 @@ export function App() {
                                 <p className="bc-caption" role="status">{parsedResult.message}</p>
                               )}
                               <div className="bc-chat-module-actions">
-                                {isPending && quoteObj && (
+                                {isPending && quoteObj && !requiresExternalProviderConsent(quoteObj) && (
                                   <button
                                     type="button"
                                     className="bc-btn bc-btn-primary bc-btn-sm"
@@ -3432,6 +3492,11 @@ export function App() {
                                   >
                                     {isConfirmingRun ? "Running…" : `Approve ${formatMilliAct(quoteObj.estimated_cost_act)} run`}
                                   </button>
+                                )}
+                                {isPending && quoteObj && requiresExternalProviderConsent(quoteObj) && (
+                                  <span className="bc-badge bc-badge-warn">
+                                    External provider consent required in modal
+                                  </span>
                                 )}
                                 {matchedRun && (
                                   <span
@@ -4305,10 +4370,46 @@ export function App() {
             updated ? Promise.resolve(updated) : fetchLlmConfig(),
           ]);
           setHealth(freshHealth);
+          if (freshHealth.marketplace_status) {
+            setMarketplaceStatus(freshHealth.marketplace_status);
+          }
           setLlmConfig(freshLlm);
+        }}
+        marketplaceStatus={effectiveMarketplaceStatus}
+        onMarketplaceStatusChanged={(updated) => {
+          setMarketplaceStatus(updated);
+          setHealth((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  marketplace_prompt_required: updated.prompt_required,
+                  marketplace_status: updated,
+                }
+              : prev,
+          );
         }}
         onClose={() => setSettingsOpen(false)}
       />
+
+      {showMarketplaceConsentModal && effectiveMarketplaceStatus && (
+        <MarketplaceConsentModal
+          status={effectiveMarketplaceStatus}
+          onResolved={(updated) => {
+            setMarketplaceStatus(updated);
+            setMarketplaceModalDismissed(false);
+            setHealth((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    marketplace_prompt_required: updated.prompt_required,
+                    marketplace_status: updated,
+                  }
+                : prev,
+            );
+          }}
+          onDismissForSession={() => setMarketplaceModalDismissed(true)}
+        />
+      )}
 
       {pendingQuote && <PaidRunConsent key={pendingQuote.run_id} quote={pendingQuote}
         params={pendingQuoteParams} busy={isConfirmingRun} error={paidQuotes[0]?.error}
