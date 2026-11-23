@@ -3,6 +3,7 @@
 mod app_distribution;
 pub mod cloud_client;
 pub mod llm_backends;
+pub mod marketplace;
 mod package_install;
 #[path = "native_import/store.rs"]
 pub mod dataset_store;

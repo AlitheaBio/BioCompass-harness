@@ -903,6 +903,23 @@ impl CompassHubClient {
         Ok(quote)
     }
 
+    /// Decode and validate a prepared `RunQuote` while preserving additive top-level wire metadata
+    /// emitted by `compass-hub` (such as `[A2]` `serving_org_id`, `external_provider_org`, and
+    /// `external_provider_notice` for external `provider-edge` consent).
+    pub(crate) async fn read_bound_quote_json(
+        req: &PrepareRunRequest, response: reqwest::Response,
+    ) -> CompassResult<Value> {
+        let payload: Value = decode_hub_json(response, "POST /api/v1/runs/prepare").await?;
+        let quote: RunQuote = serde_json::from_value(payload.clone())
+            .map_err(|e| CompassError::Internal(format!("decode POST /api/v1/runs/prepare RunQuote: {e}")))?;
+        quote.validate_selection(
+            &req.plugin_id,
+            req.plugin_version.as_deref(),
+            req.offer_id.as_deref(),
+        )?;
+        Ok(payload)
+    }
+
     async fn prepare_bound_quote(&self, req: PrepareRunRequest, execution_id: Option<uuid::Uuid>) -> CompassResult<RunQuote> {
         // In-process agents and SDK callers share the HTTP gateway's quote limit.
         let _permit = self.try_prepare_slot()?;

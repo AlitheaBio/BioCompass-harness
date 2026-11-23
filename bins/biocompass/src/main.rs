@@ -53,6 +53,9 @@ enum Commands {
         mode: String,
         #[arg(long, default_value_t = false)]
         allow_local_dev_tags: bool,
+        /// Disable all outbound marketplace and hub sync connections and suppress the first-run marketplace prompt.
+        #[arg(long, env = "COMPASS_AIRGAPPED", default_value_t = false)]
+        airgapped: bool,
     },
     /// Scaffold a new OCI container plugin from one of the 4 starter templates.
     InitPlugin {
@@ -226,6 +229,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
             data_dir,
             mode,
             allow_local_dev_tags,
+            airgapped,
         } => {
             let deploy_mode = DeploymentMode::parse(&mode)?;
             let dir = data_dir.unwrap_or_else(default_data_dir);
@@ -233,16 +237,28 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 .parse()
                 .map_err(|e| CompassError::Validation(format!("invalid listen address: {e}")))?;
 
-            let installed_workspace = if deploy_mode == DeploymentMode::Local && addr.ip().is_loopback() {
+            let marketplace_cfg =
+                biocompass::marketplace::MarketplaceConfig::from_env(deploy_mode, airgapped);
+            let installed_workspace = if deploy_mode == DeploymentMode::Local
+                && addr.ip().is_loopback()
+                && !marketplace_cfg.airgapped
+            {
                 std::env::var("COMPASS_HUB_URL")
                     .ok()
+                    .filter(|url| !url.trim().is_empty())
                     .map(|url| biocompass::workspace::InstalledWorkspace::open(&dir, &url))
                     .transpose()?
                     .map(std::sync::Arc::new)
             } else {
                 None
             };
-            let mut state = AppState::bootstrap(&dir, deploy_mode, allow_local_dev_tags).await?;
+            let mut state = AppState::bootstrap_with_marketplace(
+                &dir,
+                deploy_mode,
+                allow_local_dev_tags,
+                marketplace_cfg,
+            )
+            .await?;
             if let Some(workspace) = &installed_workspace {
                 workspace.start_sync();
             }

@@ -260,7 +260,7 @@ async fn local_loopback_guard_middleware(
     next.run(req).await
 }
 
-fn require_json_content_type(headers: &HeaderMap) -> Result<(), Response> {
+fn require_json_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -269,18 +269,20 @@ fn require_json_content_type(headers: &HeaderMap) -> Result<(), Response> {
     if ct.as_deref() == Some("application/json") {
         Ok(())
     } else {
-        Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(json!({
-                "error": "Content-Type must be application/json",
-                "code": "UNSUPPORTED_MEDIA_TYPE",
-            })),
-        )
-            .into_response())
+        Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "Content-Type must be application/json",
+                    "code": "UNSUPPORTED_MEDIA_TYPE",
+                })),
+            )
+                .into_response(),
+        ))
     }
 }
 
-fn require_non_simple_upload_content_type(headers: &HeaderMap) -> Result<(), Response> {
+fn require_non_simple_upload_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -288,14 +290,16 @@ fn require_non_simple_upload_content_type(headers: &HeaderMap) -> Result<(), Res
         .map(|s| s.trim().to_ascii_lowercase());
     match ct.as_deref() {
         Some("application/octet-stream" | "application/json") => Ok(()),
-        _ => Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(json!({
-                "error": "Content-Type must be application/octet-stream (CORS-safelisted simple POST types are rejected)",
-                "code": "UNSUPPORTED_MEDIA_TYPE",
-            })),
-        )
-            .into_response()),
+        _ => Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "Content-Type must be application/octet-stream (CORS-safelisted simple POST types are rejected)",
+                    "code": "UNSUPPORTED_MEDIA_TYPE",
+                })),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -472,7 +476,13 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(crate::workspace::routes())
+        .route("/v1/feed", get(proxy_public_marketplace_handler))
+        .route("/v1/artifacts/:hash", get(proxy_public_marketplace_artifact_handler))
+        .route("/v1/registrations", post(proxy_public_marketplace_handler))
         .route("/api/v1/health", get(get_health))
+        .route("/api/v1/marketplace/status", get(get_marketplace_status_handler))
+        .route("/api/v1/marketplace/consent", put(update_marketplace_consent_handler))
+        .route("/api/v1/marketplace/sync", post(sync_marketplace_handler))
         .route("/api/v1/app-distribution", get(crate::app_distribution::discover))
         .route("/api/v1/app-distribution/download", get(crate::app_distribution::download))
         .route("/api/v1/auth/whoami", get(get_whoami_handler))
@@ -692,6 +702,7 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         .await
         .unwrap_or_default();
     let plugins = state.registry.list_plugins().await.unwrap_or_default();
+    let marketplace = state.marketplace.status().await;
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -705,7 +716,108 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         "catalog_count": catalogs.len(),
         "plugin_count": plugins.len(),
         "workspace_hub_url": state.installed_workspace.as_deref().map(|w| w.hub_url()),
+        "marketplace_prompt_required": marketplace.prompt_required,
+        "marketplace_status": marketplace,
     }))
+}
+
+async fn get_marketplace_status_handler(
+    State(state): State<AppState>,
+) -> Json<crate::marketplace::MarketplaceStatusSnapshot> {
+    Json(state.marketplace.status().await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateMarketplaceConsentRequest {
+    decision: crate::marketplace::MarketplaceConsentDecision,
+    #[serde(default)]
+    hub_url: Option<String>,
+    #[serde(default = "default_true")]
+    sync_now: bool,
+}
+
+async fn update_marketplace_consent_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateMarketplaceConsentRequest>,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let snapshot = state
+        .marketplace
+        .set_consent(req.decision, req.hub_url, req.sync_now)
+        .await?;
+    Ok(Json(snapshot).into_response())
+}
+
+async fn sync_marketplace_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let snapshot = state.marketplace.sync_now().await?;
+    Ok(Json(snapshot).into_response())
+}
+
+async fn proxy_public_marketplace_handler(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let Some(hub) = &state.hub_client else {
+        return Err(CompassError::NotFound(
+            "public marketplace routes are only available in cloud-web mode".into(),
+        )
+        .into());
+    };
+    let req_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(|e| CompassError::Validation(format!("invalid HTTP method: {e}")))?;
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    Ok(hub
+        .proxy_raw(req_method, path_and_query, &headers, body.to_vec())
+        .await?)
+}
+
+async fn proxy_public_marketplace_artifact_handler(
+    State(state): State<AppState>,
+    AxumPath(hash): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let Some(hub) = &state.hub_client else {
+        return Err(CompassError::NotFound(
+            "public marketplace routes are only available in cloud-web mode".into(),
+        )
+        .into());
+    };
+    let valid_hash = !hash.is_empty()
+        && hash.len() <= 256
+        && !hash.contains("..")
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.'));
+    if !valid_hash {
+        return Err(CompassError::Validation("invalid marketplace artifact hash".into()).into());
+    }
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/v1/artifacts/");
+    Ok(hub
+        .proxy_raw(reqwest::Method::GET, path_and_query, &headers, Vec::new())
+        .await?)
 }
 
 async fn get_whoami_handler(
@@ -1149,7 +1261,7 @@ async fn install_plugin_handler(
         crate::native_import::operator::authorize(&state, &headers)?;
     }
     if let Err(resp) = require_json_content_type(&headers) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let request: InstallPluginRequest = if body.is_empty() {
         InstallPluginRequest::default()
@@ -1425,7 +1537,7 @@ async fn test_llm_connection_handler(
     }
     crate::native_import::operator::authorize(&state, &headers)?;
     if let Err(resp) = require_json_content_type(&headers) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let previous = state.agent.llm_config().await;
     let target_cfg = match body {
@@ -1987,8 +2099,8 @@ async fn prepare_run_handler(
     if let Some(hub) = &state.hub_client {
         let upstream = hub.request_bound_quote(&request, None, req.workspace_id, req.request_key).await?;
         let retry_after = upstream.headers().get(header::RETRY_AFTER).cloned();
-        let response = match CompassHubClient::read_bound_quote(&request, upstream).await {
-            Ok(quote) => Json(quote).into_response(),
+        let response = match CompassHubClient::read_bound_quote_json(&request, upstream).await {
+            Ok(quote_json) => Json(quote_json).into_response(),
             Err(error) => ApiError::from(error).into_response(),
         };
         return Ok(with_retry_after(response, retry_after));
@@ -2022,7 +2134,7 @@ async fn confirm_run_handler(
     body: Option<Json<ApiConfirmRunRequest>>,
 ) -> ApiResult<Response> {
     if let Err(resp) = require_json_content_type(&headers) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
     let idem = body
@@ -3197,7 +3309,7 @@ async fn import_local_catalog_handler(
     }
     crate::native_import::operator::authorize(&state, &headers)?;
     if let Err(resp) = require_non_simple_upload_content_type(&headers) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     if body.is_empty() {
         return Err(CompassError::Validation("uploaded file body cannot be empty".into()).into());
@@ -4180,5 +4292,572 @@ mod sec_06_tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+}
+
+#[cfg(test)]
+mod milestone_b_tests {
+    use super::*;
+    use crate::cloud_client::CompassHubConfig;
+    use crate::marketplace::{
+        MarketplaceConfig, MarketplaceConsentDecision, MarketplaceSyncState,
+    };
+    use axum::body::Body;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    async fn redeem_owner(app: &Router, link: &str, host: &str) -> String {
+        let ticket = link
+            .split_once("#local-owner=")
+            .expect("owner link fragment")
+            .1
+            .trim();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/local/owner-session")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "ticket": ticket }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        parsed["owner_session"].as_str().unwrap().to_owned()
+    }
+
+    async fn spawn_counting_marketplace_hub() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_feed = Arc::clone(&hits);
+        let hits_art = Arc::clone(&hits);
+        let hits_reg = Arc::clone(&hits);
+
+        let router = Router::new()
+            .route(
+                "/api/v1/health",
+                get(|| async {
+                    Json(json!({
+                        "node_id": "hub-test-node",
+                        "provider_id": "provider-alithea",
+                        "requester_id": "requester-cloud-web",
+                        "container_engine": "mock-hub-engine"
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/grants",
+                get(|| async { Json(json!({ "grants": [] })) }),
+            )
+            .route(
+                "/api/v1/runs/prepare",
+                post(|| async {
+                    let now = chrono::Utc::now();
+                    Json(json!({
+                        "run_id": "run-a2-provider-edge",
+                        "plugin_id": "partner-bio/motif-pro",
+                        "plugin_version": "1.2.0",
+                        "image_ref": format!("ghcr.io/partner/motif-pro@sha256:{}", "b".repeat(64)),
+                        "target_node_id": "provider-edge-zurich-01",
+                        "offer_id": "standard",
+                        "offer_name": "Standard Provider Run",
+                        "base_fee_act": 1000,
+                        "estimated_cost_act": 2500,
+                        "max_input_bytes": 1048576,
+                        "max_output_bytes": 1048576,
+                        "max_runtime_sec": 300,
+                        "max_memory_mb": 2048,
+                        "workload_hash": "c".repeat(64),
+                        "dataset_grant_summary": null,
+                        "froglet_quote": { "schema": "froglet/v1", "type": "quote" },
+                        "expires_at": now,
+                        "serving_org_id": "org-zurich-proteomics",
+                        "external_provider_org": "Zurich Proteomics AG",
+                        "external_provider_notice": "Your run parameters and uploaded files will execute on an external provider-edge node operated by Zurich Proteomics AG."
+                    }))
+                }),
+            )
+            .route(
+                "/v1/feed",
+                get(move |uri: Uri| {
+                    let hits = Arc::clone(&hits_feed);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [(header::ETAG, "\"feed-v1\""), (header::CACHE_CONTROL, "public, max-age=60")],
+                            Json(json!({
+                                "query": uri.query().unwrap_or(""),
+                                "offers": [
+                                    { "id": "mo-1", "kind": "run", "title": "HLA Motif Enrichment", "version": "2.0.0", "provider_org": "org-alithea" },
+                                    { "id": "mo-2", "kind": "download", "title": "Cell Type Annotator", "version": "1.1.0", "provider_org": "org-partner" }
+                                ]
+                            })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/artifacts/:hash",
+                get(move |AxumPath(hash): AxumPath<String>| {
+                    let hits = Arc::clone(&hits_art);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [
+                                (header::CONTENT_TYPE, "application/octet-stream"),
+                                (header::HeaderName::from_static("x-content-sha256"), "deadbeef"),
+                            ],
+                            format!("artifact-bytes:{hash}"),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/registrations",
+                post(move |body: Bytes| {
+                    let hits = Arc::clone(&hits_reg);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        (
+                            StatusCode::CREATED,
+                            [(header::RETRY_AFTER, "5")],
+                            Json(json!({
+                                "status": "pending",
+                                "received": parsed
+                            })),
+                        )
+                    }
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn a1_http_fresh_local_zero_outbound_before_consent_and_persists_decline() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_url.clone(),
+            explicit_hub_url: None,
+            airgapped: false,
+        };
+        let mut state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:18491".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18491";
+        let app = build_router(state);
+        let owner_token = redeem_owner(&app, &link, host).await;
+
+        // 1. Fresh local directory: health + status + plugins make ZERO outbound requests.
+        for uri in ["/api/v1/health", "/api/v1/marketplace/status", "/api/v1/plugins"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).header(header::HOST, host).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "fresh boot must make zero outbound marketplace calls");
+
+        // 2. Sync before consent is rejected (403) with zero outbound traffic.
+        let pre_sync = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/marketplace/sync")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pre_sync.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 3. Unauthenticated consent update is rejected (401).
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 4. Decline persists across restart with ZERO outbound requests.
+        let decline = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"declined"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decline.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // Restart AppState on same data_dir.
+        let mut restarted_state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg,
+        )
+        .await
+        .unwrap();
+        let link2 = restarted_state.enable_local_owner(addr).unwrap().unwrap();
+        let app2 = build_router(restarted_state);
+        let owner_token2 = redeem_owner(&app2, &link2, host).await;
+
+        let status_resp = app2
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/marketplace/status")
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_bytes = axum::body::to_bytes(status_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let status_json: Value = serde_json::from_slice(&status_bytes).unwrap();
+        assert_eq!(status_json["prompt_required"], false);
+        assert_eq!(status_json["consent"], "declined");
+        assert_eq!(status_json["state"], "disconnected");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 5. Explicit accept triggers sync and transitions to connected.
+        let accept = app2
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token2)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted","sync_now":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accept_bytes = axum::body::to_bytes(accept.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let accept_json: Value = serde_json::from_slice(&accept_bytes).unwrap();
+        assert_eq!(accept_json["state"], "connected");
+        assert_eq!(accept_json["consent"], "accepted");
+        assert_eq!(accept_json["feed_offer_count"], 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a1_http_airgapped_suppresses_prompt_and_blocks_all_outbound_calls() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_url.clone(),
+            explicit_hub_url: Some(hub_url),
+            airgapped: true,
+        };
+        let mut state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg,
+        )
+        .await
+        .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:18492".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18492";
+        let app = build_router(state);
+        let owner_token = redeem_owner(&app, &link, host).await;
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        let health_json: Value =
+            serde_json::from_slice(&axum::body::to_bytes(health.into_body(), 1024 * 64).await.unwrap())
+                .unwrap();
+        assert_eq!(health_json["marketplace_prompt_required"], false);
+        assert_eq!(health_json["marketplace_status"]["state"], "air-gapped");
+        assert_eq!(health_json["marketplace_status"]["airgapped"], true);
+
+        let consent = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(consent.status(), StatusCode::FORBIDDEN);
+
+        let sync = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/marketplace/sync")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "air-gapped mode must never contact marketplace");
+    }
+
+    #[tokio::test]
+    async fn a2_and_b1_cloud_web_preserves_external_provider_consent_and_proxies_public_marketplace() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let (hub_client, default_org_id, engine_label) = CompassHubClient::connect(
+            CompassHubConfig {
+                base_url: hub_url.clone(),
+                bundled_plugins_dir: tmp.path().join("bundled"),
+            },
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let hub = Arc::new(hub_client);
+
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        // Verify local mode returns 404 for public /v1/feed.
+        let local_app = build_router(state.clone());
+        let local_feed = local_app
+            .oneshot(Request::builder().uri("/v1/feed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(local_feed.status(), StatusCode::NOT_FOUND);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // Switch state into CloudWeb backed by our mock hub.
+        state.mode = DeploymentMode::CloudWeb;
+        state.default_org_id = default_org_id;
+        state.container_engine_label = engine_label;
+        state.hub_client = Some(Arc::clone(&hub));
+        state.registry = hub.clone();
+        state.dispatcher = hub.clone();
+        state.session_store = hub.clone();
+        state.blob_store = hub.clone();
+        state.payment_gateway = hub;
+        state.marketplace = Arc::new(
+            crate::marketplace::MarketplaceClient::new(
+                tmp.path(),
+                MarketplaceConfig {
+                    mode: DeploymentMode::CloudWeb,
+                    default_hub_url: hub_url.clone(),
+                    explicit_hub_url: Some(hub_url),
+                    airgapped: false,
+                },
+            )
+            .unwrap(),
+        );
+        let cloud_app = build_router(state);
+
+        // [A2] POST /api/v1/runs/prepare preserves serving_org_id, external_provider_org, external_provider_notice.
+        let prep_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/runs/prepare")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "plugin_id": "partner-bio/motif-pro",
+                            "plugin_version": "1.2.0",
+                            "offer_id": "standard",
+                            "params": { "alpha": 1 }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prep_resp.status(), StatusCode::OK);
+        let prep_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(prep_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prep_json["target_node_id"], "provider-edge-zurich-01");
+        assert_eq!(prep_json["serving_org_id"], "org-zurich-proteomics");
+        assert_eq!(prep_json["external_provider_org"], "Zurich Proteomics AG");
+        assert!(
+            prep_json["external_provider_notice"]
+                .as_str()
+                .is_some_and(|s| s.contains("Zurich Proteomics AG"))
+        );
+
+        // [B1] GET /v1/feed proxied with query & headers.
+        let feed_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/feed?kind=run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(feed_resp.status(), StatusCode::OK);
+        assert_eq!(
+            feed_resp.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+            Some("\"feed-v1\"")
+        );
+        let feed_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(feed_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(feed_json["query"], "kind=run");
+        assert_eq!(feed_json["offers"].as_array().map(Vec::len), Some(2));
+
+        // [B1] GET /v1/artifacts/:hash proxied with digest header; traversal rejected.
+        let art_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/artifacts/sha256:0123456789abcdef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(art_resp.status(), StatusCode::OK);
+        assert_eq!(
+            art_resp
+                .headers()
+                .get("x-content-sha256")
+                .and_then(|v| v.to_str().ok()),
+            Some("deadbeef")
+        );
+        let art_body = axum::body::to_bytes(art_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        assert_eq!(&art_body[..], b"artifact-bytes:sha256:0123456789abcdef");
+
+        let bad_art = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/artifacts/bad..hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_art.status(), StatusCode::BAD_REQUEST);
+
+        // [B1] POST /v1/registrations proxied with body & status.
+        let reg_resp = cloud_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/registrations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"peer_url":"https://client.hospital.org"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg_resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            reg_resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("5")
+        );
+        let reg_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(reg_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reg_json["status"], "pending");
+        assert_eq!(reg_json["received"]["peer_url"], "https://client.hospital.org");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+        // Confirm status enum serialization strings match DEV-07 UI contract.
+        assert_eq!(
+            serde_json::to_string(&MarketplaceSyncState::AirGapped).unwrap(),
+            "\"air-gapped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MarketplaceConsentDecision::Accepted).unwrap(),
+            "\"accepted\""
+        );
     }
 }
