@@ -300,6 +300,11 @@ impl OciContainerRunner {
         let args = match self.engine.kind {
             EngineKind::Docker => ["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
             EngineKind::Podman => ["info", "--format", "{{.Host.OS}}/{{.Host.Arch}}"],
+            EngineKind::Kubernetes => {
+                return Err(CompassError::ContainerEngine(
+                    "Kubernetes runner does not use local CLI platform inspection".into(),
+                ));
+            }
         };
         let out = tokio::time::timeout(
             Duration::from_secs(10),

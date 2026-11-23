@@ -1,7 +1,8 @@
-//! `biocompass-oci-runner`: Hardened rootless Podman / VM-isolated Docker OCI container runner
-//! enforcing `/in:ro`, `/out:rw`, `--read-only`, `--user 65532:65532`, `--cap-drop=ALL`,
-//! `--security-opt=no-new-privileges`, `--network=none`, `--pids-limit`, and hard deadlines.
+//! `biocompass-oci-runner`: Hardened container execution seam (`ContainerRunner` + `supervise`),
+//! rootless Podman / VM-isolated Docker OCI runner (`OciContainerRunner` / `LocalOciRunner`),
+//! hardened host-container file mailbox (`mailbox`), and OCI Distribution v1.1 manifest verifier.
 
+pub mod mailbox;
 pub mod registry;
 mod cleanup;
 pub use cleanup::AbandonedContainer;
@@ -11,68 +12,44 @@ mod worker_cache;
 mod image_preparation_tests;
 #[cfg(all(test, unix))]
 mod cleanup_tests;
+#[cfg(test)]
+mod mailbox_tests;
 
-use biocompass_core_traits::{CompassError, CompassResult, OciImageRef, RunId, RunLogEvent};
+use biocompass_core_traits::{CompassError, CompassResult, ErrorCode, OciImageRef, RunId, RunLogEvent};
 use biocompass_core_traits::types::OCI_IMAGE_PREPARATION_TIMEOUT_SECS;
-use biocompass_plugin_spec::{NetworkPolicy, PluginResources};
+use biocompass_plugin_spec::{MAX_CHILD_WAIT_SEC, NetworkPolicy, PluginResources};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+pub use mailbox::{
+    CONTAINER_ARTIFACTS_DIR, CONTAINER_MAILBOX_REPLIES_DIR, CONTAINER_MAILBOX_REQUESTS_DIR,
+    ChildModuleRequest, ChildRunBroker, ChildRunBrokerContext, ChildRunReply,
+    ChildRunStagedArtifact, DEFAULT_MAX_MAILBOX_CALLS, FileMailbox, LiveQueryMailboxRequest,
+    LiveQueryResponder, MAILBOX_CONFIG_REL, MAILBOX_REPLIES_REL, MAILBOX_REQUESTS_REL,
+    MAILBOX_ROOT_REL, MAX_LIVE_QUERY_REQUEST_BYTES, MAX_MAILBOX_REPLY_BYTES,
+    MAX_MAILBOX_REQUEST_BYTES, MailboxConfig, MailboxRequest, child_artifact_alias,
+    filesystem_free_bytes, is_valid_request_id, prepare_mailbox_dirs, stage_child_artifact_bytes,
+};
 pub use registry::OciDistributionClient;
 
-/// Start of a live query request on stdout and its response on stdin.
-pub const LIVE_QUERY_PREFIX: &[u8] = b"BIOCOMPASS_QUERY_V1 ";
-const LIVE_QUERY_MARKER: &[u8] = b"BIOCOMPASS_QUERY_V1";
-const MAX_QUERY_REQUEST_BYTES: usize = 8_192;
-const MAX_QUERY_RESPONSE_BYTES: usize = 1_048_576;
-
-/// Handles a frame for an already-authorized, air-gapped run.
-#[async_trait::async_trait]
-pub trait LiveQueryResponder: Send + Sync {
-    async fn call(&self, frame: &[u8]) -> CompassResult<Vec<u8>>;
-}
-
-struct LiveQueryChannel<W> {
-    stdin: W,
-    responder: Arc<dyn LiveQueryResponder>,
-}
-
-impl<W: AsyncWrite + Unpin> LiveQueryChannel<W> {
-    async fn reply(&mut self, line: &[u8]) -> CompassResult<()> {
-        let frame = line
-            .strip_prefix(LIVE_QUERY_PREFIX)
-            .filter(|frame| !frame.is_empty() && !frame.contains(&b'\r'))
-            .ok_or_else(|| {
-                CompassError::ContainerEngine("malformed live query request frame".into())
-            })?;
-        let response = self.responder.call(frame).await?;
-        if response.is_empty()
-            || response.len() > MAX_QUERY_RESPONSE_BYTES
-            || response.iter().any(|byte| matches!(*byte, b'\n' | b'\r'))
-        {
-            return Err(CompassError::ContainerEngine(
-                "invalid live query response frame".into(),
-            ));
-        }
-        let write = async {
-            self.stdin.write_all(LIVE_QUERY_PREFIX).await?;
-            self.stdin.write_all(&response).await?;
-            self.stdin.write_all(b"\n").await
-        };
-        write
-            .await
-            .map_err(|e| CompassError::ContainerEngine(format!("write live query response: {e}")))
-    }
-}
+/// Default cumulative pause allowance (seconds) for pending child module runs when a parent
+/// manifest omits `max_child_wait_sec` (`W7`).
+pub const DEFAULT_MAX_CHILD_WAIT_SEC: u64 = 3_600;
+/// Default supervision tick interval for quota, mailbox, and pause-aware deadline checks (`W2`).
+pub const DEFAULT_SUPERVISE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Detected host OCI runtime CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,12 +60,13 @@ pub struct DetectedEngine {
     pub rootless: bool,
 }
 
-/// Supported OCI runtime backends.
+/// Supported container execution backends (`W1`, `W3`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
     Podman,
     Docker,
+    Kubernetes,
 }
 
 impl EngineKind {
@@ -96,6 +74,7 @@ impl EngineKind {
         match self {
             Self::Podman => "podman",
             Self::Docker => "docker",
+            Self::Kubernetes => "kubernetes",
         }
     }
 }
@@ -113,6 +92,17 @@ pub struct ContainerRunSpec {
     pub command_override: Option<(String, Vec<String>)>,
 }
 
+/// Snapshot of `/out` directory usage returned by [`ContainerRunner::inspect_out_dir`] (`W1`, `W3`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutDirStats {
+    /// Total regular-file bytes under `/out`.
+    pub regular_bytes: u64,
+    /// Total filesystem entries (files, directories, symlinks, specials) under `/out`.
+    pub entry_count: u64,
+    /// Available bytes on the filesystem backing `/out`, when reported by the OS.
+    pub free_bytes: Option<u64>,
+}
+
 /// Completed container execution telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerExecutionReport {
@@ -125,6 +115,603 @@ pub struct ContainerExecutionReport {
     pub stderr_lines: Vec<String>,
     #[serde(default)]
     pub log_bytes_total: u64,
+    /// Signed Froglet receipt hashes of child runs completed via the file mailbox (`W7`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_receipt_hashes: Vec<String>,
+    /// Cumulative milliseconds spent paused while awaiting brokered child runs (`W7`).
+    #[serde(default)]
+    pub child_wait_ms: u64,
+}
+
+/// Live execution handle returned by [`ContainerRunner::spawn`] (`W1`).
+#[async_trait::async_trait]
+pub trait ContainerHandle: Send {
+    /// Backend container or Pod identifier recorded in [`ContainerExecutionReport::container_name`].
+    fn container_name(&self) -> &str;
+
+    /// Take the container stdout stream (called once by [`supervise`]).
+    /// Backends with combined log streams (e.g. Kubernetes pods) surface combined logs here.
+    fn take_stdout(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
+
+    /// Take the container stderr stream (called once by [`supervise`]).
+    /// Returns `None` for backends with combined log streams.
+    fn take_stderr(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>>;
+
+    /// Wait for the container / Pod to exit and return its exit code.
+    ///
+    /// Must be cancel-safe: [`supervise`] may drop this future on timeout, revocation,
+    /// output quota breach, mailbox violation, or cancellation, and immediately call [`Self::kill`].
+    async fn wait(&mut self) -> CompassResult<i32>;
+
+    /// Force-terminate and remove the running container / Pod and any attached client process.
+    /// Returns `Ok(())` when removal is confirmed, or an error describing unconfirmed cleanup.
+    async fn kill(&mut self) -> CompassResult<()>;
+}
+
+/// Cloud-agnostic container execution backend (`W1`).
+///
+/// Implemented by [`OciContainerRunner`] (alias [`LocalOciRunner`]) for local Podman/Docker
+/// and by `biocompass-kube-runner::KubeRunner` for unprivileged Kubernetes Run Pods (`W3`).
+#[async_trait::async_trait]
+pub trait ContainerRunner: Send + Sync {
+    /// Backend engine kind (`podman`, `docker`, or `kubernetes`).
+    fn engine_kind(&self) -> EngineKind;
+
+    /// Backend version string recorded in Froglet receipts.
+    fn engine_version(&self) -> String;
+
+    /// Whether this runner permits local workstation `allow_domains` bridge egress.
+    /// Hosted / cloud / Kubernetes / edge runners MUST return `false` (`SEC-12`).
+    fn allows_local_bridge_egress(&self) -> bool {
+        false
+    }
+
+    /// Optional pre-execution image preparation (e.g. cold digest pull / worker image cache lease)
+    /// executed before the signed container execution deadline begins.
+    /// Any returned guard is held alive until [`supervise`] finishes.
+    async fn prepare_image(
+        &self,
+        _spec: &ContainerRunSpec,
+    ) -> CompassResult<Option<Box<dyn Any + Send + Sync>>> {
+        Ok(None)
+    }
+
+    /// Spawn a hardened container / Run Pod for `spec` and return its live [`ContainerHandle`].
+    async fn spawn(&self, spec: &ContainerRunSpec) -> CompassResult<Box<dyn ContainerHandle>>;
+
+    /// Inspect the `/out` stage directory for regular-file bytes, entry count, and free space.
+    async fn inspect_out_dir(&self, out_dir: &Path) -> CompassResult<OutDirStats> {
+        Ok(measure_out_dir_stats(out_dir))
+    }
+
+    /// Cancel / force-delete any active container or Pod associated with `run_id` (`W5`).
+    async fn cancel(&self, run_id: &RunId) -> CompassResult<()>;
+
+    /// Remove a run's stage directory (`runs/<id>`), allowing Kubernetes runners to fall back
+    /// to an unprivileged UID-65532 cleanup pod when cross-UID `unlink` fails (`W5`).
+    async fn cleanup_stage_dir(&self, stage_dir: &Path) -> CompassResult<()> {
+        if stage_dir.exists() {
+            std::fs::remove_dir_all(stage_dir).map_err(|e| {
+                CompassError::Storage(format!("remove stage dir {}: {e}", stage_dir.display()))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Configuration options for [`supervise`] (`W1`, `W2`, `W3`, `W5`, `W7`).
+pub struct SuperviseOptions<'a> {
+    pub log_tx: Option<broadcast::Sender<RunLogEvent>>,
+    pub revoked: Option<&'a AtomicBool>,
+    pub cancelled: Option<&'a AtomicBool>,
+    pub live_query: Option<Arc<dyn LiveQueryResponder>>,
+    pub child_broker: Option<Arc<dyn ChildRunBroker>>,
+    /// Allow-listed child module IDs (`<org>/<name>`) permitted for `"run_module"` requests (`W7`).
+    pub allowed_child_modules: Vec<String>,
+    /// Maximum cumulative seconds the parent wall clock may pause while child runs are pending (`W7`).
+    pub max_child_wait_sec: Option<u64>,
+    /// Cap on total file-mailbox requests processed for this run (`W2`).
+    pub max_mailbox_calls: usize,
+    /// Optional oneshot notified immediately after image preparation and container spawn, when the
+    /// signed execution deadline begins.
+    pub started_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Mid-run output byte cap across `/out` regular files + stdout/stderr (`SEC-28`).
+    pub max_output_bytes: Option<u64>,
+    /// Optional mid-run `/out` entry-count cap (`W3`).
+    pub max_output_entries: Option<u64>,
+    /// Optional minimum free bytes watchdog on the filesystem backing `/out` (`W3`).
+    pub min_free_bytes: Option<u64>,
+    /// Supervision poll interval for quota, mailbox, and pause-aware deadline checks (default 50 ms).
+    pub poll_interval: Duration,
+}
+
+impl Default for SuperviseOptions<'_> {
+    fn default() -> Self {
+        Self {
+            log_tx: None,
+            revoked: None,
+            cancelled: None,
+            live_query: None,
+            child_broker: None,
+            allowed_child_modules: Vec::new(),
+            max_child_wait_sec: None,
+            max_mailbox_calls: DEFAULT_MAX_MAILBOX_CALLS,
+            started_tx: None,
+            max_output_bytes: None,
+            max_output_entries: None,
+            min_free_bytes: None,
+            poll_interval: DEFAULT_SUPERVISE_POLL_INTERVAL,
+        }
+    }
+}
+
+enum InFlightOutcome {
+    LiveQuery {
+        request_id: String,
+        result: CompassResult<Vec<u8>>,
+    },
+    ChildRun {
+        request_id: String,
+        result: CompassResult<ChildRunReply>,
+    },
+}
+
+type InFlightFuture = Pin<Box<dyn Future<Output = InFlightOutcome> + Send>>;
+
+/// Shared execution supervision loop for EVERY [`ContainerRunner`] backend (`W1`, `W2`, `W3`, `W5`, `W7`).
+///
+/// Enforces:
+/// - Airgap / local-bridge network policy (`SEC-12`)
+/// - Pre-execution image preparation raced against revocation / cancellation (not billed to deadline)
+/// - Bounded stdout/stderr draining & `SEC-28` raw-byte `max_output_bytes` enforcement
+/// - Periodic (50 ms) `/out` regular-byte cap, entry-count cap, and free-space watchdog
+/// - Hardened `O_NOFOLLOW | O_NONBLOCK` file mailbox for live queries (`W2`) and brokered child runs (`W7`)
+/// - Pause-aware parent wall-clock deadline that pauses while child runs are pending, capped by `max_child_wait_sec`
+/// - Guaranteed container/Pod force-kill on any violation, timeout, revocation, or cancellation
+pub async fn supervise(
+    runner: &dyn ContainerRunner,
+    spec: &ContainerRunSpec,
+    opts: SuperviseOptions<'_>,
+) -> CompassResult<ContainerExecutionReport> {
+    let revoked_error = || {
+        CompassError::AccessDenied("DATASET_ACCESS_REVOKED: dataset access was revoked".into())
+    };
+    let cancelled_error = || CompassError::ContainerEngine("RUN_CANCELLED: run was cancelled".into());
+
+    if opts.revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(revoked_error());
+    }
+    if opts.cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(cancelled_error());
+    }
+    if opts.live_query.is_some() && !spec.network.is_airgapped() {
+        return Err(CompassError::Validation(
+            "live queries require an air-gapped container".into(),
+        ));
+    }
+    if !spec.network.is_airgapped() && !runner.allows_local_bridge_egress() {
+        return Err(CompassError::AccessDenied(
+            "non-airgapped container network policy is rejected outside local mode (--network=none required)".into(),
+        ));
+    }
+
+    let enable_mailbox = opts.live_query.is_some()
+        || opts.child_broker.is_some()
+        || !opts.allowed_child_modules.is_empty();
+    let mailbox = if enable_mailbox {
+        let cfg = MailboxConfig {
+            run_id: spec.run_id.clone(),
+            in_dir: spec.in_dir.clone(),
+            out_dir: spec.out_dir.clone(),
+            live_query: opts.live_query.clone(),
+            child_broker: opts.child_broker.clone(),
+            allowed_child_modules: opts.allowed_child_modules.clone(),
+            max_child_wait_sec: opts.max_child_wait_sec,
+            max_calls: opts.max_mailbox_calls,
+        };
+        Some(Arc::new(std::sync::Mutex::new(FileMailbox::open(cfg)?)))
+    } else {
+        None
+    };
+
+    let wait_for_revocation = wait_for_flag(opts.revoked);
+    let wait_for_cancel = wait_for_flag(opts.cancelled);
+    tokio::pin!(wait_for_revocation);
+    tokio::pin!(wait_for_cancel);
+
+    let _image_lease = tokio::select! {
+        biased;
+        () = &mut wait_for_revocation => return Err(revoked_error()),
+        () = &mut wait_for_cancel => return Err(cancelled_error()),
+        result = tokio::time::timeout(
+            Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
+            runner.prepare_image(spec),
+        ) => {
+            result.map_err(|_| CompassError::ContainerEngine(format!(
+                "timed out preparing OCI image '{}'",
+                spec.image.raw
+            )))??
+        }
+    };
+
+    if opts.revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(revoked_error());
+    }
+    if opts.cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(cancelled_error());
+    }
+
+    let mut handle = tokio::select! {
+        biased;
+        () = &mut wait_for_revocation => {
+            let _ = runner.cancel(&spec.run_id).await;
+            return Err(revoked_error());
+        }
+        () = &mut wait_for_cancel => {
+            let _ = runner.cancel(&spec.run_id).await;
+            return Err(cancelled_error());
+        }
+        spawned = runner.spawn(spec) => spawned?,
+    };
+
+    let started = Instant::now();
+    if let Some(tx) = opts.started_tx {
+        let _ = tx.send(());
+    }
+
+    let container_name = handle.container_name().to_owned();
+    let stdout = handle.take_stdout();
+    let stderr = handle.take_stderr();
+    let shared_stream_bytes = Arc::new(AtomicU64::new(0));
+    let child_wait_ms_shared = Arc::new(AtomicU64::new(0));
+
+    let parent_timeout = Duration::from_secs(spec.resources.timeout_sec.max(1));
+    let max_child_wait = Duration::from_secs(
+        opts.max_child_wait_sec
+            .unwrap_or(DEFAULT_MAX_CHILD_WAIT_SEC)
+            .min(MAX_CHILD_WAIT_SEC),
+    );
+    let poll_interval = if opts.poll_interval.is_zero() {
+        DEFAULT_SUPERVISE_POLL_INTERVAL
+    } else {
+        opts.poll_interval
+    };
+
+    let watchdog_container_name = container_name.clone();
+    let watchdog_run_id = spec.run_id.clone();
+    let watchdog_in_dir = spec.in_dir.clone();
+    let watchdog_out_dir = spec.out_dir.clone();
+    let watchdog_stream_bytes = Arc::clone(&shared_stream_bytes);
+    let watchdog_mailbox = mailbox.clone();
+    let watchdog_child_wait_ms = Arc::clone(&child_wait_ms_shared);
+    let watchdog_timeout_sec = spec.resources.timeout_sec;
+    let max_output_bytes = opts.max_output_bytes;
+    let max_output_entries = opts.max_output_entries;
+    let min_free_bytes = opts.min_free_bytes;
+
+    let watchdog = async move {
+        let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the immediate first tick so first check happens after `poll_interval`
+        // (except mailbox check which we can run right after first tick or immediately).
+        let mut last_tick = started;
+        let mut parent_elapsed = Duration::ZERO;
+        let mut child_wait_elapsed = Duration::ZERO;
+        let mut in_flight: Option<InFlightFuture> = None;
+        let mut in_flight_is_child = false;
+
+        let check_clocks = |parent_elapsed: Duration,
+                            child_wait_elapsed: Duration,
+                            watchdog_child_wait_ms: &AtomicU64|
+         -> CompassResult<()> {
+            watchdog_child_wait_ms.store(child_wait_elapsed.as_millis() as u64, Ordering::Release);
+            if child_wait_elapsed > max_child_wait {
+                return Err(CompassError::ContainerEngine(format!(
+                    "CONTAINER_TIMEOUT: container {watchdog_container_name} exceeded signed max_child_wait_sec ({}s)",
+                    max_child_wait.as_secs()
+                )));
+            }
+            if parent_elapsed >= parent_timeout {
+                return Err(CompassError::ContainerEngine(format!(
+                    "CONTAINER_TIMEOUT: container {watchdog_container_name} exceeded hard timeout of {watchdog_timeout_sec}s"
+                )));
+            }
+            Ok(())
+        };
+
+        loop {
+            tokio::select! {
+                biased;
+                outcome = async {
+                    in_flight
+                        .as_mut()
+                        .expect("guarded by in_flight.is_some()")
+                        .await
+                }, if in_flight.is_some() => {
+                    let now = Instant::now();
+                    let delta = now.saturating_duration_since(last_tick);
+                    last_tick = now;
+                    if in_flight_is_child {
+                        child_wait_elapsed = child_wait_elapsed.saturating_add(delta);
+                    } else {
+                        parent_elapsed = parent_elapsed.saturating_add(delta);
+                    }
+                    in_flight = None;
+                    in_flight_is_child = false;
+                    if let Err(err) = check_clocks(parent_elapsed, child_wait_elapsed, &watchdog_child_wait_ms) {
+                        return err;
+                    }
+
+                    let Some(mb_arc) = &watchdog_mailbox else {
+                        return CompassError::Internal("mailbox disappeared during in-flight request".into());
+                    };
+                    match outcome {
+                        InFlightOutcome::LiveQuery { request_id, result } => {
+                            let reply_bytes = match result {
+                                Ok(bytes) => bytes,
+                                Err(err) => return err,
+                            };
+                            let write_res = {
+                                let mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                                mb.write_reply_bytes(&request_id, &reply_bytes)
+                            };
+                            if let Err(err) = write_res {
+                                return err;
+                            }
+                        }
+                        InFlightOutcome::ChildRun { request_id, result } => {
+                            let reply = match result {
+                                Ok(mut r) => {
+                                    r.request_id = request_id.clone();
+                                    r
+                                }
+                                Err(err) => {
+                                    if err.to_string().contains("DATASET_ACCESS_REVOKED") {
+                                        return err;
+                                    }
+                                    ChildRunReply::error(request_id.clone(), err.code(), err.to_string())
+                                }
+                            };
+                            let write_res = {
+                                let mut mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                                if let Some(rh) = &reply.receipt_hash {
+                                    mb.record_child_receipt_hash(rh.clone());
+                                }
+                                mb.write_child_reply(&reply)
+                            };
+                            if let Err(err) = write_res {
+                                return err;
+                            }
+                        }
+                    }
+                }
+                _ = ticker.tick() => {
+                    let now = Instant::now();
+                    let delta = now.saturating_duration_since(last_tick);
+                    last_tick = now;
+                    if in_flight_is_child {
+                        child_wait_elapsed = child_wait_elapsed.saturating_add(delta);
+                    } else {
+                        parent_elapsed = parent_elapsed.saturating_add(delta);
+                    }
+                    if let Err(err) = check_clocks(parent_elapsed, child_wait_elapsed, &watchdog_child_wait_ms) {
+                        return err;
+                    }
+
+                    // Enforce /out byte cap, entry-count cap, and free-space watchdog.
+                    if max_output_bytes.is_some()
+                        || max_output_entries.is_some()
+                        || min_free_bytes.is_some()
+                    {
+                        let stats = match runner.inspect_out_dir(&watchdog_out_dir).await {
+                            Ok(s) => s,
+                            Err(err) => return err,
+                        };
+                        if let Some(cap) = max_output_bytes {
+                            let total = stats
+                                .regular_bytes
+                                .saturating_add(watchdog_stream_bytes.load(Ordering::Acquire));
+                            if total > cap {
+                                return CompassError::ContainerEngine(format!(
+                                    "OUTPUT_QUOTA_EXCEEDED: container output ({total} bytes) exceeded max_output_bytes ({cap})"
+                                ));
+                            }
+                        }
+                        if let Some(max_entries) = max_output_entries
+                            && stats.entry_count > max_entries
+                        {
+                            return CompassError::ContainerEngine(format!(
+                                "OUTPUT_QUOTA_EXCEEDED: container /out entry count ({}) exceeded max_output_entries ({max_entries})",
+                                stats.entry_count
+                            ));
+                        }
+                        if let Some(min_free) = min_free_bytes
+                            && let Some(free) = stats.free_bytes
+                            && free < min_free
+                        {
+                            return CompassError::ContainerEngine(format!(
+                                "OUTPUT_QUOTA_EXCEEDED: stage filesystem free space ({free} bytes) fell below min_free_bytes ({min_free})"
+                            ));
+                        }
+                    }
+
+                    // Poll file mailbox when no request is currently in-flight.
+                    if in_flight.is_none()
+                        && let Some(mb_arc) = &watchdog_mailbox
+                    {
+                        let next_req = {
+                            let mut mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                            mb.poll_next_request()
+                        };
+                        match next_req {
+                            Err(err) => return err,
+                            Ok(None) => {}
+                            Ok(Some(MailboxRequest::LiveQuery(q))) => {
+                                let responder = {
+                                    let mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                                    mb.config().live_query.clone()
+                                };
+                                let Some(responder) = responder else {
+                                    return CompassError::ContainerEngine(
+                                        "MAILBOX_VIOLATION: live query request rejected because live queries are not enabled for this run".into(),
+                                    );
+                                };
+                                let frame = match serde_json::to_vec(&q) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        return CompassError::Internal(format!(
+                                            "encode live query frame: {e}"
+                                        ));
+                                    }
+                                };
+                                if frame.len() > MAX_LIVE_QUERY_REQUEST_BYTES {
+                                    return CompassError::ContainerEngine(format!(
+                                        "MAILBOX_VIOLATION: live query request exceeded {MAX_LIVE_QUERY_REQUEST_BYTES} bytes"
+                                    ));
+                                }
+                                let req_id = q.request_id.clone();
+                                in_flight = Some(Box::pin(async move {
+                                    let result = responder.call(&frame).await;
+                                    InFlightOutcome::LiveQuery {
+                                        request_id: req_id,
+                                        result,
+                                    }
+                                }));
+                                in_flight_is_child = false;
+                            }
+                            Ok(Some(MailboxRequest::ChildModule(req))) => {
+                                let (broker, allowed) = {
+                                    let mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                                    (
+                                        mb.config().child_broker.clone(),
+                                        mb.is_child_module_allowed(&req.plugin_id),
+                                    )
+                                };
+                                let Some(broker) = broker else {
+                                    return CompassError::child_module_not_allowed(format!(
+                                        "child module '{}' rejected: child runs are not enabled for this module",
+                                        req.plugin_id
+                                    ));
+                                };
+                                if !allowed {
+                                    let reply = ChildRunReply::error(
+                                        req.request_id.clone(),
+                                        ErrorCode::ChildModuleNotAllowed.as_str(),
+                                        format!(
+                                            "child module '{}' is not declared in this module's child_modules allow-list",
+                                            req.plugin_id
+                                        ),
+                                    );
+                                    let write_res = {
+                                        let mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                                        mb.write_child_reply(&reply)
+                                    };
+                                    if let Err(err) = write_res {
+                                        return err;
+                                    }
+                                    continue;
+                                }
+                                let remaining = max_child_wait.saturating_sub(child_wait_elapsed);
+                                if remaining.is_zero() {
+                                    return CompassError::ContainerEngine(format!(
+                                        "CONTAINER_TIMEOUT: container {watchdog_container_name} exhausted signed max_child_wait_sec ({}s)",
+                                        max_child_wait.as_secs()
+                                    ));
+                                }
+                                let ctx = ChildRunBrokerContext {
+                                    parent_run_id: watchdog_run_id.clone(),
+                                    parent_in_dir: watchdog_in_dir.clone(),
+                                    remaining_child_wait_sec: remaining.as_secs().max(1),
+                                };
+                                let req_id = req.request_id.clone();
+                                in_flight = Some(Box::pin(async move {
+                                    let result = broker.run_child(&ctx, req).await;
+                                    InFlightOutcome::ChildRun {
+                                        request_id: req_id,
+                                        result,
+                                    }
+                                }));
+                                in_flight_is_child = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let execute = async {
+        tokio::try_join!(
+            handle.wait(),
+            drain_optional_stream(
+                stdout,
+                "stdout",
+                &spec.run_id,
+                opts.log_tx.as_ref(),
+                max_output_bytes,
+                Some(&shared_stream_bytes),
+            ),
+            drain_optional_stream(
+                stderr,
+                "stderr",
+                &spec.run_id,
+                opts.log_tx.as_ref(),
+                max_output_bytes,
+                Some(&shared_stream_bytes),
+            ),
+        )
+    };
+
+    let outcome = tokio::select! {
+        biased;
+        () = &mut wait_for_revocation => Err(revoked_error()),
+        () = &mut wait_for_cancel => Err(cancelled_error()),
+        watchdog_err = watchdog => Err(watchdog_err),
+        res = execute => res,
+    };
+
+    match outcome {
+        Ok((exit_code, (stdout_lines, stdout_bytes), (stderr_lines, stderr_bytes))) => {
+            let child_receipt_hashes = if let Some(mb_arc) = &mailbox {
+                let mb = mb_arc.lock().expect("mailbox mutex poisoned");
+                mb.verify_dir_integrity()?;
+                mb.child_receipt_hashes()
+            } else {
+                Vec::new()
+            };
+            Ok(ContainerExecutionReport {
+                engine: runner.engine_kind(),
+                engine_version: runner.engine_version(),
+                container_name,
+                exit_code,
+                duration_ms: started.elapsed().as_millis() as u64,
+                stdout_lines,
+                stderr_lines,
+                log_bytes_total: stdout_bytes.saturating_add(stderr_bytes),
+                child_receipt_hashes,
+                child_wait_ms: child_wait_ms_shared.load(Ordering::Acquire),
+            })
+        }
+        Err(reason) => Err(abort_handle(&mut *handle, reason).await),
+    }
+}
+
+async fn wait_for_flag(flag: Option<&AtomicBool>) {
+    match flag {
+        Some(f) => {
+            while !f.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn abort_handle(handle: &mut dyn ContainerHandle, reason: CompassError) -> CompassError {
+    match handle.kill().await {
+        Ok(()) => reason,
+        Err(kill_err) => CompassError::ContainerEngine(format!("{reason}; {kill_err}")),
+    }
 }
 
 /// Probe candidate container engines (`podman` preferred on Linux; `podman` or `docker` on macOS/Windows).
@@ -136,8 +723,12 @@ pub async fn detect_container_engine() -> CompassResult<DetectedEngine> {
         "/usr/bin/docker",
         "docker",
     ];
-    detect_engine_with_candidates(cfg!(target_os = "linux"), &podman_candidates, &docker_candidates)
-        .await
+    detect_engine_with_candidates(
+        cfg!(target_os = "linux"),
+        &podman_candidates,
+        &docker_candidates,
+    )
+    .await
 }
 
 async fn detect_engine_with_candidates(
@@ -184,7 +775,8 @@ async fn detect_engine_with_candidates(
     }
 
     Err(CompassError::ContainerEngine(
-        "no active Podman or Docker engine reachable; start rootless Podman or Docker Desktop".into(),
+        "no active Podman or Docker engine reachable; start rootless Podman or Docker Desktop"
+            .into(),
     ))
 }
 
@@ -320,6 +912,11 @@ fn build_hardened_oci_args_with_local_allowance(
                 args.push("--gpus".into());
                 args.push(spec.resources.gpu.to_string());
             }
+            EngineKind::Kubernetes => {
+                return Err(CompassError::ContainerEngine(
+                    "Kubernetes backend does not use local OCI CLI arguments".into(),
+                ));
+            }
         }
     }
 
@@ -344,7 +941,11 @@ fn build_hardened_oci_args_with_local_allowance(
 
 /// Prepare `/in` (`0755`) and `/out` (`0777` inside a `0700` parent workspace) so UID `65532:65532`
 /// can read `/in` and write `/out` across both Linux rootless Podman and macOS Docker VirtioFS.
-pub fn prepare_stage_permissions(stage_root: &Path, in_dir: &Path, out_dir: &Path) -> CompassResult<()> {
+pub fn prepare_stage_permissions(
+    stage_root: &Path,
+    in_dir: &Path,
+    out_dir: &Path,
+) -> CompassResult<()> {
     std::fs::create_dir_all(in_dir)
         .map_err(|e| CompassError::Storage(format!("create /in stage dir: {e}")))?;
     std::fs::create_dir_all(out_dir)
@@ -407,12 +1008,16 @@ fn hash_bundled_build_context(root: &Path) -> CompassResult<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Hardened local Podman/Docker implementation of [`ContainerRunner`] (`W1`).
+pub type LocalOciRunner = OciContainerRunner;
+
 /// Hardened OCI container runner executing real Podman/Docker containers with live log streaming.
 #[derive(Debug, Clone)]
 pub struct OciContainerRunner {
     engine: DetectedEngine,
     worker_cache: Option<Arc<worker_cache::WorkerCache>>,
     workspace_scope: Option<String>,
+    active_containers: Arc<std::sync::Mutex<HashMap<RunId, String>>>,
 }
 
 impl OciContainerRunner {
@@ -423,8 +1028,13 @@ impl OciContainerRunner {
     }
 
     /// Construct from a known `DetectedEngine`.
-    pub const fn from_engine(engine: DetectedEngine) -> Self {
-        Self { engine, worker_cache: None, workspace_scope: None }
+    pub fn from_engine(engine: DetectedEngine) -> Self {
+        Self {
+            engine,
+            worker_cache: None,
+            workspace_scope: None,
+            active_containers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     /// Inspect the bound container engine metadata.
@@ -437,6 +1047,7 @@ impl OciContainerRunner {
         let args: Vec<&str> = match self.engine.kind {
             EngineKind::Docker => vec!["image", "inspect", "--format", "{{.Id}}", image_ref],
             EngineKind::Podman => vec!["image", "exists", image_ref],
+            EngineKind::Kubernetes => return false,
         };
         let res = tokio::time::timeout(
             Duration::from_secs(4),
@@ -453,27 +1064,43 @@ impl OciContainerRunner {
 
     /// Resolve a locally installed image to the exact content the native run will execute.
     /// Dev tags are allowed only under the existing local-development configuration.
-    pub async fn installed_execution_image(&self, image: &str, allow_dev: bool) -> CompassResult<OciImageRef> {
+    pub async fn installed_execution_image(
+        &self,
+        image: &str,
+        allow_dev: bool,
+    ) -> CompassResult<OciImageRef> {
         let mut pinned = OciImageRef::parse(image, allow_dev)?;
         if pinned.sha256_digest.is_some() {
             if self.has_verified_local_digest(image).await {
                 return Ok(pinned);
             }
         } else {
-            let output = tokio::time::timeout(Duration::from_secs(4),
+            let output = tokio::time::timeout(
+                Duration::from_secs(4),
                 Command::new(&self.engine.binary_path)
-                    .args(["image","inspect","--format","{{.Id}}",image])
-                    .stdin(Stdio::null()).kill_on_drop(true).output()
-            ).await.map_err(|_| CompassError::ContainerEngine("local image inspection timed out".into()))?
-             .map_err(|e| CompassError::ContainerEngine(e.to_string()))?;
+                    .args(["image", "inspect", "--format", "{{.Id}}", image])
+                    .stdin(Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| CompassError::ContainerEngine("local image inspection timed out".into()))?
+            .map_err(|e| CompassError::ContainerEngine(e.to_string()))?;
             let id = String::from_utf8_lossy(&output.stdout);
             let digest = id.trim().strip_prefix("sha256:").unwrap_or(id.trim());
-            if output.status.success() && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            if output.status.success()
+                && digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
                 pinned.raw = format!("sha256:{digest}");
                 return Ok(pinned);
             }
         }
-        Err(CompassError::NotFound(format!("image is not installed locally: {image}")))
+        Err(CompassError::NotFound(format!(
+            "image is not installed locally: {image}"
+        )))
     }
 
     async fn inspect_local_image_id(&self, image_ref: &str) -> CompassResult<Option<String>> {
@@ -538,7 +1165,10 @@ impl OciContainerRunner {
             })
             .collect();
         let content_hash = hash_bundled_build_context(context_dir)?;
-        let stage_tag = format!("local/bundled-{safe_slug}:stage-{safe_ver}-{}", &content_hash[..12]);
+        let stage_tag = format!(
+            "local/bundled-{safe_slug}:stage-{safe_ver}-{}",
+            &content_hash[..12]
+        );
         Ok((safe_slug, stage_tag))
     }
 
@@ -616,7 +1246,11 @@ impl OciContainerRunner {
         };
 
         let pinned_local_tag = format!("local/bundled-{safe_slug}:sha256-{digest}");
-        if self.inspect_local_image_id(&pinned_local_tag).await?.as_deref() != Some(digest.as_str())
+        if self
+            .inspect_local_image_id(&pinned_local_tag)
+            .await?
+            .as_deref()
+            != Some(digest.as_str())
         {
             let tag_out = tokio::time::timeout(
                 Duration::from_secs(10),
@@ -655,11 +1289,14 @@ impl OciContainerRunner {
                 "invalid local bundled image reference '{image_ref}'"
             )));
         };
-        let actual = self.inspect_local_image_id(&parsed.raw).await?.ok_or_else(|| {
-            CompassError::NotFound(format!(
-                "locally built bundled image '{image_ref}' is no longer present"
-            ))
-        })?;
+        let actual = self
+            .inspect_local_image_id(&parsed.raw)
+            .await?
+            .ok_or_else(|| {
+                CompassError::NotFound(format!(
+                    "locally built bundled image '{image_ref}' is no longer present"
+                ))
+            })?;
         if actual != expected_digest {
             return Err(CompassError::IntegrityViolation(format!(
                 "local bundled image '{image_ref}' ID changed (expected {expected_digest}, got {actual})"
@@ -732,7 +1369,7 @@ impl OciContainerRunner {
         self.execute_with_queries(spec, log_tx, revoked, None).await
     }
 
-    /// Enable an isolated request/response pipe for a run with a provider query session.
+    /// Enable the hardened file mailbox for a run with a provider query session.
     pub async fn execute_with_queries(
         &self,
         spec: &ContainerRunSpec,
@@ -740,7 +1377,8 @@ impl OciContainerRunner {
         revoked: Option<&AtomicBool>,
         responder: Option<Arc<dyn LiveQueryResponder>>,
     ) -> CompassResult<ContainerExecutionReport> {
-        self.execute_with_start_notification(spec, log_tx, revoked, responder, None).await
+        self.execute_with_start_notification(spec, log_tx, revoked, responder, None)
+            .await
     }
 
     /// Notify the orchestrator after image preparation, when the execution deadline begins.
@@ -757,7 +1395,7 @@ impl OciContainerRunner {
     }
 
     /// Execute with explicit mid-run `max_output_bytes` enforcement across stdout, stderr,
-    /// `BIOCOMPASS_QUERY_V1` frames, and `/out` regular files (`SEC-28`).
+    /// and `/out` regular files (`SEC-28`), delegating to the shared [`supervise`] loop.
     pub async fn execute_with_limits(
         &self,
         spec: &ContainerRunSpec,
@@ -767,17 +1405,103 @@ impl OciContainerRunner {
         started_tx: Option<tokio::sync::oneshot::Sender<()>>,
         max_output_bytes: Option<u64>,
     ) -> CompassResult<ContainerExecutionReport> {
-        let revoked_error = || {
-            CompassError::AccessDenied("DATASET_ACCESS_REVOKED: dataset access was revoked".into())
-        };
-        if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err(revoked_error());
+        supervise(
+            self,
+            spec,
+            SuperviseOptions {
+                log_tx,
+                revoked,
+                live_query: responder,
+                started_tx,
+                max_output_bytes,
+                ..SuperviseOptions::default()
+            },
+        )
+        .await
+    }
+}
+
+struct LocalContainerHandle {
+    runner: OciContainerRunner,
+    run_id: RunId,
+    container_name: String,
+    child: tokio::process::Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+}
+
+impl Drop for LocalContainerHandle {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.runner.active_containers.lock()
+            && guard.get(&self.run_id).map(String::as_str) == Some(self.container_name.as_str())
+        {
+            guard.remove(&self.run_id);
         }
-        if responder.is_some() && !spec.network.is_airgapped() {
-            return Err(CompassError::Validation(
-                "live queries require an air-gapped container".into(),
-            ));
+    }
+}
+
+#[async_trait::async_trait]
+impl ContainerHandle for LocalContainerHandle {
+    fn container_name(&self) -> &str {
+        &self.container_name
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>> {
+        self.stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn AsyncRead + Send + Unpin>)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn AsyncRead + Send + Unpin>> {
+        self.stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn AsyncRead + Send + Unpin>)
+    }
+
+    async fn wait(&mut self) -> CompassResult<i32> {
+        let status = self.child.wait().await.map_err(|e| {
+            CompassError::ContainerEngine(format!(
+                "wait on container {} failed: {e}",
+                self.container_name
+            ))
+        })?;
+        Ok(status.code().unwrap_or(-1))
+    }
+
+    async fn kill(&mut self) -> CompassResult<()> {
+        self.runner
+            .abort_client_and_container(&mut self.child, &self.container_name)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ContainerRunner for OciContainerRunner {
+    fn engine_kind(&self) -> EngineKind {
+        self.engine.kind
+    }
+
+    fn engine_version(&self) -> String {
+        self.engine.server_version.clone()
+    }
+
+    fn allows_local_bridge_egress(&self) -> bool {
+        self.workspace_scope.is_some()
+    }
+
+    async fn prepare_image(
+        &self,
+        spec: &ContainerRunSpec,
+    ) -> CompassResult<Option<Box<dyn Any + Send + Sync>>> {
+        if spec.image.sha256_digest.is_some() {
+            let lease = self.prepare_for_execution(&spec.image.raw).await?;
+            Ok(lease.map(|l| Box::new(l) as Box<dyn Any + Send + Sync>))
+        } else {
+            Ok(None)
         }
+    }
+
+    async fn spawn(&self, spec: &ContainerRunSpec) -> CompassResult<Box<dyn ContainerHandle>> {
         let container_name = self.container_name(&spec.run_id);
         let mut args = build_hardened_oci_args_with_local_allowance(
             &self.engine,
@@ -786,29 +1510,8 @@ impl OciContainerRunner {
             self.workspace_scope.is_some(),
         )?;
         self.label_native_job(&mut args);
-        let wait_for_revocation = async {
-            match revoked {
-                Some(flag) => while !flag.load(Ordering::Acquire) {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                },
-                None => std::future::pending().await,
-            }
-        };
-        tokio::pin!(wait_for_revocation);
-        let _image_lease;
-        if spec.image.sha256_digest.is_some() {
-            _image_lease = tokio::select! {
-                biased;
-                () = &mut wait_for_revocation => return Err(revoked_error()),
-                result = tokio::time::timeout(Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
-                    self.prepare_for_execution(&spec.image.raw)) => {
-                    result.map_err(|_| CompassError::ContainerEngine(format!(
-                        "timed out preparing pinned OCI image '{}'", spec.image.raw
-                    )))??
-                }
-            };
-            args.insert(1, "--pull=never".into());
-        } else if self.worker_cache.is_some()
+        if spec.image.sha256_digest.is_some()
+            || self.worker_cache.is_some()
             || spec.image.raw.starts_with("sha256:")
             || spec.image.repository.starts_with("local/bundled-")
         {
@@ -816,20 +1519,10 @@ impl OciContainerRunner {
             // digest admission path can fetch images into a worker-owned engine.
             args.insert(1, "--pull=never".into());
         }
-        if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err(revoked_error());
-        }
-        let stdin = if responder.is_some() {
-            args.insert(1, "--interactive".into());
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        };
 
-        let started = Instant::now();
         let mut child = Command::new(&self.engine.binary_path)
             .args(&args)
-            .stdin(stdin)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -841,9 +1534,6 @@ impl OciContainerRunner {
                 ))
             })?;
 
-        if let Some(tx) = started_tx {
-            let _ = tx.send(());
-        }
         let stdout = child
             .stdout
             .take()
@@ -852,136 +1542,97 @@ impl OciContainerRunner {
             .stderr
             .take()
             .ok_or_else(|| CompassError::ContainerEngine("capture container stderr".into()))?;
-        let channel = match (responder, child.stdin.take()) {
-            (Some(responder), Some(stdin)) => Some(LiveQueryChannel { stdin, responder }),
-            (Some(_), None) => {
-                let reason = CompassError::ContainerEngine("capture container stdin".into());
-                return Err(self.abort_execution(&mut child, &container_name, reason).await);
-            }
-            (None, _) => None,
-        };
 
-        let shared_stream_bytes = Arc::new(AtomicU64::new(0));
-        let out_quota_exceeded = async {
-            let Some(cap) = max_output_bytes else {
-                return std::future::pending::<CompassError>().await;
-            };
-            let out_dir = spec.out_dir.clone();
-            let streamed = Arc::clone(&shared_stream_bytes);
-            loop {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                let dir_bytes = measure_out_dir_regular_bytes(&out_dir);
-                let total = dir_bytes.saturating_add(streamed.load(Ordering::Acquire));
-                if total > cap {
-                    return CompassError::ContainerEngine(format!(
-                        "OUTPUT_QUOTA_EXCEEDED: container output ({total} bytes) exceeded max_output_bytes ({cap})"
-                    ));
-                }
-            }
-        };
-        tokio::pin!(out_quota_exceeded);
+        if let Ok(mut guard) = self.active_containers.lock() {
+            guard.insert(spec.run_id.clone(), container_name.clone());
+        }
 
-        let timeout_dur = Duration::from_secs(spec.resources.timeout_sec.max(1));
-        let execute = async {
-            let wait = async {
-                child.wait().await.map_err(|e| {
-                    CompassError::ContainerEngine(format!(
-                        "wait on container {container_name} failed: {e}"
-                    ))
-                })
-            };
-            tokio::try_join!(
-                wait,
-                drain_stream_bounded(
-                    stdout,
-                    "stdout",
-                    &spec.run_id,
-                    log_tx.as_ref(),
-                    channel,
-                    max_output_bytes,
-                    Some(&shared_stream_bytes),
-                ),
-                drain_stream_bounded(
-                    stderr,
-                    "stderr",
-                    &spec.run_id,
-                    log_tx.as_ref(),
-                    None::<LiveQueryChannel<tokio::process::ChildStdin>>,
-                    max_output_bytes,
-                    Some(&shared_stream_bytes),
-                ),
-            )
-        };
-        let wait_res = tokio::select! {
-            biased;
-            () = &mut wait_for_revocation => {
-                return Err(self.abort_execution(&mut child, &container_name, revoked_error()).await);
-            }
-            quota_err = &mut out_quota_exceeded => {
-                return Err(self.abort_execution(&mut child, &container_name, quota_err).await);
-            }
-            result = tokio::time::timeout(timeout_dur, execute) => result,
-        };
+        Ok(Box::new(LocalContainerHandle {
+            runner: self.clone(),
+            run_id: spec.run_id.clone(),
+            container_name,
+            child,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        }))
+    }
 
-        match wait_res {
-            Ok(Ok((status, (stdout_lines, stdout_bytes), (stderr_lines, stderr_bytes)))) => {
-                let exit_code = status.code().unwrap_or(-1);
-                Ok(ContainerExecutionReport {
-                    engine: self.engine.kind,
-                    engine_version: self.engine.server_version.clone(),
-                    container_name,
-                    exit_code,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    stdout_lines,
-                    stderr_lines,
-                    log_bytes_total: stdout_bytes.saturating_add(stderr_bytes),
-                })
-            }
-            Ok(Err(error)) => Err(self.abort_execution(&mut child, &container_name, error).await),
-            Err(_) => {
-                let reason = CompassError::ContainerEngine(format!(
-                    "CONTAINER_TIMEOUT: container {container_name} exceeded hard timeout of {}s",
-                    spec.resources.timeout_sec
-                ));
-                Err(self.abort_execution(&mut child, &container_name, reason).await)
-            }
+    async fn cancel(&self, run_id: &RunId) -> CompassResult<()> {
+        let target = {
+            let guard = self.active_containers.lock().ok();
+            guard.and_then(|g| g.get(run_id).cloned())
+        }
+        .or_else(|| self.workspace_scope.as_ref().map(|_| self.container_name(run_id)));
+        match target {
+            Some(name) => self.force_remove_container(&name).await,
+            None => Ok(()),
         }
     }
 }
 
-fn measure_out_dir_regular_bytes(root: &Path) -> u64 {
-    fn walk(dir: &Path, total: &mut u64) {
+/// Measure regular-file bytes, total entry count, and filesystem free bytes under `root`
+/// without following symlinks (`W1`, `W3`).
+pub fn measure_out_dir_stats(root: &Path) -> OutDirStats {
+    fn walk(dir: &Path, stats: &mut OutDirStats) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
-            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            stats.entry_count = stats.entry_count.saturating_add(1);
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
             if meta.is_file() {
-                *total = total.saturating_add(meta.len());
+                stats.regular_bytes = stats.regular_bytes.saturating_add(meta.len());
             } else if meta.is_dir() {
-                walk(&entry.path(), total);
+                walk(&path, stats);
             }
         }
     }
-    let mut total = 0u64;
-    walk(root, &mut total);
-    total
+    let mut stats = OutDirStats {
+        regular_bytes: 0,
+        entry_count: 0,
+        free_bytes: filesystem_free_bytes(root),
+    };
+    walk(root, &mut stats);
+    stats
 }
 
-async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+async fn drain_optional_stream(
+    stream: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    stream_name: &'static str,
+    run_id: &RunId,
+    log_tx: Option<&broadcast::Sender<RunLogEvent>>,
+    max_output_bytes: Option<u64>,
+    shared_quota_bytes: Option<&AtomicU64>,
+) -> CompassResult<(Vec<String>, u64)> {
+    match stream {
+        Some(s) => {
+            drain_stream_bounded(
+                s,
+                stream_name,
+                run_id,
+                log_tx,
+                max_output_bytes,
+                shared_quota_bytes,
+            )
+            .await
+        }
+        None => Ok((Vec::new(), 0)),
+    }
+}
+
+async fn drain_stream_bounded<R: AsyncRead + Unpin>(
     mut stream: R,
     stream_name: &'static str,
     run_id: &RunId,
     log_tx: Option<&broadcast::Sender<RunLogEvent>>,
-    mut channel: Option<LiveQueryChannel<W>>,
     max_output_bytes: Option<u64>,
     shared_quota_bytes: Option<&AtomicU64>,
 ) -> CompassResult<(Vec<String>, u64)> {
     const MAX_RETAINED_LINES: usize = 2_000;
     const MAX_LINE_BYTES: usize = 8_192;
-    const MAX_BUFFER_BYTES: usize = MAX_QUERY_REQUEST_BYTES + LIVE_QUERY_PREFIX.len();
 
     let mut buf = [0u8; 8_192];
     let mut current_line: Vec<u8> = Vec::new();
@@ -1009,15 +1660,10 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
     loop {
         match stream.read(&mut buf).await {
             Ok(0) => break,
-            Err(e) if channel.is_some() => {
-                return Err(CompassError::ContainerEngine(format!(
-                    "read live query stream: {e}"
-                )));
-            }
             Err(_) => break,
             Ok(n) => {
-                // SEC-28: Account EVERY raw byte (including BIOCOMPASS_QUERY_V1 frames on stdout/stderr)
-                // against `max_output_bytes` immediately mid-stream before buffering or replying.
+                // SEC-28: Account EVERY raw byte on stdout/stderr against `max_output_bytes`
+                // immediately mid-stream before retaining lines.
                 raw_stream_bytes = raw_stream_bytes.saturating_add(n as u64);
                 let cumulative = if let Some(shared) = shared_quota_bytes {
                     shared
@@ -1036,33 +1682,17 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
 
                 for &b in &buf[..n] {
                     if b == b'\n' {
-                        if current_line.starts_with(LIVE_QUERY_MARKER) {
-                            if let Some(channel) = &mut channel {
-                                channel.reply(&current_line).await?;
-                            } else {
-                                // SEC-28: Discarded reserved-prefix lines when no live-query channel is active
-                                // MUST still count toward `total_bytes` (never reported as 0 bytes).
-                                total_bytes =
-                                    total_bytes.saturating_add(line_byte_count.saturating_add(1));
-                            }
-                        } else {
-                            emit_line(
-                                &current_line[..current_line.len().min(MAX_LINE_BYTES)],
-                                &mut lines,
-                            );
-                            total_bytes =
-                                total_bytes.saturating_add(line_byte_count.saturating_add(1));
-                        }
+                        emit_line(
+                            &current_line[..current_line.len().min(MAX_LINE_BYTES)],
+                            &mut lines,
+                        );
+                        total_bytes = total_bytes.saturating_add(line_byte_count.saturating_add(1));
                         current_line.clear();
                         line_byte_count = 0;
                     } else {
                         line_byte_count = line_byte_count.saturating_add(1);
-                        if current_line.len() < MAX_BUFFER_BYTES {
+                        if current_line.len() < MAX_LINE_BYTES {
                             current_line.push(b);
-                        } else if channel.is_some() && current_line.starts_with(LIVE_QUERY_MARKER) {
-                            return Err(CompassError::ContainerEngine(
-                                "live query request exceeded 8192 bytes".into(),
-                            ));
                         }
                     }
                 }
@@ -1070,20 +1700,11 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
         }
     }
     if !current_line.is_empty() {
-        if current_line.starts_with(LIVE_QUERY_MARKER) {
-            if channel.is_some() {
-                return Err(CompassError::ContainerEngine(
-                    "unterminated live query request frame".into(),
-                ));
-            }
-            total_bytes = total_bytes.saturating_add(line_byte_count);
-        } else {
-            emit_line(
-                &current_line[..current_line.len().min(MAX_LINE_BYTES)],
-                &mut lines,
-            );
-            total_bytes = total_bytes.saturating_add(line_byte_count);
-        }
+        emit_line(
+            &current_line[..current_line.len().min(MAX_LINE_BYTES)],
+            &mut lines,
+        );
+        total_bytes = total_bytes.saturating_add(line_byte_count);
     }
     Ok((lines, total_bytes))
 }
@@ -1092,89 +1713,8 @@ async fn drain_stream_bounded<R: tokio::io::AsyncRead + Unpin, W: AsyncWrite + U
 mod tests {
     use super::*;
 
-    struct EchoLiveQuery;
-
-    #[async_trait::async_trait]
-    impl LiveQueryResponder for EchoLiveQuery {
-        async fn call(&self, frame: &[u8]) -> CompassResult<Vec<u8>> {
-            Ok(frame.to_vec())
-        }
-    }
-
     #[tokio::test]
-    async fn live_query_frames_round_trip_without_entering_logs() {
-        let input = b"starting\nBIOCOMPASS_QUERY_V1 {\"value\": 42}\nfinished\r\n";
-        let run_id = RunId::from("run-query-test");
-        let (tx, mut rx) = broadcast::channel(8);
-        let (pipe, mut module_stdin) = tokio::io::duplex(128);
-        let (lines, bytes) = drain_stream_bounded(
-            &input[..],
-            "stdout",
-            &run_id,
-            Some(&tx),
-            Some(LiveQueryChannel {
-                stdin: pipe,
-                responder: Arc::new(EchoLiveQuery),
-            }),
-            None,
-            None,
-        )
-        .await
-        .expect("drain stdout");
-        let mut response = Vec::new();
-        module_stdin
-            .read_to_end(&mut response)
-            .await
-            .expect("read exact response");
-        assert_eq!(response, b"BIOCOMPASS_QUERY_V1 {\"value\": 42}\n");
-        assert_eq!(lines, ["starting", "finished"]);
-        assert_eq!(bytes, b"starting\nfinished\r\n".len() as u64);
-        assert_eq!(rx.try_recv().expect("first log").line, "starting");
-        assert_eq!(rx.try_recv().expect("second log").line, "finished");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn bounded_live_query_frames_are_never_emitted_as_truncated_logs() {
-        let run_id = RunId::from("run-query-test");
-        let (tx, mut rx) = broadcast::channel(8);
-        let mut oversize = LIVE_QUERY_PREFIX.to_vec();
-        oversize.extend(std::iter::repeat_n(b'x', MAX_QUERY_REQUEST_BYTES + 1));
-        let err = drain_stream_bounded(
-            &oversize[..],
-            "stdout",
-            &run_id,
-            Some(&tx),
-            Some(LiveQueryChannel {
-                stdin: tokio::io::sink(),
-                responder: Arc::new(EchoLiveQuery),
-            }),
-            None,
-            None,
-        )
-        .await
-        .expect_err("reject oversized query before newline");
-        assert!(err.to_string().contains("exceeded 8192 bytes"));
-        assert!(rx.try_recv().is_err());
-
-        let (lines, bytes) = drain_stream_bounded(
-            &oversize[..],
-            "stderr",
-            &run_id,
-            Some(&tx),
-            None::<LiveQueryChannel<tokio::io::Sink>>,
-            None,
-            None,
-        )
-        .await
-        .expect("discard a reserved frame from stderr");
-        assert!(lines.is_empty());
-        assert_eq!(bytes, oversize.len() as u64);
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn sec_28_unconditional_log_driver_none_and_max_output_bytes_across_live_query_frames() {
+    async fn sec_28_unconditional_log_driver_none_and_max_output_bytes_enforcement() {
         let tmp = tempfile::tempdir().unwrap();
         let engine = DetectedEngine {
             kind: EngineKind::Docker,
@@ -1204,61 +1744,28 @@ mod tests {
         );
 
         let run_id = RunId::from("run-sec-28");
-        let flood_line = b"BIOCOMPASS_QUERY_V1 {\"flood\":\"payload-payload-payload\"}\n";
+        let flood_line = b"stdout-flood-payload-payload-payload-payload-payload\n";
         let mut flood = Vec::new();
         for _ in 0..20 {
             flood.extend_from_slice(flood_line);
         }
 
-        // 1. Without live-query channel (e.g. stderr / normal stdout), BIOCOMPASS_QUERY_V1 flood is counted & rejected!
-        let (lines, counted) = drain_stream_bounded(
-            &flood[..],
-            "stderr",
-            &run_id,
-            None,
-            None::<LiveQueryChannel<tokio::io::Sink>>,
-            None,
-            None,
-        )
-        .await
-        .expect("drain without cap counts all bytes");
-        assert!(lines.is_empty());
+        let (lines, counted) =
+            drain_stream_bounded(&flood[..], "stderr", &run_id, None, None, None)
+                .await
+                .expect("drain without cap counts all bytes");
+        assert_eq!(lines.len(), 20);
         assert_eq!(counted, flood.len() as u64);
 
-        let err = drain_stream_bounded(
-            &flood[..],
-            "stderr",
-            &run_id,
-            None,
-            None::<LiveQueryChannel<tokio::io::Sink>>,
-            Some(256),
-            None,
-        )
-        .await
-        .expect_err("SEC-28 must reject BIOCOMPASS_QUERY_V1 flood over max_output_bytes");
+        let err = drain_stream_bounded(&flood[..], "stderr", &run_id, None, Some(256), None)
+            .await
+            .expect_err("SEC-28 must reject stream flood over max_output_bytes");
         assert!(err.to_string().contains("OUTPUT_QUOTA_EXCEEDED"));
-
-        // 2. Even WITH an active live-query channel, BIOCOMPASS_QUERY_V1 frames obey max_output_bytes!
-        let err_live = drain_stream_bounded(
-            &flood[..],
-            "stdout",
-            &run_id,
-            None,
-            Some(LiveQueryChannel {
-                stdin: tokio::io::sink(),
-                responder: Arc::new(EchoLiveQuery),
-            }),
-            Some(256),
-            None,
-        )
-        .await
-        .expect_err("SEC-28 must enforce max_output_bytes across live-query frames too");
-        assert!(err_live.to_string().contains("OUTPUT_QUOTA_EXCEEDED"));
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn revocation_and_deadline_cancel_inflight_live_queries_and_remove_container() {
+    async fn revocation_and_deadline_cancel_inflight_mailbox_queries_and_remove_container() {
         use std::os::unix::fs::PermissionsExt;
         use tokio::sync::Notify;
 
@@ -1283,29 +1790,36 @@ mod tests {
         }
 
         let tmp = tempfile::tempdir().expect("fixture dir");
+        let in_dir = tmp.path().join("in");
+        let out_dir = tmp.path().join("out");
+        prepare_stage_permissions(tmp.path(), &in_dir, &out_dir).expect("stage perms");
         let binary_path = tmp.path().join("fake-docker");
         let removal = tmp.path().join("removed");
         std::fs::write(
             &binary_path,
-            r#"#!/bin/sh
+            format!(
+                r#"#!/bin/sh
 case "$1" in
   run)
-    [ "$2" = --interactive ] || exit 42
     for arg; do
       case "$arg" in
         --network=none) offline=1 ;;
         --log-driver=none) no_logs=1 ;;
-        --tty|-t) exit 43 ;;
+        --tty|-t|--interactive|-i) exit 43 ;;
       esac
     done
     [ "$offline" = 1 ] && [ "$no_logs" = 1 ] || exit 44
-    printf 'BIOCOMPASS_QUERY_V1 {}\n'
-    read -r response
+    req_dir="{req_dir}"
+    printf '{{"kind":"query","request_id":"q1","query":"demo","params":{{}}}}' > "$req_dir/.tmp-q1.tmp"
+    mv "$req_dir/.tmp-q1.tmp" "$req_dir/q1.json"
+    exec sleep 30
     ;;
-  rm) printf '%s\n' "$3" > "${0%/*}/removed" ;;
+  rm) printf '%s\n' "$3" > "${{0%/*}}/removed" ;;
   *) exit 1 ;;
 esac
 "#,
+                req_dir = out_dir.join(MAILBOX_REQUESTS_REL).display()
+            ),
         )
         .expect("write engine fixture");
         std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o700))
@@ -1319,8 +1833,8 @@ esac
         let mut spec = ContainerRunSpec {
             run_id: RunId::from("run-query-test"),
             image: OciImageRef::parse("local/test:one", true).expect("image"),
-            in_dir: tmp.path().join("in"),
-            out_dir: tmp.path().join("out"),
+            in_dir,
+            out_dir,
             resources: PluginResources {
                 cpus: 1,
                 memory_mb: 128,
@@ -1341,9 +1855,9 @@ esac
                 spec.resources.timeout_sec = 10;
             }
             let revoke = async {
-                tokio::time::timeout(Duration::from_secs(2), responder.called.notified())
+                tokio::time::timeout(Duration::from_secs(3), responder.called.notified())
                     .await
-                    .expect("module requests query");
+                    .expect("module requests query via file mailbox");
                 if expected == "DATASET_ACCESS_REVOKED" {
                     revoked.store(true, Ordering::Release);
                 }
@@ -1530,7 +2044,9 @@ exit 0
         assert!(!detected.rootless);
         let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
         assert!(
-            logs.contains("WARN") && logs.to_ascii_lowercase().contains("podman") && logs.to_ascii_lowercase().contains("docker"),
+            logs.contains("WARN")
+                && logs.to_ascii_lowercase().contains("podman")
+                && logs.to_ascii_lowercase().contains("docker"),
             "expected Linux Podman->Docker fallback WARN, got: {logs}"
         );
     }
