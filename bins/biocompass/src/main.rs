@@ -1,5 +1,6 @@
 //! `biocompass` single-binary CLI (`up`, `init-plugin`, `publish-plugin`, `catalog import`, `run`, `verify-receipt`).
 
+mod provenance;
 mod publish_ui;
 mod workspace_cli;
 
@@ -122,12 +123,15 @@ enum Commands {
         #[arg(long)]
         receipt_out: Option<PathBuf>,
     },
-    /// Offline-verify a signed `froglet/v1` artifact chain JSON file without network or node access.
+    /// Offline-verify a signed `froglet/v1` artifact chain or `bc.provenance.v1` bundle without network or node access.
     VerifyReceipt {
-        /// Path to the Froglet chain JSON file.
+        /// Path to the Froglet chain JSON file or `bc.provenance.v1` provenance bundle.
         file: PathBuf,
         #[arg(long)]
         now: Option<i64>,
+        /// Fail with non-zero exit code if a `bc.provenance.v1` bundle has any `unresolved_ancestors`.
+        #[arg(long, default_value_t = false)]
+        strict: bool,
     },
     /// Scientific DuckLake catalog management (`import` for Parquet/CSV/TSV locally or via cloud S3 quarantine, §7.2).
     Catalog {
@@ -425,22 +429,36 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 Ok(ExitCode::from(1))
             }
         }
-        Commands::VerifyReceipt { file, now } => {
+        Commands::VerifyReceipt { file, now, strict } => {
             let raw = std::fs::read_to_string(&file).map_err(|e| {
                 CompassError::Storage(format!("read {}: {e}", file.display()))
             })?;
             let val: Value = serde_json::from_str(&raw)
                 .map_err(|e| CompassError::Validation(format!("invalid JSON: {e}")))?;
-            let docs = extract_documents(&val).map_err(CompassError::Protocol)?;
-            let report = validate_chain_documents(&docs, now);
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report).unwrap_or_default()
-            );
-            if report.valid {
-                Ok(ExitCode::SUCCESS)
+            if provenance::is_provenance_bundle_json(&val) {
+                let report = provenance::verify_provenance_bundle(&val, now);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+                let ok = report.valid && (!strict || report.complete);
+                if ok {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    Ok(ExitCode::from(1))
+                }
             } else {
-                Ok(ExitCode::from(1))
+                let docs = extract_documents(&val).map_err(CompassError::Protocol)?;
+                let report = validate_chain_documents(&docs, now);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+                if report.valid {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    Ok(ExitCode::from(1))
+                }
             }
         }
         Commands::Catalog { action } => match action {

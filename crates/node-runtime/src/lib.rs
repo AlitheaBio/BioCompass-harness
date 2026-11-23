@@ -25,13 +25,17 @@ pub use target_validation::{
 use async_trait::async_trait;
 use biocompass_core_traits::{
     ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant,
-    ExtensionRefStage, FilterExpr, GrantLevel, NodeId, OciImageRef, OciRegistryClient,
-    PaymentGateway, PluginId, PrepareRunRequest, QueryAst, RunDispatcher, RunId, RunLogEvent,
-    RunQuote, RunRecord, RunStatus, SessionEventKind, SessionStore, canonicalize_run_inputs,
-    compute_canonical_workload_hash, expected_extension_refs, verify_extension_refs,
+    ExtensionRefStage, FilterExpr, GrantLevel, NodeId, OciImageRef, OciRegistryClient, OrgId,
+    PaymentGateway, PluginId, PrepareRunRequest, QueryAst, RunDispatcher, RunId, RunInput,
+    RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEventKind, SessionStore,
+    canonicalize_run_inputs, compute_canonical_workload_hash, expected_extension_refs,
+    verify_extension_refs,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, SealedSnapshot, StagingMode};
-use biocompass_oci_runner::{ContainerRunSpec, OciContainerRunner, prepare_stage_permissions};
+use biocompass_oci_runner::{
+    ChildRunBroker, ContainerRunSpec, OciContainerRunner, SuperviseOptions,
+    prepare_stage_permissions, supervise,
+};
 use biocompass_plugin_spec::{
     LoadedPlugin, PluginExecutionPlane,
     reviewed_hla_input_contract,
@@ -917,6 +921,176 @@ impl InProcessNodeRuntime {
         .map_err(CompassError::Protocol)
     }
 
+    /// Resolve the signed Froglet Deal hash for an optional parent run (`W7`), enforcing
+    /// same-org ownership and depth-1 child execution.
+    async fn resolve_parent_deal_hash(
+        &self,
+        org_id: &OrgId,
+        parent_run_id: Option<&str>,
+    ) -> CompassResult<Option<String>> {
+        let Some(raw_parent_id) = parent_run_id else {
+            return Ok(None);
+        };
+        let parent_id = RunId::new(raw_parent_id.to_owned()).map_err(CompassError::Validation)?;
+        let parent = self.session_store.get_run(&parent_id).await?;
+        if parent.org_id != *org_id {
+            return Err(CompassError::AccessDenied(format!(
+                "parent run '{}' belongs to org '{}', not '{}'",
+                parent.run_id, parent.org_id, org_id
+            )));
+        }
+        if parent.parent_run_id.is_some() {
+            return Err(CompassError::Validation(
+                "nested child runs beyond depth 1 are not permitted".into(),
+            ));
+        }
+        let deal_doc = parent.froglet_chain.get(3).ok_or_else(|| {
+            CompassError::IntegrityViolation(format!(
+                "parent run '{}' does not have a signed Deal yet",
+                parent.run_id
+            ))
+        })?;
+        let signed_deal: SignedArtifact<DealPayload> =
+            serde_json::from_value(deal_doc.clone()).map_err(|e| {
+                CompassError::IntegrityViolation(format!(
+                    "decode parent run '{}' signed Deal: {e}",
+                    parent.run_id
+                ))
+            })?;
+        if signed_deal.artifact_type != ARTIFACT_TYPE_DEAL
+            || !froglet_protocol::protocol::verify_artifact(&signed_deal)
+        {
+            return Err(CompassError::IntegrityViolation(format!(
+                "parent run '{}' Deal signature verification failed",
+                parent.run_id
+            )));
+        }
+        Ok(Some(signed_deal.hash))
+    }
+
+    /// Verify every upstream `RunInput` against the local session store (same-org, succeeded,
+    /// receipt hash match, declared artifact digest & byte length) and return summed `size_bytes`.
+    async fn verify_run_inputs_against_store(
+        &self,
+        org_id: &OrgId,
+        inputs: &[RunInput],
+    ) -> CompassResult<u64> {
+        let mut total_bytes: u64 = 0;
+        for input in inputs {
+            let source_id =
+                RunId::new(input.source_run_id.clone()).map_err(CompassError::Validation)?;
+            let source_run = self.session_store.get_run(&source_id).await?;
+            if source_run.org_id != *org_id {
+                return Err(CompassError::AccessDenied(format!(
+                    "input '{}' references run '{}' from another organization",
+                    input.alias, input.source_run_id
+                )));
+            }
+            if source_run.status != RunStatus::Succeeded || !source_run.receipt_verified {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "input '{}' references non-succeeded or unverified run '{}'",
+                    input.alias, input.source_run_id
+                )));
+            }
+            let receipt_doc = source_run.froglet_receipt.as_ref().ok_or_else(|| {
+                CompassError::IntegrityViolation(format!(
+                    "input '{}' source run '{}' has no signed receipt",
+                    input.alias, input.source_run_id
+                ))
+            })?;
+            let receipt_hash = receipt_doc
+                .get("hash")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if receipt_hash != input.source_receipt_hash {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "input '{}' source_receipt_hash '{}' does not match run '{}' receipt '{}'",
+                    input.alias, input.source_receipt_hash, input.source_run_id, receipt_hash
+                )));
+            }
+            let matched = source_run.artifacts.iter().any(|art| {
+                art.name == input.name
+                    && art.sha256 == input.sha256
+                    && art.size_bytes == input.size_bytes
+            });
+            if !matched {
+                return Err(CompassError::IntegrityViolation(format!(
+                    "input '{}' artifact '{}' (sha256={}, size={}) not found in verified source run '{}'",
+                    input.alias, input.name, input.sha256, input.size_bytes, input.source_run_id
+                )));
+            }
+            total_bytes = total_bytes.checked_add(input.size_bytes).ok_or_else(|| {
+                CompassError::input_limit_exceeded("summed RunInput sizes overflowed u64")
+            })?;
+        }
+        Ok(total_bytes)
+    }
+
+    /// Fetch, verify via `verify_released_artifact`, and stage upstream `RunInput` artifacts into
+    /// `<in_dir>/artifacts/<alias>/<name>`, enforcing `already_staged_bytes + sum(inputs) <= max_input_bytes`.
+    async fn stage_run_inputs(
+        &self,
+        inputs: &[RunInput],
+        in_dir: &Path,
+        already_staged_bytes: u64,
+        max_input_bytes: u64,
+    ) -> CompassResult<u64> {
+        let mut cumulative = already_staged_bytes;
+        for input in inputs {
+            input.validate()?;
+            let blob_key = format!("runs/{}/artifacts/{}", input.source_run_id, input.name);
+            let bytes = self.blob_store.get_bytes(&blob_key).await?;
+            let measured_sha256 = sha256_hex(&bytes);
+            let measured_size = bytes.len() as u64;
+            let expected_ref = ArtifactRef {
+                name: input.name.clone(),
+                blob_key,
+                media_type: String::new(),
+                size_bytes: input.size_bytes,
+                sha256: input.sha256.clone(),
+            };
+            verify_released_artifact(&expected_ref, &measured_sha256, measured_size)?;
+
+            cumulative = cumulative.checked_add(measured_size).ok_or_else(|| {
+                CompassError::input_limit_exceeded("staged input byte count overflowed u64")
+            })?;
+            if cumulative > max_input_bytes {
+                return Err(CompassError::input_limit_exceeded(format!(
+                    "staged params + RunInput artifacts ({cumulative} bytes) exceed signed max_input_bytes ({max_input_bytes})"
+                )));
+            }
+
+            let rel_path = input.stage_relative_path();
+            let dest = in_dir.join("artifacts").join(&rel_path);
+            let parent = dest.parent().ok_or_else(|| {
+                CompassError::Storage(format!("staged input path '{}' has no parent", rel_path))
+            })?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CompassError::Storage(format!("create input dir {}: {e}", parent.display()))
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut cur = parent;
+                while cur != in_dir {
+                    std::fs::set_permissions(cur, std::fs::Permissions::from_mode(0o755))
+                        .map_err(|e| {
+                            CompassError::Storage(format!("chmod 0755 {}: {e}", cur.display()))
+                        })?;
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None => break,
+                    }
+                }
+            }
+            std::fs::write(&dest, &bytes).map_err(|e| {
+                CompassError::Storage(format!("write staged input {}: {e}", dest.display()))
+            })?;
+            set_world_readable_file(&dest)?;
+        }
+        Ok(cumulative)
+    }
+
     /// Execute everything inside a reserved ACT + signed `Deal` scope so every outcome produces
     /// a cryptographically verified 5-artifact chain (`succeeded` or `failed`) and never leaks
     /// reserved ACT credits.
@@ -935,6 +1109,7 @@ impl InProcessNodeRuntime {
         pinned_snapshot: Option<(u64, String)>,
         revoked: Option<&AtomicBool>,
         queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
+        child_broker: Option<Arc<dyn ChildRunBroker>>,
     ) -> CompassResult<RunRecord> {
         let run_id = run.run_id.clone();
         let stage_dir = self
@@ -959,15 +1134,38 @@ impl InProcessNodeRuntime {
                 pinned_snapshot.as_ref(),
                 revoked,
                 queries,
+                child_broker,
             )
             .await;
         let outcome = if revoked.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             match outcome {
-                Err((_, message, engine)) if message.contains("OCI_CLEANUP_UNCONFIRMED") =>
-                    Err(("DATASET_ACCESS_REVOKED".into(), format!("Dataset access revoked. {message}"), engine)),
-                _ => Err(("DATASET_ACCESS_REVOKED".into(), "Dataset access revoked during execution".into(), self.oci_runner.engine().server_version.clone())),
+                Err((code, message, engine, children))
+                    if message.contains("OCI_CLEANUP_UNCONFIRMED") =>
+                {
+                    let _ = code;
+                    Err((
+                        "DATASET_ACCESS_REVOKED".into(),
+                        format!("Dataset access revoked. {message}"),
+                        engine,
+                        children,
+                    ))
+                }
+                Err((_, _, _, children)) => Err((
+                    "DATASET_ACCESS_REVOKED".into(),
+                    "Dataset access revoked during execution".into(),
+                    self.oci_runner.engine().server_version.clone(),
+                    children,
+                )),
+                Ok(ok) => Err((
+                    "DATASET_ACCESS_REVOKED".into(),
+                    "Dataset access revoked during execution".into(),
+                    self.oci_runner.engine().server_version.clone(),
+                    ok.child_receipt_hashes,
+                )),
             }
-        } else { outcome };
+        } else {
+            outcome
+        };
         let finished_at = Utc::now().timestamp().max(started_at);
 
         let capabilities = quote.payload.capabilities_granted.clone();
@@ -980,12 +1178,18 @@ impl InProcessNodeRuntime {
         let (status, result_json, artifacts, receipt_payload, err_opt) =
             match outcome {
                 Ok(success) => {
+                    let receipt_extension_refs = expected_extension_refs(
+                        ExtensionRefStage::Receipt,
+                        &[],
+                        None,
+                        &success.child_receipt_hashes,
+                    )?;
                     let payload = ReceiptPayload {
                         provider_id: self.keys.provider_id(),
                         requester_id: self.keys.requester_id(),
                         deal_hash: deal.hash.clone(),
                         quote_hash: quote.hash.clone(),
-                        extension_refs: Vec::new(),
+                        extension_refs: receipt_extension_refs,
                         acceptance_ref: None,
                         started_at: Some(started_at),
                         finished_at,
@@ -1020,13 +1224,19 @@ impl InProcessNodeRuntime {
                         None,
                     )
                 }
-                Err((code, message, engine_ver)) => {
+                Err((code, message, engine_ver, child_receipt_hashes)) => {
+                    let receipt_extension_refs = expected_extension_refs(
+                        ExtensionRefStage::Receipt,
+                        &[],
+                        None,
+                        &child_receipt_hashes,
+                    )?;
                     let payload = ReceiptPayload {
                         provider_id: self.keys.provider_id(),
                         requester_id: self.keys.requester_id(),
                         deal_hash: deal.hash.clone(),
                         quote_hash: quote.hash.clone(),
-                        extension_refs: Vec::new(),
+                        extension_refs: receipt_extension_refs,
                         acceptance_ref: None,
                         started_at: Some(started_at),
                         finished_at,
@@ -1117,15 +1327,22 @@ impl InProcessNodeRuntime {
         pinned_snapshot: Option<&(u64, String)>,
         revoked: Option<&AtomicBool>,
         queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
-    ) -> Result<StageSuccessOutcome, (String, String, String)> {
+        child_broker: Option<Arc<dyn ChildRunBroker>>,
+    ) -> Result<StageSuccessOutcome, (String, String, String, Vec<String>)> {
         let default_engine_ver = format!(
             "{}:{}",
             self.oci_runner.engine().kind.as_str(),
             self.oci_runner.engine().server_version
         );
 
-        prepare_stage_permissions(stage_dir, in_dir, out_dir)
-            .map_err(|e| ("STAGE_PREPARE_ERROR".into(), e.to_string(), default_engine_ver.clone()))?;
+        prepare_stage_permissions(stage_dir, in_dir, out_dir).map_err(|e| {
+            (
+                "STAGE_PREPARE_ERROR".into(),
+                e.to_string(),
+                default_engine_ver.clone(),
+                Vec::new(),
+            )
+        })?;
 
         // 1. Write canonical /in/params.json and enforce signed max_input_bytes (§6.2).
         let params_bytes = canonical_json::to_vec(&run.params).map_err(|e| {
@@ -1133,6 +1350,7 @@ impl InProcessNodeRuntime {
                 "PARAMS_ENCODE_ERROR".into(),
                 format!("canonicalize params.json: {e}"),
                 default_engine_ver.clone(),
+                Vec::new(),
             )
         })?;
         if params_bytes.len() > limits.max_input_bytes {
@@ -1144,6 +1362,7 @@ impl InProcessNodeRuntime {
                     limits.max_input_bytes
                 ),
                 default_engine_ver,
+                Vec::new(),
             ));
         }
         let params_path = in_dir.join("params.json");
@@ -1152,6 +1371,7 @@ impl InProcessNodeRuntime {
                 "STAGE_PARAMS_WRITE_ERROR".into(),
                 format!("write /in/params.json: {e}"),
                 default_engine_ver.clone(),
+                Vec::new(),
             )
         })?;
         set_world_readable_file(&params_path).map_err(|e| {
@@ -1159,8 +1379,36 @@ impl InProcessNodeRuntime {
                 "STAGE_PERMS_ERROR".into(),
                 e.to_string(),
                 default_engine_ver.clone(),
+                Vec::new(),
             )
         })?;
+
+        // 1b. Stage verified upstream RunInput artifacts under /in/artifacts/<alias>/<name>
+        // and count their bytes against signed Offer max_input_bytes (W6).
+        if !run.inputs.is_empty() {
+            let staged_bytes = self
+                .stage_run_inputs(
+                    &run.inputs,
+                    in_dir,
+                    params_bytes.len() as u64,
+                    limits.max_input_bytes as u64,
+                )
+                .await
+                .map_err(|e| {
+                    let code = if e.error_code() == biocompass_core_traits::ErrorCode::InputLimitExceeded {
+                        "INPUT_LIMIT_EXCEEDED"
+                    } else {
+                        "RUN_INPUT_STAGE_ERROR"
+                    };
+                    (code.into(), e.to_string(), default_engine_ver.clone(), Vec::new())
+                })?;
+            let msg = format!(
+                "Staged {} verified provenance input artifact(s) ({staged_bytes} bytes total incl. params)",
+                run.inputs.len()
+            );
+            run.logs.push(format!("[stage] {msg}"));
+            self.emit_stage_log(&run.run_id, msg);
+        }
 
         // 2. Supply private named projections or the legacy single-table Parquet slice.
         if queries.is_some() {
@@ -1171,7 +1419,7 @@ impl InProcessNodeRuntime {
             )
                 .await
                 .map_err(|e| (
-                    "PRIVATE_DATASET_STAGE_ERROR".into(), e.to_string(), default_engine_ver.clone()
+                    "PRIVATE_DATASET_STAGE_ERROR".into(), e.to_string(), default_engine_ver.clone(), Vec::new()
                 ))?;
         } else if let Some(grant) = &run.grant {
             let catalog = self.get_catalog(&grant.catalog_id).await.map_err(|e| {
@@ -1179,6 +1427,7 @@ impl InProcessNodeRuntime {
                     "CATALOG_LOOKUP_ERROR".into(),
                     e.to_string(),
                     default_engine_ver.clone(),
+                    Vec::new(),
                 )
             })?;
             let mut filter_query: QueryAst = run
@@ -1192,6 +1441,7 @@ impl InProcessNodeRuntime {
                         "COHORT_FILTER_INVALID".into(),
                         format!("invalid cohort_filter: {e}"),
                         default_engine_ver.clone(),
+                        Vec::new(),
                     )
                 })?
                 .unwrap_or_default();
@@ -1219,6 +1469,7 @@ impl InProcessNodeRuntime {
                     "STAGE_DATA_DIR_ERROR".into(),
                     format!("create /in/data: {e}"),
                     default_engine_ver.clone(),
+                    Vec::new(),
                 )
             })?;
             #[cfg(unix)]
@@ -1234,6 +1485,7 @@ impl InProcessNodeRuntime {
                         "DUCKDB_STAGE_ERROR".into(),
                         e.to_string(),
                         default_engine_ver.clone(),
+                        Vec::new(),
                     )
                 })?;
             if let Some((pinned_sid, expected_digest)) = pinned_snapshot
@@ -1246,6 +1498,7 @@ impl InProcessNodeRuntime {
                         slice.snapshot_id, slice.dataset_digest, pinned_sid, expected_digest
                     ),
                     default_engine_ver.clone(),
+                    Vec::new(),
                 ));
             }
             set_world_readable_file(&cohort_parquet).map_err(|e| {
@@ -1253,6 +1506,7 @@ impl InProcessNodeRuntime {
                     "STAGE_PERMS_ERROR".into(),
                     e.to_string(),
                     default_engine_ver.clone(),
+                    Vec::new(),
                 )
             })?;
             let _ = self
@@ -1291,33 +1545,40 @@ impl InProcessNodeRuntime {
             command_override: None,
         };
 
-        let report = self
-            .oci_runner
-            .execute_with_limits(
-                &spec,
-                Some(self.log_tx.clone()),
+        let report = supervise(
+            self.oci_runner.as_ref(),
+            &spec,
+            SuperviseOptions {
+                log_tx: Some(self.log_tx.clone()),
                 revoked,
-                queries,
-                None,
-                Some(limits.max_output_bytes as u64),
-            )
-            .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                run.logs.push(format!("[error] {msg}"));
-                let code = if msg.contains("DATASET_ACCESS_REVOKED:") {
-                    "DATASET_ACCESS_REVOKED"
-                } else if msg.contains("OUTPUT_QUOTA_EXCEEDED:") {
-                    "OUTPUT_QUOTA_EXCEEDED"
-                } else if msg.contains("CONTAINER_TIMEOUT:") {
-                    "CONTAINER_TIMEOUT"
-                } else {
-                    "CONTAINER_EXECUTION_ERROR"
-                };
-                (code.into(), msg, default_engine_ver.clone())
-            })?;
+                live_query: queries,
+                child_broker,
+                allowed_child_modules: plugin.manifest.child_modules.clone(),
+                max_child_wait_sec: plugin.manifest.max_child_wait_sec,
+                max_output_bytes: Some(limits.max_output_bytes as u64),
+                ..SuperviseOptions::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            run.logs.push(format!("[error] {msg}"));
+            let code = if msg.contains("DATASET_ACCESS_REVOKED:") {
+                "DATASET_ACCESS_REVOKED"
+            } else if msg.contains("OUTPUT_QUOTA_EXCEEDED:") {
+                "OUTPUT_QUOTA_EXCEEDED"
+            } else if msg.contains("CONTAINER_TIMEOUT:") {
+                "CONTAINER_TIMEOUT"
+            } else if msg.contains("MAILBOX_VIOLATION:") {
+                "MAILBOX_VIOLATION"
+            } else {
+                "CONTAINER_EXECUTION_ERROR"
+            };
+            (code.into(), msg, default_engine_ver.clone(), Vec::new())
+        })?;
 
         let engine_version = format!("{}:{}", report.engine.as_str(), report.engine_version);
+        let child_receipt_hashes = report.child_receipt_hashes;
         for line in &report.stdout_lines {
             run.logs.push(format!("[stdout] {line}"));
         }
@@ -1331,6 +1592,7 @@ impl InProcessNodeRuntime {
                 "INVALID_OUTPUT_TREE".into(),
                 msg,
                 engine_version.clone(),
+                child_receipt_hashes.clone(),
             )
         })?;
         let total_output_bytes = out_dir_bytes.saturating_add(report.log_bytes_total);
@@ -1342,6 +1604,7 @@ impl InProcessNodeRuntime {
                     report.log_bytes_total, limits.max_output_bytes
                 ),
                 engine_version,
+                child_receipt_hashes,
             ));
         }
 
@@ -1364,6 +1627,7 @@ impl InProcessNodeRuntime {
                     report.exit_code
                 ),
                 engine_version,
+                child_receipt_hashes,
             ));
         }
 
@@ -1374,6 +1638,7 @@ impl InProcessNodeRuntime {
                 "MISSING_RESULT_JSON".into(),
                 format!("container exited 0 without writing /out/result.json: {e}"),
                 engine_version.clone(),
+                child_receipt_hashes.clone(),
             )
         })?;
         if result_meta.file_type().is_symlink() || !result_meta.is_file() {
@@ -1381,6 +1646,7 @@ impl InProcessNodeRuntime {
                 "INVALID_RESULT_FILE".into(),
                 "/out/result.json must be a regular file, not a symlink".into(),
                 engine_version,
+                child_receipt_hashes,
             ));
         }
         let result_bytes = std::fs::read(&result_path).map_err(|e| {
@@ -1388,6 +1654,7 @@ impl InProcessNodeRuntime {
                 "READ_RESULT_ERROR".into(),
                 format!("read /out/result.json: {e}"),
                 engine_version.clone(),
+                child_receipt_hashes.clone(),
             )
         })?;
         let result_value: Value = serde_json::from_slice(&result_bytes).map_err(|e| {
@@ -1395,6 +1662,7 @@ impl InProcessNodeRuntime {
                 "INVALID_RESULT_JSON".into(),
                 format!("/out/result.json is not valid JSON: {e}"),
                 engine_version.clone(),
+                child_receipt_hashes.clone(),
             )
         })?;
 
@@ -1408,22 +1676,38 @@ impl InProcessNodeRuntime {
                     "BLOB_STORE_ERROR".into(),
                     e.to_string(),
                     engine_version.clone(),
+                    child_receipt_hashes.clone(),
                 )
             })?;
 
         let artifacts = self
             .collect_output_artifacts(&run.run_id, &out_dir.join("artifacts"))
             .await
-            .map_err(|e| ("ARTIFACT_STAGE_OUT_ERROR".into(), e.to_string(), engine_version.clone()))?;
+            .map_err(|e| {
+                (
+                    "ARTIFACT_STAGE_OUT_ERROR".into(),
+                    e.to_string(),
+                    engine_version.clone(),
+                    child_receipt_hashes.clone(),
+                )
+            })?;
 
         let result_hash = biocompass_core_traits::result_manifest_hash(&result_sha256, &artifacts)
-            .map_err(|error| ("RESULT_HASH_ERROR".into(), error.to_string(), engine_version.clone()))?;
+            .map_err(|error| {
+                (
+                    "RESULT_HASH_ERROR".into(),
+                    error.to_string(),
+                    engine_version.clone(),
+                    child_receipt_hashes.clone(),
+                )
+            })?;
 
         Ok(StageSuccessOutcome {
             result_value,
             artifacts,
             result_hash,
             engine_version,
+            child_receipt_hashes,
         })
     }
 
@@ -1467,6 +1751,7 @@ struct StageSuccessOutcome {
     artifacts: Vec<ArtifactRef>,
     result_hash: String,
     engine_version: String,
+    child_receipt_hashes: Vec<String>,
 }
 
 pub fn measure_dir_regular_bytes(dir: &Path) -> Result<u64, String> {
@@ -1635,6 +1920,7 @@ pub fn validate_reviewed_hla_inputs(
 }
 
 pub use biocompass_plugin_spec::validate_reviewed_hla_capabilities;
+pub use froglet_protocol;
 
 /// Supply scoped, named inputs using sealed shards, also usable with the worker's cached engine.
 #[allow(clippy::too_many_arguments)]
@@ -1735,14 +2021,26 @@ impl RunDispatcher for InProcessNodeRuntime {
         let selected_offer = plugin.manifest.resolve_offer(req.offer_id.as_deref())?;
         let canonical_params = canonical_json::to_vec(&req.params)
             .map_err(|e| CompassError::Validation(format!("canonicalize params.json: {e}")))?;
-        if (canonical_params.len() as u64) > selected_offer.max_input_bytes {
-            return Err(CompassError::Validation(format!(
-                "INPUT_LIMIT_EXCEEDED: canonical params.json is {} bytes, exceeding offer '{}' max_input_bytes ({})",
+        let inputs_total_bytes = self
+            .verify_run_inputs_against_store(&req.org_id, &canonical_inputs)
+            .await?;
+        let combined_input_bytes = (canonical_params.len() as u64)
+            .checked_add(inputs_total_bytes)
+            .ok_or_else(|| {
+                CompassError::input_limit_exceeded("params + RunInput byte total overflowed u64")
+            })?;
+        if combined_input_bytes > selected_offer.max_input_bytes {
+            return Err(CompassError::input_limit_exceeded(format!(
+                "canonical params.json ({} B) + RunInput artifacts ({inputs_total_bytes} B) = {combined_input_bytes} B, exceeding offer '{}' max_input_bytes ({})",
                 canonical_params.len(),
                 selected_offer.id,
                 selected_offer.max_input_bytes
             )));
         }
+
+        let parent_deal_hash = self
+            .resolve_parent_deal_hash(&req.org_id, req.parent_run_id.as_deref())
+            .await?;
 
         let is_curated_approved = self
             .is_curated_module_approved(
@@ -1764,7 +2062,7 @@ impl RunDispatcher for InProcessNodeRuntime {
         let quote_extension_refs = expected_extension_refs(
             ExtensionRefStage::QuoteOrDeal,
             &canonical_inputs,
-            None,
+            parent_deal_hash.as_deref(),
             &[],
         )?;
 
@@ -1982,6 +2280,18 @@ impl InProcessNodeRuntime {
         revoked: Option<&AtomicBool>,
         queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
     ) -> CompassResult<RunRecord> {
+        self.confirm_run_with_mailbox(run_id, idempotency_key, revoked, queries, None)
+            .await
+    }
+
+    pub async fn confirm_run_with_mailbox(
+        &self,
+        run_id: &RunId,
+        idempotency_key: &str,
+        revoked: Option<&AtomicBool>,
+        queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
+        child_broker: Option<Arc<dyn ChildRunBroker>>,
+    ) -> CompassResult<RunRecord> {
         let idempotency_key = idempotency_key.trim();
         if idempotency_key.is_empty() {
             return Err(CompassError::Validation("idempotency_key is required".into()));
@@ -2136,17 +2446,20 @@ impl InProcessNodeRuntime {
                 signed_quote.payload.workload_hash
             )));
         }
+        let parent_deal_hash = self
+            .resolve_parent_deal_hash(&run.org_id, run.parent_run_id.as_deref())
+            .await?;
         verify_extension_refs(
             ExtensionRefStage::QuoteOrDeal,
             &signed_quote.payload.extension_refs,
             &run.inputs,
-            None,
+            parent_deal_hash.as_deref(),
             &[],
         )?;
         let deal_extension_refs = expected_extension_refs(
             ExtensionRefStage::QuoteOrDeal,
             &run.inputs,
-            None,
+            parent_deal_hash.as_deref(),
             &[],
         )?;
 
@@ -2210,6 +2523,7 @@ impl InProcessNodeRuntime {
             confirm_snapshot_pin,
             revoked,
             queries,
+            child_broker,
         )
         .await
     }
@@ -2363,6 +2677,7 @@ mod sec_31_tests {
                 &in_dir,
                 &out_dir,
                 Some(&wrong_pin),
+                None,
                 None,
                 None,
             )
