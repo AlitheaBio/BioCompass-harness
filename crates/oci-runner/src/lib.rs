@@ -319,6 +319,50 @@ pub fn prepare_stage_permissions(stage_root: &Path, in_dir: &Path, out_dir: &Pat
     Ok(())
 }
 
+fn hash_bundled_build_context(root: &Path) -> CompassResult<String> {
+    use sha2::{Digest, Sha256};
+
+    fn walk(base: &Path, dir: &Path, entries: &mut Vec<(String, PathBuf)>) -> CompassResult<()> {
+        for item in std::fs::read_dir(dir)
+            .map_err(|e| CompassError::Storage(format!("read {}: {e}", dir.display())))?
+        {
+            let item = item.map_err(|e| CompassError::Storage(e.to_string()))?;
+            let path = item.path();
+            let rel = path
+                .strip_prefix(base)
+                .map_err(|e| CompassError::Internal(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "ui" || rel.starts_with("ui/") || rel.contains("__pycache__") {
+                continue;
+            }
+            let ft = item
+                .file_type()
+                .map_err(|e| CompassError::Storage(e.to_string()))?;
+            if ft.is_dir() {
+                walk(base, &path, entries)?;
+            } else if ft.is_file() {
+                entries.push((rel, path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, root, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (rel, path) in files {
+        hasher.update(rel.as_bytes());
+        hasher.update([0u8]);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| CompassError::Storage(format!("read {}: {e}", path.display())))?;
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// Hardened OCI container runner executing real Podman/Docker containers with live log streaming.
 #[derive(Debug, Clone)]
 pub struct OciContainerRunner {
@@ -386,6 +430,174 @@ impl OciContainerRunner {
             }
         }
         Err(CompassError::NotFound(format!("image is not installed locally: {image}")))
+    }
+
+    async fn inspect_local_image_id(&self, image_ref: &str) -> CompassResult<Option<String>> {
+        let output = tokio::time::timeout(
+            Duration::from_secs(4),
+            Command::new(&self.engine.binary_path)
+                .args(["image", "inspect", "--format", "{{.Id}}", image_ref])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| CompassError::ContainerEngine("local image inspection timed out".into()))?
+        .map_err(|e| CompassError::ContainerEngine(e.to_string()))?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let id = String::from_utf8_lossy(&output.stdout);
+        let digest = id.trim().strip_prefix("sha256:").unwrap_or(id.trim());
+        if digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            Ok(Some(digest.to_owned()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Build (or reuse cached) a bundled local plugin `Dockerfile` under `local/bundled-<slug>:sha256-<id>`
+    /// when the pinned registry is unreachable on a clean local clone (R11).
+    pub async fn build_local_bundled_image(
+        &self,
+        context_dir: &Path,
+        slug: &str,
+        version: &str,
+    ) -> CompassResult<OciImageRef> {
+        let dockerfile = context_dir.join("Dockerfile");
+        if !dockerfile.is_file() {
+            return Err(CompassError::NotFound(format!(
+                "bundled Dockerfile missing at {}",
+                dockerfile.display()
+            )));
+        }
+        let safe_slug: String = slug
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let safe_ver: String = version
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let content_hash = hash_bundled_build_context(context_dir)?;
+        let stage_tag = format!("local/bundled-{safe_slug}:stage-{safe_ver}-{}", &content_hash[..12]);
+
+        let digest = match self.inspect_local_image_id(&stage_tag).await? {
+            Some(existing) => existing,
+            None => {
+                let out = tokio::time::timeout(
+                    Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
+                    Command::new(&self.engine.binary_path)
+                        .args(["build", "-t", &stage_tag])
+                        .arg(context_dir)
+                        .kill_on_drop(true)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output(),
+                )
+                .await
+                .map_err(|_| {
+                    CompassError::ContainerEngine(format!(
+                        "timed out building bundled Dockerfile '{}'",
+                        dockerfile.display()
+                    ))
+                })?
+                .map_err(|e| {
+                    CompassError::ContainerEngine(format!(
+                        "spawn {} build failed: {e}",
+                        self.engine.binary_path.display()
+                    ))
+                })?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                    return Err(CompassError::ContainerEngine(format!(
+                        "failed building bundled Dockerfile '{}': {}",
+                        dockerfile.display(),
+                        if stderr.is_empty() {
+                            format!("exit code {:?}", out.status.code())
+                        } else {
+                            stderr
+                        }
+                    )));
+                }
+                self.inspect_local_image_id(&stage_tag)
+                    .await?
+                    .ok_or_else(|| {
+                        CompassError::ContainerEngine(format!(
+                            "built bundled image '{stage_tag}' could not be inspected"
+                        ))
+                    })?
+            }
+        };
+
+        let pinned_local_tag = format!("local/bundled-{safe_slug}:sha256-{digest}");
+        if self.inspect_local_image_id(&pinned_local_tag).await?.as_deref() != Some(digest.as_str())
+        {
+            let tag_out = tokio::time::timeout(
+                Duration::from_secs(10),
+                Command::new(&self.engine.binary_path)
+                    .args(["tag", &stage_tag, &pinned_local_tag])
+                    .kill_on_drop(true)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output(),
+            )
+            .await
+            .map_err(|_| CompassError::ContainerEngine("local image tag timed out".into()))?
+            .map_err(|e| CompassError::ContainerEngine(format!("tag bundled image failed: {e}")))?;
+            if !tag_out.status.success() {
+                let stderr = String::from_utf8_lossy(&tag_out.stderr).trim().to_owned();
+                return Err(CompassError::ContainerEngine(format!(
+                    "failed tagging bundled image '{pinned_local_tag}': {stderr}"
+                )));
+            }
+        }
+        OciImageRef::parse(&pinned_local_tag, true)
+    }
+
+    /// Verify at `confirm` time that a `local/bundled-<slug>:sha256-<digest>` quote still resolves
+    /// to the exact local container image ID recorded when the quote was signed.
+    pub async fn verify_local_bundled_image(&self, image_ref: &str) -> CompassResult<OciImageRef> {
+        let parsed = OciImageRef::parse(image_ref, true)?;
+        let Some(expected_digest) = parsed
+            .local_tag
+            .as_deref()
+            .filter(|_| parsed.repository.starts_with("local/bundled-"))
+            .and_then(|t| t.strip_prefix("sha256-"))
+        else {
+            return Err(CompassError::Validation(format!(
+                "invalid local bundled image reference '{image_ref}'"
+            )));
+        };
+        let actual = self.inspect_local_image_id(&parsed.raw).await?.ok_or_else(|| {
+            CompassError::NotFound(format!(
+                "locally built bundled image '{image_ref}' is no longer present"
+            ))
+        })?;
+        if actual != expected_digest {
+            return Err(CompassError::IntegrityViolation(format!(
+                "local bundled image '{image_ref}' ID changed (expected {expected_digest}, got {actual})"
+            )));
+        }
+        Ok(parsed)
     }
 
     /// Pull an OCI image into the bound container engine store.
@@ -508,7 +720,10 @@ impl OciContainerRunner {
                 }
             };
             args.insert(1, "--pull=never".into());
-        } else if self.worker_cache.is_some() || spec.image.raw.starts_with("sha256:") {
+        } else if self.worker_cache.is_some()
+            || spec.image.raw.starts_with("sha256:")
+            || spec.image.repository.starts_with("local/bundled-")
+        {
             // A development tag may use an already installed image. Only the
             // digest admission path can fetch images into a worker-owned engine.
             args.insert(1, "--pull=never".into());

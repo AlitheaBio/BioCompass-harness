@@ -28,6 +28,11 @@ export function PaidRunConsent({ quote, params, busy, error, onApprove, onDismis
       <p>{quote.plugin_id} · v{quote.plugin_version}</p>
       <p>{quote.offer_name ?? quote.offer_id ?? "Run"} · <strong>{formatMilliAct(quote.estimated_cost_act)}</strong></p>
       <p className="bc-caption mono">Run {quote.run_id}</p>
+      {quote.execution_notice && (
+        <p data-testid="paid-run-execution-notice" className="bc-caption" style={{ marginTop: 8 }}>
+          {quote.execution_notice}
+        </p>
+      )}
       <details style={{ marginBlock: 12 }}>
         <summary>Run details</summary>
         {quote.dataset_grant_summary && <p>Dataset access · {quote.dataset_grant_summary}</p>}

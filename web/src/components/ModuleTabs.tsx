@@ -668,6 +668,21 @@ export function ModuleApiTab({
                 )}
             </div>
 
+            {preparedQuote.execution_notice && (
+              <div
+                data-testid="quote-execution-notice"
+                className="bc-caption"
+                style={{
+                  padding: "6px 8px",
+                  borderRadius: "var(--bc-radius-sm)",
+                  background: "var(--bc-bg-elevated, rgba(255, 193, 7, 0.08))",
+                  border: "1px solid var(--bc-border)",
+                }}
+              >
+                {preparedQuote.execution_notice}
+              </div>
+            )}
+
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button
                 type="button"

@@ -9,7 +9,6 @@ use biocompass_core_traits::{
     BlobStore, CatalogId, CompassError, CompassResult, CreditAmountAct, DatasetGrant, GrantLevel,
     LocalFsBlobStore, NodeId, OciImageRef, OciRegistryClient, OrgId, PaymentGateway, PluginId,
     QueryAst, RunDispatcher, SessionStore, SqliteActLedger, SqliteSessionStore,
-    StandardOciPolicyVerifier,
 };
 use biocompass_data_engine::{
     CatalogSummary, DuckDbCatalogEngine, QueryTableResult, seed_demo_hla_catalog,
@@ -27,12 +26,16 @@ use tokio::sync::RwLock;
 struct WorkstationImageVerifier {
     runner: Arc<OciContainerRunner>,
     registry: OciDistributionClient,
+    allow_local_dev_tags: bool,
 }
 
 #[async_trait]
 impl OciRegistryClient for WorkstationImageVerifier {
     async fn verify_image(&self, image_raw: &str) -> CompassResult<OciImageRef> {
-        let pin = OciImageRef::parse(image_raw, false)?;
+        let pin = OciImageRef::parse(image_raw, self.allow_local_dev_tags)?;
+        if pin.sha256_digest.is_none() {
+            return Ok(pin);
+        }
         if self.runner.has_verified_local_digest(&pin.raw).await {
             return Ok(pin);
         }
@@ -309,11 +312,11 @@ impl AppState {
         let _ = payment_gateway.available_balance(&default_org_id).await?;
 
         let oci_runner = Arc::new(OciContainerRunner::detect().await?);
-        let oci_registry: Arc<dyn OciRegistryClient> = if allow_local_dev_tags {
-            Arc::new(StandardOciPolicyVerifier::workstation_dev())
-        } else {
-            Arc::new(WorkstationImageVerifier { runner: Arc::clone(&oci_runner), registry: OciDistributionClient::new(true)? })
-        };
+        let oci_registry: Arc<dyn OciRegistryClient> = Arc::new(WorkstationImageVerifier {
+            runner: Arc::clone(&oci_runner),
+            registry: OciDistributionClient::new(true)?,
+            allow_local_dev_tags,
+        });
         let container_engine_label = format!(
             "{} {} (rootless={})",
             oci_runner.engine().kind.as_str(),

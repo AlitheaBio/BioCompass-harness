@@ -378,6 +378,73 @@ impl InProcessNodeRuntime {
         Ok(())
     }
 
+    fn bundled_dockerfile_dir(&self, plugin: &LoadedPlugin) -> Option<PathBuf> {
+        let root = self.stage_root_dir.parent()?;
+        let dir = plugin.root_dir.as_deref()?;
+        if dir.parent() == Some(root.join("bundled-plugins").as_path())
+            && dir.join("Dockerfile").is_file()
+        {
+            Some(dir.to_path_buf())
+        } else {
+            None
+        }
+    }
+
+    async fn resolve_local_bundled_fallback(
+        &self,
+        plugin: &LoadedPlugin,
+        registry_err: CompassError,
+    ) -> CompassResult<(OciImageRef, Option<String>)> {
+        let Some(bundled_dir) = self.bundled_dockerfile_dir(plugin) else {
+            return Err(registry_err);
+        };
+        let slug = bundled_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_else(|| {
+                plugin
+                    .manifest
+                    .id
+                    .as_str()
+                    .split_once('/')
+                    .map_or(plugin.manifest.id.as_str(), |(_, s)| s)
+            });
+        let built = self
+            .oci_runner
+            .build_local_bundled_image(&bundled_dir, slug, &plugin.manifest.version)
+            .await?;
+
+        if let Ok(manifest_img) = OciImageRef::parse(&plugin.manifest.image, true)
+            && self
+                .is_curated_module_approved(
+                    &plugin.manifest.id,
+                    &plugin.manifest.version,
+                    &manifest_img.canonical_module_hash(),
+                )
+                .await
+        {
+            self.approve_curated_module(
+                plugin.manifest.id.clone(),
+                plugin.manifest.version.clone(),
+                built.canonical_module_hash(),
+            )
+            .await;
+        }
+
+        let notice = format!(
+            "Pinned registry image '{}' was unreachable; built bundled plugins/{slug}/Dockerfile locally ({}) under local dev allowance.",
+            plugin.manifest.image, built.raw
+        );
+        tracing::warn!(
+            plugin_id = %plugin.manifest.id,
+            pinned_image = %plugin.manifest.image,
+            local_image = %built.raw,
+            registry_error = %registry_err,
+            "{notice}"
+        );
+        Ok((built, Some(notice)))
+    }
+
     fn workspace_module(&self, p: &LoadedPlugin) -> CompassResult<Option<WorkspacePackageFiles>> {
         let (Some(root), Some(dir)) = (self.stage_root_dir.parent(), p.root_dir.as_deref()) else {
             return Ok(None);
@@ -1563,10 +1630,14 @@ impl RunDispatcher for InProcessNodeRuntime {
             ));
         }
 
-        let verified_image = self
+        let (verified_image, execution_notice) = match self
             .oci_registry
             .verify_image(&plugin.manifest.image)
-            .await?;
+            .await
+        {
+            Ok(img) => (img, None),
+            Err(err) => self.resolve_local_bundled_fallback(&plugin, err).await?,
+        };
 
         let mut dataset_digest: Option<String> = None;
         let mut grant_summary: Option<String> = None;
@@ -1770,9 +1841,15 @@ impl RunDispatcher for InProcessNodeRuntime {
             max_memory_mb: selected_offer.max_memory_mb,
             workload_hash,
             dataset_grant_summary: grant_summary,
+            execution_notice: execution_notice.clone(),
             froglet_quote: quote_json.clone(),
             expires_at,
         };
+
+        let mut initial_logs = Vec::new();
+        if let Some(notice) = &execution_notice {
+            initial_logs.push(format!("[stage] {notice}"));
+        }
 
         let run_record = RunRecord {
             run_id: run_id.clone(),
@@ -1790,7 +1867,7 @@ impl RunDispatcher for InProcessNodeRuntime {
             froglet_receipt: None,
             froglet_chain: vec![descriptor_json, offer_json, quote_json],
             receipt_verified: false,
-            logs: Vec::new(),
+            logs: initial_logs,
             error_message: None,
             created_at: Utc::now(),
             completed_at: None,
@@ -1918,12 +1995,19 @@ impl InProcessNodeRuntime {
                 )));
             }
         }
-        if plugin.manifest.image.trim() != run.quote.image_ref {
+        let verified_image = if plugin.manifest.image.trim() == run.quote.image_ref {
+            self.oci_registry.verify_image(&run.quote.image_ref).await?
+        } else if self.bundled_dockerfile_dir(&plugin).is_some()
+            && run.quote.image_ref.starts_with("local/bundled-")
+        {
+            self.oci_runner
+                .verify_local_bundled_image(&run.quote.image_ref)
+                .await?
+        } else {
             return Err(CompassError::IntegrityViolation(format!(
                 "installed module image differs from the quoted image for run '{run_id}'"
             )));
-        }
-        let verified_image = self.oci_registry.verify_image(&run.quote.image_ref).await?;
+        };
 
         // Recompute canonical workload_hash at confirm time before starting container (B6).
         let confirm_dataset_digest = if let Some(grant) = &run.grant {

@@ -513,6 +513,7 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
             max_memory_mb: 4096,
             workload_hash: "hash-1".into(),
             dataset_grant_summary: Some(grant.label.clone()),
+            execution_notice: None,
             froglet_quote: json!({}),
             expires_at: now,
         },

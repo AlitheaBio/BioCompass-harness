@@ -754,6 +754,8 @@ pub struct RunQuote {
     pub max_memory_mb: u64,
     pub workload_hash: String,
     pub dataset_grant_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_notice: Option<String>,
     pub froglet_quote: Value,
     pub expires_at: DateTime<Utc>,
 }
