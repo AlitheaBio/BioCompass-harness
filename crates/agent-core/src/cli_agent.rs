@@ -221,40 +221,156 @@ where
     buf
 }
 
-fn is_biocompass_mcp_permission(params: &Value, tool_titles: &HashMap<String, String>) -> bool {
+#[derive(Debug, Default, Clone)]
+struct AcpToolCallMeta {
+    kind: Option<String>,
+    server_name: Option<String>,
+    identifiers: Vec<String>,
+}
+
+fn is_forbidden_host_tool_kind(kind: &str) -> bool {
+    let lower = kind.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    !matches!(lower.as_str(), "other" | "mcp" | "tool")
+}
+
+fn is_forbidden_host_tool_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "bash"
+            | "terminal"
+            | "execute"
+            | "exec"
+            | "shell"
+            | "sh"
+            | "zsh"
+            | "cmd"
+            | "powershell"
+            | "write"
+            | "write_file"
+            | "edit"
+            | "edit_file"
+            | "read"
+            | "read_file"
+            | "delete"
+            | "delete_file"
+            | "create_file"
+            | "apply_patch"
+            | "str_replace"
+            | "run_command"
+            | "fs"
+            | "fetch"
+            | "web_fetch"
+    )
+}
+
+fn extract_acp_tool_meta(obj: &Value) -> AcpToolCallMeta {
+    let mut meta = AcpToolCallMeta::default();
+    if let Some(k) = obj.get("kind").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        meta.kind = Some(k.to_owned());
+    }
+    for ptr in ["/serverName", "/server", "/mcpServer", "/_meta/serverName", "/_meta/mcpServer"] {
+        if let Some(s) = obj.pointer(ptr).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            meta.server_name = Some(s.to_owned());
+            break;
+        }
+    }
+    for ptr in ["/toolName", "/name", "/_meta/tool_name", "/_meta/toolName", "/title"] {
+        if let Some(s) = obj.pointer(ptr).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            meta.identifiers.push(s.to_owned());
+        }
+    }
+    meta
+}
+
+fn matches_exact_biocompass_mcp_identifier(
+    ident: &str,
+    server_name: Option<&str>,
+    allowed_names: &[String],
+) -> bool {
+    let trimmed = ident.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("confirm") {
+        return false;
+    }
+    for tool in allowed_names {
+        let t = tool.to_ascii_lowercase();
+        if t.contains("confirm") {
+            continue;
+        }
+        if lower == format!("mcp__biocompass__{t}")
+            || lower == format!("mcp_biocompass.{t}")
+            || lower == format!("mcp_biocompass_{t}")
+            || lower == format!("biocompass/{t}")
+            || lower == format!("biocompass.{t}")
+            || lower == format!("biocompass:{t}")
+            || lower == format!("biocompass__{t}")
+        {
+            return true;
+        }
+        if server_name.is_some_and(|s| s.eq_ignore_ascii_case("biocompass")) && lower == t {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strictly decide whether an ACP `session/request_permission` call targets one of BioCompass's
+/// registered MCP tools (`SEC-19`). NEVER inspects `rawInput` or matches substrings.
+fn is_biocompass_mcp_permission(params: &Value, tool_meta: &HashMap<String, AcpToolCallMeta>) -> bool {
     let allowed_names: Vec<String> = allowed_tool_definitions()
         .into_iter()
         .map(|t| t.name)
+        .filter(|name| !name.to_ascii_lowercase().contains("confirm"))
         .collect();
 
     let tool_call = params.get("toolCall").unwrap_or(params);
-    let mut candidates = Vec::new();
-    for key in ["title", "name", "toolName", "kind"] {
-        if let Some(s) = tool_call.get(key).and_then(Value::as_str) {
-            candidates.push(s.to_ascii_lowercase());
+    let mut direct = extract_acp_tool_meta(tool_call);
+    if let Some(call_id) = tool_call.get("toolCallId").and_then(Value::as_str)
+        && let Some(cached) = tool_meta.get(call_id)
+    {
+        if direct.kind.is_none() {
+            direct.kind = cached.kind.clone();
+        }
+        if direct.server_name.is_none() {
+            direct.server_name = cached.server_name.clone();
+        }
+        // If cached kind was forbidden, preserve rejection even if toolCall omitted kind.
+        if cached.kind.as_deref().is_some_and(is_forbidden_host_tool_kind) {
+            return false;
+        }
+        for id in &cached.identifiers {
+            if !direct.identifiers.contains(id) {
+                direct.identifiers.push(id.clone());
+            }
         }
     }
-    if let Some(call_id) = tool_call.get("toolCallId").and_then(Value::as_str)
-        && let Some(cached) = tool_titles.get(call_id)
-    {
-        candidates.push(cached.to_ascii_lowercase());
-    }
-    if let Some(raw_input) = tool_call.get("rawInput")
-        && let Ok(s) = serde_json::to_string(raw_input)
-    {
-        candidates.push(s.to_ascii_lowercase());
-    }
 
-    let joined = candidates.join(" ");
-    if joined.contains("confirm_run") {
+    if direct.kind.as_deref().is_some_and(is_forbidden_host_tool_kind) {
         return false;
     }
-    if joined.contains("biocompass") {
-        return true;
+    if direct.identifiers.is_empty() {
+        return false;
     }
-    allowed_names
+    if direct
+        .identifiers
         .iter()
-        .any(|name| joined.contains(&name.to_ascii_lowercase()))
+        .any(|id| is_forbidden_host_tool_name(id) || id.to_ascii_lowercase().contains("confirm"))
+    {
+        return false;
+    }
+
+    let server_name = direct.server_name.as_deref();
+    direct
+        .identifiers
+        .iter()
+        .any(|id| matches_exact_biocompass_mcp_identifier(id, server_name, &allowed_names))
 }
 
 fn choose_acp_permission_outcome(params: &Value, allow: bool) -> Value {
@@ -265,14 +381,16 @@ fn choose_acp_permission_outcome(params: &Value, allow: bool) -> Value {
         .unwrap_or_default();
 
     if allow {
-        for preferred in ["allow_once", "allow_always", "allow"] {
+        // SEC-19: Only permit explicit single-invocation `allow_once` / exact `allow`.
+        // Never grant persistent `allow_always` or fall back to an arbitrary `options.first()`.
+        for preferred in ["allow_once", "allow"] {
             if let Some(opt) = options.iter().find(|o| {
                 o.get("kind")
                     .and_then(Value::as_str)
-                    .is_some_and(|k| k.contains(preferred))
+                    .is_some_and(|k| k == preferred)
                     || o.get("optionId")
                         .and_then(Value::as_str)
-                        .is_some_and(|id| id.contains(preferred))
+                        .is_some_and(|id| id == preferred)
             }) && let Some(id) = opt.get("optionId").and_then(Value::as_str)
             {
                 return json!({
@@ -280,30 +398,22 @@ fn choose_acp_permission_outcome(params: &Value, allow: bool) -> Value {
                 });
             }
         }
-        if let Some(first_id) = options
-            .first()
-            .and_then(|o| o.get("optionId"))
-            .and_then(Value::as_str)
+        return json!({ "outcome": { "outcome": "cancelled" } });
+    }
+
+    for preferred in ["reject_once", "reject_always", "reject", "deny"] {
+        if let Some(opt) = options.iter().find(|o| {
+            o.get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| k.contains(preferred))
+                || o.get("optionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.contains(preferred))
+        }) && let Some(id) = opt.get("optionId").and_then(Value::as_str)
         {
             return json!({
-                "outcome": { "outcome": "selected", "optionId": first_id }
+                "outcome": { "outcome": "selected", "optionId": id }
             });
-        }
-    } else {
-        for preferred in ["reject_once", "reject_always", "reject", "deny"] {
-            if let Some(opt) = options.iter().find(|o| {
-                o.get("kind")
-                    .and_then(Value::as_str)
-                    .is_some_and(|k| k.contains(preferred))
-                    || o.get("optionId")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id.contains(preferred))
-            }) && let Some(id) = opt.get("optionId").and_then(Value::as_str)
-            {
-                return json!({
-                    "outcome": { "outcome": "selected", "optionId": id }
-                });
-            }
         }
     }
 
@@ -382,7 +492,7 @@ async fn wait_acp_response(
     accumulated_text: &mut String,
     collect_chunks: bool,
 ) -> CompassResult<Value> {
-    let mut tool_titles: HashMap<String, String> = HashMap::new();
+    let mut tool_meta: HashMap<String, AcpToolCallMeta> = HashMap::new();
     let mut saw_tool_since_text = false;
     let mut saw_tool_since_thought = false;
     while let Some(line) = lines
@@ -420,7 +530,7 @@ async fn wait_acp_response(
         if let (Some(req_id), Some(method)) = (msg.get("id"), msg.get("method").and_then(Value::as_str)) {
             let params = msg.get("params").unwrap_or(&Value::Null);
             let reply = if method == "session/request_permission" {
-                let allow = is_biocompass_mcp_permission(params, &tool_titles);
+                let allow = is_biocompass_mcp_permission(params, &tool_meta);
                 json!({
                     "jsonrpc": "2.0",
                     "id": req_id,
@@ -451,18 +561,23 @@ async fn wait_acp_response(
             if (kind == "tool_call" || kind == "tool_call_update")
                 && let Some(call_id) = update.get("toolCallId").and_then(Value::as_str)
             {
-                let mut desc = Vec::new();
-                for field in ["title", "name", "toolName", "kind"] {
-                    if let Some(v) = update.get(field).and_then(Value::as_str) {
-                        desc.push(v);
-                    }
-                }
-                if let Some(meta_name) = update.pointer("/_meta/tool_name").and_then(Value::as_str)
+                let extracted = extract_acp_tool_meta(update);
+                if extracted.kind.is_some()
+                    || extracted.server_name.is_some()
+                    || !extracted.identifiers.is_empty()
                 {
-                    desc.push(meta_name);
-                }
-                if !desc.is_empty() {
-                    tool_titles.insert(call_id.to_owned(), desc.join(" "));
+                    let entry = tool_meta.entry(call_id.to_owned()).or_default();
+                    if let Some(k) = extracted.kind {
+                        entry.kind = Some(k);
+                    }
+                    if let Some(s) = extracted.server_name {
+                        entry.server_name = Some(s);
+                    }
+                    for id in extracted.identifiers {
+                        if !entry.identifiers.contains(&id) {
+                            entry.identifiers.push(id);
+                        }
+                    }
                 }
                 if collect_chunks {
                     if !accumulated_text.is_empty() {
@@ -920,6 +1035,55 @@ async fn run_codex_cli_turn(
     })
 }
 
+/// Write the ephemeral Claude CLI MCP config containing the loopback bearer token inside
+/// `data_dir/.ephemeral-mcp/` (never `/tmp`) with `0700` directory + `0600` `create_new` file
+/// permissions (`SEC-29`).
+fn write_ephemeral_claude_mcp_config(data_dir: &Path, mcp_url: &str) -> CompassResult<TempFileGuard> {
+    use std::io::Write;
+    let ephemeral_dir = data_dir.join(".ephemeral-mcp");
+    std::fs::create_dir_all(&ephemeral_dir)
+        .map_err(|e| CompassError::Internal(format!("create ephemeral mcp dir: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ephemeral_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| CompassError::Internal(format!("chmod ephemeral mcp dir 0700: {e}")))?;
+    }
+
+    let cfg_path = ephemeral_dir.join(format!("biocompass-claude-mcp-{}.json", Uuid::new_v4()));
+    let mcp_cfg_json = serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "biocompass": {
+                "type": "http",
+                "url": mcp_url,
+            }
+        }
+    }))
+    .map_err(|e| CompassError::Internal(format!("encode claude mcp config: {e}")))?;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(&cfg_path)
+        .map_err(|e| CompassError::Internal(format!("create private claude mcp config: {e}")))?;
+    file.write_all(mcp_cfg_json.as_bytes())
+        .map_err(|e| CompassError::Internal(format!("write private claude mcp config: {e}")))?;
+    file.sync_all()
+        .map_err(|e| CompassError::Internal(format!("sync private claude mcp config: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cfg_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| CompassError::Internal(format!("chmod claude mcp config 0600: {e}")))?;
+    }
+    Ok(TempFileGuard(cfg_path))
+}
+
 async fn run_claude_cli_turn(
     cfg: &LlmProviderConfig,
     mcp_url: &str,
@@ -933,20 +1097,8 @@ async fn run_claude_cli_turn(
         cfg.command.trim()
     };
 
-    let cfg_path = std::env::temp_dir().join(format!("biocompass-claude-mcp-{}.json", Uuid::new_v4()));
-    let mcp_cfg_json = serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "biocompass": {
-                "type": "http",
-                "url": mcp_url,
-            }
-        }
-    }))
-    .map_err(|e| CompassError::Internal(format!("encode claude mcp config: {e}")))?;
-    tokio::fs::write(&cfg_path, mcp_cfg_json)
-        .await
-        .map_err(|e| CompassError::Internal(format!("write temp claude mcp config: {e}")))?;
-    let _guard = TempFileGuard(cfg_path.clone());
+    let guard = write_ephemeral_claude_mcp_config(cwd, mcp_url)?;
+    let cfg_path = guard.0.clone();
 
     let mut cmd = Command::new(command);
     cmd.args([
@@ -1348,8 +1500,161 @@ pub async fn probe_acp_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_stderr_tail, strip_ansi_codes, strip_external_mcp_setup_notice};
+    use super::{
+        AcpToolCallMeta, attach_stderr_tail, choose_acp_permission_outcome,
+        is_biocompass_mcp_permission, strip_ansi_codes, strip_external_mcp_setup_notice,
+        write_ephemeral_claude_mcp_config,
+    };
     use biocompass_core_traits::CompassError;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn sec_19_acp_permission_gate_rejects_raw_input_and_host_tools_and_allows_exact_mcp() {
+        let empty = HashMap::new();
+
+        // 1. Host bash carrying "biocompass" and "list_runs" in rawInput MUST be rejected!
+        let bash_with_biocompass = json!({
+            "toolCall": {
+                "title": "bash",
+                "kind": "execute",
+                "rawInput": { "command": "cat ~/.biocompass/owner-link.txt # list_runs" }
+            }
+        });
+        assert!(!is_biocompass_mcp_permission(&bash_with_biocompass, &empty));
+
+        // 2. Host write_file mentioning biocompass in rawInput or title MUST be rejected!
+        let write_file = json!({
+            "toolCall": {
+                "title": "write_file",
+                "kind": "edit",
+                "rawInput": { "path": "/tmp/biocompass", "content": "mcp__biocompass__list_catalogs" }
+            }
+        });
+        assert!(!is_biocompass_mcp_permission(&write_file, &empty));
+
+        // 3. Free-text prose title containing "biocompass" or tool name MUST be rejected!
+        let free_text = json!({
+            "toolCall": {
+                "title": "Run shell for biocompass list_catalogs",
+                "kind": "other"
+            }
+        });
+        assert!(!is_biocompass_mcp_permission(&free_text, &empty));
+
+        // 4. Unregistered or confirm_run MCP tool MUST be rejected!
+        let confirm = json!({
+            "toolCall": {
+                "name": "mcp__biocompass__confirm_run",
+                "kind": "other"
+            }
+        });
+        assert!(!is_biocompass_mcp_permission(&confirm, &empty));
+
+        // 5. Even an exact MCP tool name with forbidden host kind ("execute") MUST be rejected!
+        let bad_kind = json!({
+            "toolCall": {
+                "name": "mcp__biocompass__list_catalogs",
+                "kind": "execute"
+            }
+        });
+        assert!(!is_biocompass_mcp_permission(&bad_kind, &empty));
+
+        // 6. Exact registered MCP identifiers ARE allowed.
+        for valid in [
+            json!({"toolCall": {"name": "mcp__biocompass__list_catalogs", "kind": "other"}}),
+            json!({"toolCall": {"toolName": "mcp__biocompass__query_catalog"}}),
+            json!({"toolCall": {"title": "mcp_biocompass.list_runs", "kind": "other"}}),
+            json!({"toolCall": {"serverName": "biocompass", "toolName": "get_run_result"}}),
+        ] {
+            assert!(is_biocompass_mcp_permission(&valid, &empty), "expected allow for {valid}");
+        }
+
+        // 7. Cached toolCallId metadata lookup respects both exact match and forbidden kind.
+        let mut cached = HashMap::new();
+        cached.insert(
+            "tc_ok".to_owned(),
+            AcpToolCallMeta {
+                kind: Some("other".into()),
+                server_name: None,
+                identifiers: vec!["mcp_biocompass.list_catalogs".into()],
+            },
+        );
+        cached.insert(
+            "tc_bad".to_owned(),
+            AcpToolCallMeta {
+                kind: Some("execute".into()),
+                server_name: None,
+                identifiers: vec!["terminal".into()],
+            },
+        );
+        assert!(is_biocompass_mcp_permission(
+            &json!({"toolCall": {"toolCallId": "tc_ok"}}),
+            &cached
+        ));
+        assert!(!is_biocompass_mcp_permission(
+            &json!({"toolCall": {"toolCallId": "tc_bad", "rawInput": {"cmd": "biocompass"}}}),
+            &cached
+        ));
+
+        // 8. choose_acp_permission_outcome never picks allow_always or arbitrary options.first().
+        let only_always = json!({
+            "options": [
+                {"optionId": "allow_always", "kind": "allow_always"},
+                {"optionId": "reject_once", "kind": "reject_once"}
+            ]
+        });
+        assert_eq!(
+            choose_acp_permission_outcome(&only_always, true)["outcome"]["outcome"],
+            "cancelled"
+        );
+        let arbitrary_first = json!({
+            "options": [
+                {"optionId": "sudo_exec", "kind": "custom"}
+            ]
+        });
+        assert_eq!(
+            choose_acp_permission_outcome(&arbitrary_first, true)["outcome"]["outcome"],
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn sec_29_ephemeral_claude_mcp_config_written_under_data_dir_with_0600_perms() {
+        let data_dir = tempfile::tempdir().expect("data_dir");
+        let mcp_url = "http://127.0.0.1:45123/mcp/secret-token-123";
+        let path_copy;
+        {
+            let guard = write_ephemeral_claude_mcp_config(data_dir.path(), mcp_url)
+                .expect("write private mcp config");
+            path_copy = guard.0.clone();
+            assert!(
+                path_copy.starts_with(data_dir.path()),
+                "MCP config must live inside app data_dir, not /tmp: {}",
+                path_copy.display()
+            );
+            assert!(!path_copy.starts_with(std::env::temp_dir().join("biocompass-claude-mcp")));
+            let contents = std::fs::read_to_string(&path_copy).expect("read config");
+            assert!(contents.contains(mcp_url));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let dir_mode = std::fs::metadata(path_copy.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                let file_mode = std::fs::metadata(&path_copy)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(dir_mode, 0o700, "ephemeral mcp dir must be 0700");
+                assert_eq!(file_mode, 0o600, "ephemeral mcp config must be 0600");
+            }
+        }
+        assert!(!path_copy.exists(), "ephemeral MCP config must be deleted on drop");
+    }
 
     #[test]
     fn strip_external_mcp_notice_drops_unrelated_connector_failures_only() {
