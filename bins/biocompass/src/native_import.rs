@@ -154,7 +154,7 @@ fn check_tree(path: &Path) -> CompassResult<()> {
 }
 
 fn read_report(path: &Path) -> CompassResult<Value> {
-    let meta = fs::metadata(&path)
+    let meta = fs::metadata(path)
         .map_err(|_| CompassError::Validation("importer did not produce result.json".into()))?;
     if meta.len() > 32 * 1024 * 1024 {
         return Err(CompassError::Validation(

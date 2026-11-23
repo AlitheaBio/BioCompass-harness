@@ -3396,8 +3396,8 @@ mod tests {
         assert_eq!(row["properties"], serde_json::json!({"a": [2, null]}));
         assert!(
             matches!(&row["numbered"], Value::Array(items) if items.len() == 1
-            && items[0].as_object().unwrap().values().any(|v| *v == Value::from(9))
-            && items[0].as_object().unwrap().values().any(|v| *v == Value::from("nine")))
+            && items[0].as_object().unwrap().values().any(|v| v.as_i64() == Some(9))
+            && items[0].as_object().unwrap().values().any(|v| v.as_str() == Some("nine")))
         );
         assert_eq!(row["dates"], serde_json::json!([row["original_date"]]));
     }

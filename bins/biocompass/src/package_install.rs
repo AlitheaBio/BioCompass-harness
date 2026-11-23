@@ -105,16 +105,15 @@ impl Receipt {
         {
             return Err(invalid("invalid module icon path"));
         }
-        if let Some((icon_hash, icon_size)) = &self.icon_sha256 {
-            if self.manifest.icon.is_none()
+        if let Some((icon_hash, icon_size)) = &self.icon_sha256
+            && (self.manifest.icon.is_none()
                 || *icon_size == 0
                 || *icon_size > 256 * 1024
                 || icon_hash.len() != 64
-                || !icon_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || !icon_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
             {
                 return Err(invalid("invalid module icon metadata"));
             }
-        }
         if self.files.keys().any(|p| !path_ok(p)) {
             return Err(invalid("invalid relative UI asset path"));
         }

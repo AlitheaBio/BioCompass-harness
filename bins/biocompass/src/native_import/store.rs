@@ -443,10 +443,9 @@ impl LocalStore {
             .is_some_and(|(before, after)| {
                 before.len() == after.len() && before.keys().all(|k| after.contains_key(k))
             });
-        if !patch
+        if patch
             .get("table")
-            .and_then(Value::as_str)
-            .is_some_and(|name| !name.is_empty())
+            .and_then(Value::as_str).is_none_or(|name| name.is_empty())
             || !is_object("row_key")
             || !is_object("before")
             || !is_object("after")

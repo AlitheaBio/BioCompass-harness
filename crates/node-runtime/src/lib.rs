@@ -543,13 +543,12 @@ impl InProcessNodeRuntime {
                 "module '{id}' version '{version}' is an installed marketplace release"
             )));
         }
-        if let Some(previous) = releases.versions.get(version) {
-            if release_terms_hash(previous)? != release_terms_hash(&plugin)? {
+        if let Some(previous) = releases.versions.get(version)
+            && release_terms_hash(previous)? != release_terms_hash(&plugin)? {
                 return Err(CompassError::IntegrityViolation(format!(
                     "module '{id}' version '{version}' is already registered with different execution terms"
                 )));
             }
-        }
         commit(releases.versions.get(version))?;
         if installed {
             releases.installed.insert(version.clone());

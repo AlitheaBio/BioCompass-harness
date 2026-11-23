@@ -451,6 +451,7 @@ impl ScopedJoinSum {
 }
 
 impl ScopeRelation {
+    #[allow(clippy::too_many_arguments)]
     fn aggregate(
         &self,
         measure: &str,
