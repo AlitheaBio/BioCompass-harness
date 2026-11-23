@@ -27,17 +27,24 @@ BioCompass-harness/
 ## Quick Start
 
 ```sh
-# 1. Build @biocompass/plugin-sdk and the Vite 8 + React 19 SPA
+# 1. Bootstrap SHA-256-verified offline DuckDB extensions for your host platform
+./scripts/install-duckdb-extensions.sh
+
+# 2. Build @biocompass/plugin-sdk and the Vite 8 + React 19 SPA
 npm install
 npm run build
 
-# 2. Run the Rust workspace test suite & build the single embedded binary
+# 3. Run the Rust workspace test suite & build the single embedded binary
 cargo test --workspace
 cargo build --bin biocompass
 
-# 3. Launch BioCompass locally on http://127.0.0.1:8080
+# 4. Launch BioCompass locally on http://127.0.0.1:8080
 cargo run --bin biocompass -- up --port 8080
 ```
+
+### Import and version private datasets locally
+
+When `biocompass up` binds to a loopback address in `local` mode, it writes a single-use **Local dataset owner** link to `<data-dir>/owner-link.txt` (valid for 10 minutes; grants an 8-hour owner session scoped to that loopback origin). Open the link in your browser—or exchange its `#owner=` ticket via `POST /api/v1/local/owner-session` and send `X-BioCompass-Local-Owner`—to run installed air-gapped dataset importers and preview/publish signed dataset version changes in Data Explorer while keeping Froglet private keys on the laptop.
 
 ### Retrieve hosted results in a local workspace
 
