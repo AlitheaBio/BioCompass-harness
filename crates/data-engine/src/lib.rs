@@ -533,6 +533,20 @@ impl DuckLakeCatalogEngine {
                 Err(CompassError::AccessDenied(format!("snapshot {sid} differs from this reader's pin")))
             }
             Some(sid) => {
+                // SEC-31: Verify requested snapshot is registered in this catalog's summary metadata
+                // and validate its catalog_id, snapshot_id, and dataset_digest against both the file
+                // contents and `self.summary.snapshots`.
+                let expected_meta = self
+                    .summary
+                    .snapshots
+                    .iter()
+                    .find(|s| s.snapshot_id == sid)
+                    .ok_or_else(|| {
+                        CompassError::NotFound(format!(
+                            "sealed snapshot {sid} not found or expired for catalog '{}'",
+                            self.summary.id
+                        ))
+                    })?;
                 let p = self
                     .catalog_dir
                     .join("snapshots")
@@ -546,12 +560,26 @@ impl DuckLakeCatalogEngine {
                 let snap: SealedSnapshot = serde_json::from_str(&raw).map_err(|e| {
                     CompassError::Validation(format!("decode snapshot_{sid}.json: {e}"))
                 })?;
+                if snap.catalog_id != self.summary.id {
+                    return Err(CompassError::IntegrityViolation(format!(
+                        "sealed snapshot {sid} catalog_id '{}' does not match catalog '{}'",
+                        snap.catalog_id, self.summary.id
+                    )));
+                }
+                if snap.snapshot_id != sid {
+                    return Err(CompassError::IntegrityViolation(format!(
+                        "sealed snapshot file snapshot_{sid}.json declares mismatched snapshot_id {}",
+                        snap.snapshot_id
+                    )));
+                }
                 let recomputed = SealedSnapshot::compute_dataset_digest(
                     &snap.catalog_id,
                     snap.snapshot_id,
                     &snap.tables,
                 );
-                if recomputed != snap.dataset_digest {
+                if recomputed != snap.dataset_digest
+                    || snap.dataset_digest != expected_meta.dataset_digest
+                {
                     return Err(CompassError::IntegrityViolation(format!(
                         "tampered sealed snapshot {sid} digest mismatch"
                     )));
@@ -4009,6 +4037,69 @@ mod tests {
         assert!(
             !bad_status.success(),
             "corrupt extension directory must fail sha256 verification"
+        );
+    }
+
+    #[test]
+    fn sec_31_load_sealed_snapshot_rejects_untracked_or_mismatched_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat_dir = tmp.path().join("cat");
+        seed_demo_hla_catalog(&cat_dir).unwrap();
+        let mut engine = DuckDbCatalogEngine::open_verified(&cat_dir).unwrap();
+        let v1 = engine.load_sealed_snapshot(None).unwrap();
+
+        // Advance to snapshot 2 so snapshot 1 is loaded via `Some(sid)` disk path.
+        engine
+            .commit_mutation("append for sec_31", |conn| {
+                conn.execute(
+                    "INSERT INTO dl.peptides VALUES ('PEP_SEC31', 'GILGFVFTL', 9, 'HLA-A*02:01', 'M1', 'Lung', 'Healthy', 10.0, 0.1, 20.0, 1)",
+                    [],
+                )
+                .map_err(|e| CompassError::Storage(format!("insert sec_31 row: {e}")))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_ne!(engine.manifest().latest_snapshot_id, v1.snapshot_id);
+        // Valid historical snapshot 1 still loads cleanly.
+        assert_eq!(
+            engine.load_sealed_snapshot(Some(v1.snapshot_id)).unwrap().dataset_digest,
+            v1.dataset_digest
+        );
+
+        // 1. Forged untracked snapshot_999.json with valid self-consistent hash MUST fail!
+        let mut forged = v1.clone();
+        forged.snapshot_id = 999;
+        forged.dataset_digest =
+            SealedSnapshot::compute_dataset_digest(&forged.catalog_id, 999, &forged.tables);
+        std::fs::write(
+            cat_dir.join("snapshots/snapshot_999.json"),
+            serde_json::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            engine.load_sealed_snapshot(Some(999)).is_err(),
+            "SEC-31 must reject snapshot_999 not present in summary.snapshots"
+        );
+
+        // 2. Replace snapshot_1.json with a self-consistent snapshot from a different catalog_id -> MUST fail!
+        let mut wrong_cat = v1.clone();
+        wrong_cat.catalog_id = CatalogId::new("evil/other-catalog").unwrap();
+        wrong_cat.dataset_digest = SealedSnapshot::compute_dataset_digest(
+            &wrong_cat.catalog_id,
+            wrong_cat.snapshot_id,
+            &wrong_cat.tables,
+        );
+        std::fs::write(
+            cat_dir.join(format!("snapshots/snapshot_{}.json", v1.snapshot_id)),
+            serde_json::to_string_pretty(&wrong_cat).unwrap(),
+        )
+        .unwrap();
+        let err = engine
+            .load_sealed_snapshot(Some(v1.snapshot_id))
+            .expect_err("SEC-31 must reject snapshot with foreign catalog_id");
+        assert!(
+            err.to_string().contains("catalog_id") || err.to_string().contains("mismatch"),
+            "unexpected error: {err}"
         );
     }
 }
