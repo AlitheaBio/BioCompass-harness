@@ -110,10 +110,18 @@ pub struct HubHealth {
 struct HubPluginDto {
     manifest: PluginManifest,
     skill: Option<SkillDoc>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     visibility: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     has_ui_bundle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HubPluginMeta {
+    pub has_ui_bundle: Option<bool>,
+    pub has_remote_icon: bool,
 }
 
 pub struct CompassHubClient {
@@ -193,7 +201,7 @@ impl CompassHubClient {
         Ok(r.grants)
     }
 
-    pub async fn offered_run_module(&self, offer_id: &str) -> CompassResult<(LoadedPlugin, Option<bool>)> {
+    pub async fn offered_run_module(&self, offer_id: &str) -> CompassResult<(LoadedPlugin, HubPluginMeta)> {
         let valid = offer_id.strip_prefix("mo-").is_some_and(|suffix| {
             suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
@@ -203,10 +211,14 @@ impl CompassHubClient {
         let dto: HubPluginDto = get_json(
             &self.http, &self.cfg, &format!("/api/v1/module-offers/{offer_id}/run-module"),
         ).await?;
-        Ok((LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir: None }, dto.has_ui_bundle))
+        let meta = HubPluginMeta {
+            has_ui_bundle: dto.has_ui_bundle,
+            has_remote_icon: dto.icon_url.is_some(),
+        };
+        Ok((LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir: None }, meta))
     }
 
-    pub async fn list_plugins_with_ui(&self) -> CompassResult<Vec<(LoadedPlugin, Option<bool>)>> {
+    pub async fn list_plugins_with_ui(&self) -> CompassResult<Vec<(LoadedPlugin, HubPluginMeta)>> {
         #[derive(Deserialize)]
         struct Resp {
             plugins: Vec<HubPluginDto>,
@@ -215,7 +227,11 @@ impl CompassHubClient {
         let roots = self.local_ui_roots.read().await;
         Ok(r.plugins.into_iter().map(|dto| {
             let root_dir = roots.get(&dto.manifest.id).cloned();
-            (LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir }, dto.has_ui_bundle)
+            let meta = HubPluginMeta {
+                has_ui_bundle: dto.has_ui_bundle,
+                has_remote_icon: dto.icon_url.is_some(),
+            };
+            (LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir }, meta)
         }).collect())
     }
 
@@ -1056,6 +1072,7 @@ impl WorkspaceRegistryPort for CompassHubClient {
                     skill: plugin.skill,
                     visibility: None,
                     has_ui_bundle: None,
+                    icon_url: None,
                 }),
             "POST /api/v1/plugins",
         )
