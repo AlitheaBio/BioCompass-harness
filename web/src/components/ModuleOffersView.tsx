@@ -10,6 +10,7 @@ import {
   publishModuleOffer,
   subscribeModuleOffer,
 } from "../api";
+import { sanitizeFederatedLaunchUrl } from "../safeUrl";
 import {
   hasMinOrgRole,
   type AuthPrincipal,
@@ -195,14 +196,29 @@ export function ModuleOffersView({
               <table className="data-table">
                 <thead><tr><th>Hosted offer</th><th>Module release</th><th>Provider</th><th>Access</th></tr></thead>
                 <tbody>
-                  {federated.map(({ offer, provider, launch_url }) => (
-                    <tr key={launch_url}>
-                      <th scope="row">{offer.title}</th>
-                      <td className="mono">{offer.plugin_id} · {offer.version}</td>
-                      <td>{provider}</td>
-                      <td><a className="bc-btn bc-btn-secondary" href={launch_url}>Open on {provider}</a></td>
-                    </tr>
-                  ))}
+                  {federated.map(({ offer, provider, launch_url }) => {
+                    const safeLaunchUrl = sanitizeFederatedLaunchUrl(launch_url);
+                    return (
+                      <tr key={`${provider}:${offer.offer_id}:${launch_url}`}>
+                        <th scope="row">{offer.title}</th>
+                        <td className="mono">{offer.plugin_id} · {offer.version}</td>
+                        <td>{provider}</td>
+                        <td>
+                          {safeLaunchUrl ? (
+                            <a
+                              className="bc-btn bc-btn-secondary"
+                              href={safeLaunchUrl}
+                              rel="noopener noreferrer"
+                            >
+                              Open on {provider}
+                            </a>
+                          ) : (
+                            <span className="bc-caption">Blocked unsafe launch URL</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

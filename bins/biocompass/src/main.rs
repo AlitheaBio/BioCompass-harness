@@ -260,6 +260,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
             );
 
             let bound = listener.local_addr().map_err(|e| CompassError::Storage(e.to_string()))?;
+            state.set_listen_addr(bound);
             if let Some(link) = state.enable_local_owner(bound)? {
                 use std::io::IsTerminal;
                 if std::io::stderr().is_terminal() {
@@ -467,6 +468,67 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IconFileUploadDto {
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+    data_hex: String,
+}
+
+fn load_optional_plugin_icon(
+    dir: &Path,
+    manifest: &PluginManifest,
+) -> CompassResult<Option<IconFileUploadDto>> {
+    const MAX_ICON_BYTES: u64 = 256 * 1024;
+    let Some(icon_rel) = manifest
+        .icon
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    if icon_rel.contains('\\')
+        || icon_rel.chars().any(char::is_control)
+        || !icon_rel.ends_with(".svg")
+        || !Path::new(icon_rel)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(CompassError::Validation(format!(
+            "plugin icon '{icon_rel}' must be a relative .svg file path without parent traversal"
+        )));
+    }
+    let full = dir.join(icon_rel);
+    let meta = std::fs::symlink_metadata(&full).map_err(|_| {
+        CompassError::NotFound(format!(
+            "plugin declares icon = '{icon_rel}', but {} was not found",
+            full.display()
+        ))
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(CompassError::Validation(format!(
+            "plugin icon '{}' must be a regular file, not a symlink",
+            full.display()
+        )));
+    }
+    if meta.len() == 0 || meta.len() > MAX_ICON_BYTES {
+        return Err(CompassError::Validation(format!(
+            "plugin icon '{}' must be 1..={MAX_ICON_BYTES} bytes",
+            full.display()
+        )));
+    }
+    let bytes = std::fs::read(&full)
+        .map_err(|e| CompassError::Storage(format!("read {}: {e}", full.display())))?;
+    Ok(Some(IconFileUploadDto {
+        path: icon_rel.to_owned(),
+        size_bytes: bytes.len() as u64,
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        data_hex: hex::encode(&bytes),
+    }))
+}
+
 #[derive(Debug, Serialize)]
 struct UiBundleFileUploadDto {
     path: String,
@@ -557,6 +619,8 @@ async fn execute_publish_plugin(
     } else {
         None
     };
+
+    let icon_upload = load_optional_plugin_icon(dir, &manifest)?;
 
     let mut ui_files = Vec::new();
     if let Some(ui_spec) = &manifest.ui {
@@ -662,11 +726,15 @@ async fn execute_publish_plugin(
         req
     };
 
-    let reg_resp = apply_auth(http.post(format!("{base_url}/api/v1/plugins")).json(&json!({
+    let mut reg_payload = json!({
         "manifest": manifest,
         "skill": skill,
         "visibility": vis,
-    })))
+    });
+    if let Some(icon_dto) = &icon_upload {
+        reg_payload["icon_file"] = json!(icon_dto);
+    }
+    let reg_resp = apply_auth(http.post(format!("{base_url}/api/v1/plugins")).json(&reg_payload))
     .send()
     .await
     .map_err(|e| CompassError::Internal(format!("POST /api/v1/plugins failed: {e}")))?;
@@ -686,7 +754,11 @@ async fn execute_publish_plugin(
             manifest.id.as_str(),
             manifest.version
         );
-        let ui_resp = apply_auth(http.put(&ui_url).json(&json!({ "files": ui_files })))
+        let mut ui_payload = json!({ "files": ui_files });
+        if let Some(icon_dto) = &icon_upload {
+            ui_payload["icon_file"] = json!(icon_dto);
+        }
+        let ui_resp = apply_auth(http.put(&ui_url).json(&ui_payload))
             .send()
             .await
             .map_err(|e| CompassError::Internal(format!("PUT ui-bundle failed: {e}")))?;
@@ -713,6 +785,7 @@ async fn execute_publish_plugin(
             "visibility": reg_json.get("visibility").and_then(Value::as_str).unwrap_or(vis),
             "ui_files_uploaded": ui_files.len(),
             "ui_entry_url": ui_entry_url,
+            "icon_uploaded": icon_upload.is_some(),
         }))
         .unwrap_or_default()
     );

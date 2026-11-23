@@ -527,15 +527,15 @@ pub fn materialize_scientific(
             params![selectors.term, selectors.hla],
         )
         .map_err(query_error)?;
-        register_roster(&conn, &engine, &snapshot, &selectors)?;
+        register_roster(conn, engine, &snapshot, &selectors)?;
         register_source(
-            &conn,
-            &engine,
+            conn,
+            engine,
             &snapshot,
             "obs_sample_peptide_mappings",
             "observation_rows",
         )?;
-        register_proteins(&conn, &engine, &snapshot, &selectors)?;
+        register_proteins(conn, engine, &snapshot, &selectors)?;
         let target = if selectors.kind == "protein" {
             "EXISTS (SELECT 1 FROM mapping_rows m JOIN target_proteins p
                   ON accession_name(m.accession) = p.protein_id WHERE m.sequence = o.sequence)"
@@ -552,10 +552,10 @@ pub fn materialize_scientific(
            GROUP BY o.original_sample_number, o.sequence;"
         ))
         .map_err(query_error)?;
-        register_binders(&conn, &engine, &snapshot)?;
+        register_binders(conn, engine, &snapshot)?;
 
         export(
-            &conn,
+            conn,
             out_dir,
             "samples.parquet",
             "
@@ -563,7 +563,7 @@ pub fn materialize_scientific(
         FROM eligible_samples ORDER BY sample_number",
         )?;
         export(
-            &conn,
+            conn,
             out_dir,
             "observations.parquet",
             "
@@ -573,7 +573,7 @@ pub fn materialize_scientific(
         ORDER BY h.sample_number, h.peptide",
         )?;
         export(
-            &conn,
+            conn,
             out_dir,
             "proteins.parquet",
             "
@@ -606,7 +606,7 @@ pub fn materialize_scientific(
                 NULL::BIGINT AS first_aa_position, NULL::BIGINT AS last_aa_position,
                 NULL::BIGINT AS peptide_count, NULL::VARCHAR AS best_predicted_binders WHERE false"
         };
-        export(&conn, out_dir, "positions.parquet", position_sql)?;
+        export(conn, out_dir, "positions.parquet", position_sql)?;
 
         let marker = json!({
             "contract": CONTRACT,

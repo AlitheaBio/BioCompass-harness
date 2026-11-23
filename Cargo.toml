@@ -35,10 +35,9 @@ biocompass-oci-runner = { path = "crates/oci-runner" }
 biocompass-node-runtime = { path = "crates/node-runtime" }
 biocompass-agent-core = { path = "crates/agent-core" }
 
-# Pinned AlitheaBio/froglet commit SHA: bc4c14b036d0d7923a652dfd439bb81da12b558b (v2-operator-ledger)
-# Switch to `{ git = "https://github.com/AlitheaBio/froglet.git", rev = "bc4c14b036d0d7923a652dfd439bb81da12b558b" }` once pushed.
-froglet-protocol = { path = "../froglet/froglet-protocol" }
-froglet-verify = { path = "../froglet/froglet-verify", default-features = false }
+# Pinned AlitheaBio/froglet commit SHA: bc4c14b036d0d7923a652dfd439bb81da12b558b (tag: v2-operator-ledger.1)
+froglet-protocol = { git = "https://github.com/AlitheaBio/froglet.git", rev = "bc4c14b036d0d7923a652dfd439bb81da12b558b" }
+froglet-verify = { git = "https://github.com/AlitheaBio/froglet.git", rev = "bc4c14b036d0d7923a652dfd439bb81da12b558b", default-features = false }
 
 # Async & HTTP
 tokio = { version = "1.51.6", features = [
@@ -79,6 +78,7 @@ duckdb = { version = "1.4", features = ["bundled"] }
 
 # Crypto, IDs, Time & CLI
 sha2 = "0.10"
+subtle = "2.6"
 hex = "0.4"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

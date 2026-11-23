@@ -44,7 +44,7 @@ pub(super) fn verified_provider(family: &Family) -> CompassResult<&str> {
 
 pub(crate) fn owner(app: &AppState, store: &LocalStore, dataset: &str) -> CompassResult<String> {
     let runtime = local(app)?;
-    bind(&runtime, store, dataset, app.default_org_id.as_str())
+    bind(runtime, store, dataset, app.default_org_id.as_str())
 }
 
 pub(super) fn bind(

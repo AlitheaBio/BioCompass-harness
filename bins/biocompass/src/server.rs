@@ -39,7 +39,7 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 #[derive(RustEmbed)]
@@ -50,6 +50,9 @@ struct WebDistAssets;
 /// `connect-src 'none'` blocks direct network egress (`fetch`, `XHR`, `WebSocket`), forcing all
 /// communication through `@biocompass/plugin-sdk` `postMessage` JSON-RPC 2.0.
 pub const PLUGIN_SANDBOX_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'";
+
+/// Strict Content-Security-Policy applied to `/plugin-icon/:ns/:slug` SVG icons.
+const PLUGIN_ICON_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
 
 async fn caller_auth_middleware(req: Request, next: Next) -> Response {
     let hdrs = req.headers();
@@ -70,8 +73,87 @@ async fn caller_auth_middleware(req: Request, next: Next) -> Response {
     CALLER_AUTH.scope(auth, next.run(req)).await
 }
 
+fn build_cors_layer(state: &AppState) -> CorsLayer {
+    let methods = AllowMethods::list([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+        Method::HEAD,
+    ]);
+    let headers = AllowHeaders::list([
+        header::CONTENT_TYPE,
+        header::AUTHORIZATION,
+        header::ACCEPT,
+        axum::http::HeaderName::from_static("x-api-key"),
+        axum::http::HeaderName::from_static("x-workspace-read"),
+        axum::http::HeaderName::from_static("x-biocompass-local-owner"),
+    ]);
+
+    match state.mode {
+        DeploymentMode::Local => {
+            let port = state.listen_addr.map_or(8080, |a| a.port());
+            let is_loopback = state.listen_addr.is_none_or(|a| a.ip().is_loopback());
+            let env_dev_cors = std::env::var("BIOCOMPASS_DEV_CORS")
+                .ok()
+                .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+            let mut origins = Vec::new();
+            if is_loopback {
+                for host in ["127.0.0.1", "localhost", "[::1]"] {
+                    if let Ok(hv) = HeaderValue::from_str(&format!("http://{host}:{port}")) {
+                        origins.push(hv);
+                    }
+                }
+                if env_dev_cors || state.allow_local_dev_tags || cfg!(debug_assertions) {
+                    for dev_port in [5173_u16, 5174_u16] {
+                        for host in ["127.0.0.1", "localhost", "[::1]"] {
+                            if let Ok(hv) = HeaderValue::from_str(&format!("http://{host}:{dev_port}")) {
+                                origins.push(hv);
+                            }
+                        }
+                    }
+                }
+            }
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(methods)
+                .allow_headers(headers)
+        }
+        DeploymentMode::CloudWeb => {
+            let mut origins: Vec<HeaderValue> = state
+                .allowed_origins
+                .iter()
+                .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
+                .collect();
+            if origins.is_empty()
+                && let Ok(env_raw) = std::env::var("COMPASS_ALLOWED_ORIGINS")
+            {
+                origins.extend(
+                    env_raw
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|o| HeaderValue::from_str(o).ok()),
+                );
+            }
+            let has_explicit = !origins.is_empty();
+            let layer = CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(methods)
+                .allow_headers(headers);
+            if has_explicit {
+                layer.allow_credentials(true)
+            } else {
+                layer
+            }
+        }
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
-    let cors = CorsLayer::permissive();
+    let cors = build_cors_layer(&state);
     let prepare = post(prepare_run_handler);
     let (prepare, run_events) = if let Some(hub) = &state.hub_client {
         (
@@ -590,8 +672,12 @@ fn resolve_safe_plugin_icon(plugin: &LoadedPlugin) -> Option<std::path::PathBuf>
     target.is_file().then_some(target)
 }
 
-async fn to_plugin_dto(state: &AppState, plugin: LoadedPlugin, published_ui: Option<bool>) -> PluginSummaryDto {
-    let has_ui_bundle = if let Some(ready) = published_ui {
+async fn to_plugin_dto(
+    state: &AppState,
+    plugin: LoadedPlugin,
+    hub_meta: crate::cloud_client::HubPluginMeta,
+) -> PluginSummaryDto {
+    let has_ui_bundle = if let Some(ready) = hub_meta.has_ui_bundle {
         ready && plugin.manifest.ui.is_some()
     } else if let Some((ui, root)) = plugin.manifest.ui.as_ref().zip(plugin.root_dir.as_ref()) {
         root.join(&ui.entry).is_file()
@@ -606,7 +692,7 @@ async fn to_plugin_dto(state: &AppState, plugin: LoadedPlugin, published_ui: Opt
         .filter(|_| has_ui_bundle)
         .and_then(|ui| Path::new(&ui.entry).file_name()?.to_str())
         .map(|entry| pinned_ui_path(&plugin.manifest.id, &plugin.manifest.version, entry));
-    let icon_url = if resolve_safe_plugin_icon(&plugin).is_some() {
+    let icon_url = if resolve_safe_plugin_icon(&plugin).is_some() || hub_meta.has_remote_icon {
         Some(format!("/plugin-icon/{}", plugin.manifest.id))
     } else {
         None
@@ -667,10 +753,20 @@ async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<V
     let plugins = if let Some(hub) = &state.hub_client {
         hub.list_plugins_with_ui().await?
     } else {
-        state.registry.list_plugins().await?.into_iter().map(|p| (p, None)).collect()
+        state
+            .registry
+            .list_plugins()
+            .await?
+            .into_iter()
+            .map(|p| (p, crate::cloud_client::HubPluginMeta::default()))
+            .collect()
     };
-    let dtos =
-        futures::future::join_all(plugins.into_iter().map(|(p, ui)| to_plugin_dto(&state, p, ui))).await;
+    let dtos = futures::future::join_all(
+        plugins
+            .into_iter()
+            .map(|(p, meta)| to_plugin_dto(&state, p, meta)),
+    )
+    .await;
     let mut by_id: std::collections::BTreeMap<_, _> = dtos
         .into_iter()
         .map(|dto| (dto.manifest.id.as_str().to_owned(), dto))
@@ -689,7 +785,7 @@ async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<V
             let mut card = to_plugin_dto(
                 &state,
                 versions.last().expect("nonempty source releases").clone(),
-                None,
+                crate::cloud_client::HubPluginMeta::default(),
             )
             .await;
             card.installed = false;
@@ -785,7 +881,7 @@ async fn install_plugin_handler(
             }
         }
     };
-    let mut dto = to_plugin_dto(&state, plugin, None).await;
+    let mut dto = to_plugin_dto(&state, plugin, crate::cloud_client::HubPluginMeta::default()).await;
     dto.detached_versions = crate::package_install::removal::detached(&state)?
         .into_iter()
         .filter(|p| p.manifest.id == plugin_id)
@@ -1522,7 +1618,13 @@ async fn prepare_run_handler(
         };
         return Ok(with_retry_after(response, retry_after));
     }
-    Ok(Json(state.dispatcher.prepare_run(request).await?).into_response())
+    let quote = state.dispatcher.prepare_run(request).await?;
+    let mut payload = serde_json::to_value(&quote)
+        .map_err(|e| CompassError::Internal(format!("encode RunQuote: {e}")))?;
+    if let Some(notice) = quote.local_bundled_fallback_notice() {
+        payload["execution_notice"] = json!(notice);
+    }
+    Ok(Json(payload).into_response())
 }
 
 fn with_retry_after(mut response: Response, retry_after: Option<HeaderValue>) -> Response {
@@ -2080,27 +2182,56 @@ async fn serve_plugin_asset(
 
 async fn serve_plugin_icon(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((ns, slug)): AxumPath<(String, String)>,
 ) -> ApiResult<Response> {
     let plugin_id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
-    let plugin = state.registry.get_plugin(&plugin_id).await?;
-    let target = resolve_safe_plugin_icon(&plugin).ok_or_else(|| {
-        CompassError::NotFound(format!("plugin '{plugin_id}' has no custom icon file"))
-    })?;
-    let bytes = std::fs::read(&target)
-        .map_err(|e| CompassError::Storage(format!("read plugin icon: {e}")))?;
-    let mime = mime_guess::from_path(&target).first_or_octet_stream();
-    let mut resp = (StatusCode::OK, bytes).into_response();
-    if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
-        resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+    let plugin_opt = state.registry.get_plugin(&plugin_id).await.ok();
+    if let Some(plugin) = plugin_opt.as_ref()
+        && let Some(target) = resolve_safe_plugin_icon(plugin)
+    {
+        let bytes = std::fs::read(&target)
+            .map_err(|e| CompassError::Storage(format!("read plugin icon: {e}")))?;
+        let mime = mime_guess::from_path(&target).first_or_octet_stream();
+        let mut resp = (StatusCode::OK, bytes).into_response();
+        if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
+            resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+        }
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(PLUGIN_ICON_CSP),
+        );
+        resp.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return Ok(resp);
     }
-    resp.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(resp)
+    if let Some(hub) = &state.hub_client {
+        let mut resp = hub
+            .proxy_raw(
+                reqwest::Method::GET,
+                &format!("/plugin-icon/{ns}/{slug}"),
+                &headers,
+                Vec::new(),
+            )
+            .await?;
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(PLUGIN_ICON_CSP),
+        );
+        resp.headers_mut().insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        return Ok(resp);
+    }
+    if plugin_opt.is_none() {
+        return Err(CompassError::NotFound(format!("plugin '{plugin_id}' is not registered")).into());
+    }
+    Err(CompassError::NotFound(format!("plugin '{plugin_id}' has no custom icon file")).into())
 }
 
 async fn serve_embedded_spa(uri: Uri) -> Response {
@@ -2759,4 +2890,284 @@ async fn import_local_catalog_handler(
         })),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod sec_06_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    async fn get_health_cors(app: &Router, origin: &str) -> Option<String> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/health")
+            .header(header::ORIGIN, origin)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn sec_06_local_cors_allows_active_loopback_port_and_blocks_external_origins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let _ = state.enable_local_owner("127.0.0.1:18421".parse().unwrap());
+        let app = build_router(state);
+
+        assert_eq!(
+            get_health_cors(&app, "https://evil.example").await,
+            None,
+            "external origin must never be allowed by local CORS"
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:9999").await,
+            None,
+            "unrelated local port must not be allowed by local CORS"
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:18421").await.as_deref(),
+            Some("http://127.0.0.1:18421")
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://localhost:18421").await.as_deref(),
+            Some("http://localhost:18421")
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:5173").await.as_deref(),
+            Some("http://127.0.0.1:5173")
+        );
+    }
+
+    #[tokio::test]
+    async fn sec_06_cloud_web_cors_defaults_same_origin_and_honours_allowed_origins() {
+        let mock_hub = Router::new().route(
+            "/api/v1/health",
+            get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "node_id": "froglet-node-mockhub00001",
+                    "provider_id": "0".repeat(64),
+                    "requester_id": "1".repeat(64),
+                    "container_engine": "docker 29.10.0"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_addr = listener.local_addr().unwrap();
+        let _hub_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_hub).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub_cfg = crate::cloud_client::CompassHubConfig {
+            base_url: format!("http://{hub_addr}"),
+            bundled_plugins_dir: tmp.path().join("bundled-plugins"),
+        };
+        let (hub_client, default_org_id, engine_label) =
+            CompassHubClient::connect(hub_cfg, std::collections::HashMap::new())
+                .await
+                .unwrap();
+        let hub = Arc::new(hub_client);
+        let base_local = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let mut cloud_state = base_local;
+        cloud_state.mode = DeploymentMode::CloudWeb;
+        cloud_state.default_org_id = default_org_id;
+        cloud_state.container_engine_label = engine_label;
+        cloud_state.hub_client = Some(hub);
+
+        // 1. Default (unset/empty) -> strict same-origin (no Access-Control-Allow-Origin emitted).
+        let default_app = build_router(cloud_state.clone());
+        assert_eq!(
+            get_health_cors(&default_app, "https://app.biocompass.example").await,
+            None
+        );
+
+        // 2. Explicit COMPASS_ALLOWED_ORIGINS allowlists only configured origins.
+        cloud_state.allowed_origins = vec!["https://app.biocompass.example".into()];
+        let allowlisted_app = build_router(cloud_state);
+        assert_eq!(
+            get_health_cors(&allowlisted_app, "https://app.biocompass.example")
+                .await
+                .as_deref(),
+            Some("https://app.biocompass.example")
+        );
+        assert_eq!(
+            get_health_cors(&allowlisted_app, "https://evil.example").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_05_serves_downloaded_and_cloud_module_icons_via_plugin_icon_route() {
+        let svg_bytes =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 12 12\"><path d=\"M0 0h12v12H0z\"/></svg>";
+        let mock_hub = Router::new()
+            .route(
+                "/api/v1/health",
+                get(|| async {
+                    Json(json!({
+                        "status": "ok",
+                        "node_id": "froglet-node-mockhub00002",
+                        "provider_id": "0".repeat(64),
+                        "requester_id": "1".repeat(64),
+                        "container_engine": "docker 29.10.0"
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/plugins",
+                get(|| async {
+                    Json(json!({
+                        "plugins": [{
+                            "manifest": {
+                                "id": "cloud/icon-mod",
+                                "name": "Cloud Icon Mod",
+                                "version": "1.0.0",
+                                "icon": "icon.svg",
+                                "image": format!("registry:5000/cloud/icon-mod@sha256:{}", "c".repeat(64))
+                            },
+                            "skill": null,
+                            "has_ui_bundle": false,
+                            "icon_url": "/plugin-icon/cloud/icon-mod"
+                        }]
+                    }))
+                }),
+            )
+            .route(
+                "/plugin-icon/cloud/icon-mod",
+                get(move || async move {
+                    (
+                        [(header::CONTENT_TYPE, "image/svg+xml")],
+                        svg_bytes.as_slice(),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_addr = listener.local_addr().unwrap();
+        let _hub_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_hub).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub_cfg = crate::cloud_client::CompassHubConfig {
+            base_url: format!("http://{hub_addr}"),
+            bundled_plugins_dir: tmp.path().join("bundled-plugins"),
+        };
+        let (hub_client, default_org_id, engine_label) =
+            CompassHubClient::connect(hub_cfg, std::collections::HashMap::new())
+                .await
+                .unwrap();
+        let mut cloud_state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+
+        // 1. Local mode: downloaded/installed module with `content/icon.svg` is served at `/plugin-icon/:ns/:slug`.
+        let installed_content = tmp.path().join("module-releases-fixture/content");
+        std::fs::create_dir_all(&installed_content).unwrap();
+        std::fs::write(installed_content.join("icon.svg"), svg_bytes).unwrap();
+        let downloaded_manifest = PluginManifest::from_toml_str(
+            &format!(
+                "id = \"fixture/downloaded-icon\"\nname = \"Downloaded Icon Mod\"\nversion = \"1.0.0\"\nicon = \"icon.svg\"\nimage = \"registry:5000/fixture/downloaded-icon@sha256:{}\"\n",
+                "d".repeat(64)
+            ),
+            false,
+        )
+        .unwrap();
+        cloud_state
+            .registry
+            .register_plugin(LoadedPlugin {
+                manifest: downloaded_manifest,
+                skill: None,
+                root_dir: Some(installed_content),
+            })
+            .await
+            .unwrap();
+        let local_app = build_router(cloud_state.clone());
+        let local_icon_resp = local_app
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/fixture/downloaded-icon")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(local_icon_resp.status(), StatusCode::OK);
+        assert!(
+            local_icon_resp
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("default-src 'none'")
+        );
+        let local_body = axum::body::to_bytes(local_icon_resp.into_body(), 65_536)
+            .await
+            .unwrap();
+        assert_eq!(local_body.as_ref(), svg_bytes);
+
+        // 2. Cloud-web mode: remote module icon is advertised and proxied at `/plugin-icon/:ns/:slug`.
+        let hub = Arc::new(hub_client);
+        cloud_state.mode = DeploymentMode::CloudWeb;
+        cloud_state.default_org_id = default_org_id;
+        cloud_state.container_engine_label = engine_label;
+        cloud_state.registry = hub.clone();
+        cloud_state.hub_client = Some(hub);
+        let cloud_app = build_router(cloud_state);
+
+        let list_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/plugins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(list_resp.into_body(), 1_048_576)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            list_json["plugins"][0]["icon_url"],
+            json!("/plugin-icon/cloud/icon-mod")
+        );
+
+        let icon_resp = cloud_app
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/cloud/icon-mod")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(icon_resp.status(), StatusCode::OK);
+        assert!(
+            icon_resp
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .contains("default-src 'none'")
+        );
+        let body = axum::body::to_bytes(icon_resp.into_body(), 65_536)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), svg_bytes);
+    }
 }

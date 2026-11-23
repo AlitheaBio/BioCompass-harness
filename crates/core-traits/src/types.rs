@@ -153,7 +153,25 @@ impl CompassError {
                 }
             }
             Self::AccessDenied(_) => {
-                Some("Review your active Dataset Grant policy on the Data page or adjust query filters.")
+                if lower.contains("only available in cloud-web mode")
+                    || lower.contains("hosted workspace")
+                    || lower.contains("paired native workspace")
+                    || lower.contains("paired, loopback native workspace")
+                {
+                    Some("Connect to a BioCompass Cloud hub (--mode cloud-web or paired workspace) to use hosted organization features.")
+                } else if lower.contains("owner link")
+                    || lower.contains("local owner")
+                    || lower.contains("native workspace")
+                {
+                    Some("Open the local owner link from <data-dir>/owner-link.txt on this workstation.")
+                } else if lower.contains("unauthenticated")
+                    || lower.contains("sign in")
+                    || lower.contains("invalid session")
+                {
+                    Some("Sign in or provide valid organization credentials.")
+                } else {
+                    Some("Review your active Dataset Grant policy on the Data page or adjust query filters.")
+                }
             }
             Self::Payment(_) => {
                 if lower.contains("insufficient") || lower.contains("daily act") {
@@ -759,6 +777,16 @@ pub struct RunQuote {
 }
 
 impl RunQuote {
+    /// Human-readable notice when local clean-clone execution built a bundled `Dockerfile`
+    /// under `local/bundled-<slug>:sha256-<digest>` because the pinned registry was unreachable (R11).
+    pub fn local_bundled_fallback_notice(&self) -> Option<String> {
+        let rest = self.image_ref.strip_prefix("local/bundled-")?;
+        let (slug, _) = rest.split_once(':')?;
+        Some(format!(
+            "Pinned registry was unreachable; built bundled plugins/{slug}/Dockerfile locally ({}) under local dev allowance.",
+            self.image_ref
+        ))
+    }
     /// Check the returned selection before offering a quote for approval or saving it for a workspace.
     pub fn validate_selection(
         &self,

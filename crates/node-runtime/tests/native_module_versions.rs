@@ -20,6 +20,14 @@ fn runtime(dir: &Path) -> InProcessNodeRuntime {
         &engine_path,
         r#"#!/bin/sh
 set -eu
+if [ "$1" = version ]; then
+  printf 'linux/amd64\n'
+  exit 0
+fi
+if [ "$1" = image ] && [ "${2:-}" = inspect ]; then
+  printf '[{"RepoDigests":["%s"],"Os":"linux","Architecture":"amd64"}]\n' "$3"
+  exit 0
+fi
 [ "$1" = run ] || exit 0
 for arg do
   case "$arg" in

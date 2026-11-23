@@ -322,6 +322,7 @@ export interface RunQuote {
   max_memory_mb?: number;
   workload_hash: string;
   dataset_grant_summary: string | null;
+  execution_notice?: string | null;
   froglet_quote: Record<string, unknown>;
   expires_at: string;
 }

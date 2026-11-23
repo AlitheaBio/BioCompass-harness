@@ -106,3 +106,73 @@ async fn publisher_prints_the_hubs_versioned_custom_entry() {
     }
     service.abort();
 }
+
+#[tokio::test]
+async fn dev_05_publish_plugin_uploads_optional_icon_svg() {
+    const MANIFEST: &str = r#"{"schemaVersion":2}"#;
+    const ICON_SVG: &[u8] =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"6\"/></svg>";
+    let expected_icon_sha = hex::encode(Sha256::digest(ICON_SVG));
+    let expected_sha_clone = expected_icon_sha.clone();
+    let received_icon = Arc::new(AtomicUsize::new(0));
+    let received_icon_clone = received_icon.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route(
+            "/v2/fixture/iconmod/manifests/:digest",
+            get(|| async { MANIFEST }),
+        )
+        .route(
+            "/api/v1/plugins",
+            post(move |Json(payload): Json<Value>| {
+                let expected = expected_sha_clone.clone();
+                let counter = received_icon_clone.clone();
+                async move {
+                    if payload["icon_file"]["path"] == "icon.svg"
+                        && payload["icon_file"]["sha256"] == expected
+                        && payload["icon_file"]["data_hex"] == hex::encode(ICON_SVG)
+                    {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Json(json!({"visibility": "org_private"}))
+                }
+            }),
+        );
+    let service = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let package = tempfile::tempdir().unwrap();
+    let digest = hex::encode(Sha256::digest(MANIFEST.as_bytes()));
+    fs::write(
+        package.path().join("plugin.toml"),
+        format!(
+            "id = \"fixture/iconmod\"\nname = \"IconMod\"\nversion = \"1.0.0\"\nicon = \"icon.svg\"\nimage = \"{address}/fixture/iconmod@sha256:{digest}\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(package.path().join("icon.svg"), ICON_SVG).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_biocompass"))
+        .args([
+            "publish-plugin",
+            "--hub-url",
+            &format!("http://{address}"),
+            "--api-key",
+            "loopback-test-key",
+            "--dir",
+        ])
+        .arg(package.path())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["icon_uploaded"], true);
+    assert_eq!(received_icon.load(Ordering::SeqCst), 1);
+    service.abort();
+}

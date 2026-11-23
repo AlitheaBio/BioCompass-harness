@@ -404,4 +404,15 @@ mod tests {
         assert_eq!(limited.code(), "RATE_LIMITED");
         assert!(limited.hint().is_some());
     }
+
+    #[test]
+    fn ux_cloud_web_only_error_omits_unrelated_dataset_grant_hint() {
+        let cloud_only =
+            CompassError::AccessDenied("this endpoint is only available in cloud-web mode".into());
+        let hint = cloud_only.hint().unwrap_or_default();
+        assert!(
+            !hint.contains("Dataset Grant"),
+            "cloud-web mode error should not display Dataset Grant hint, got: {hint}"
+        );
+    }
 }

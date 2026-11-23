@@ -16,7 +16,9 @@ use biocompass_core_traits::{
     SqliteSessionStore,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
-use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
+use biocompass_node_runtime::{
+    InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps, verify_froglet_chain_offline,
+};
 use biocompass_oci_runner::{OciContainerRunner, OciDistributionClient};
 use biocompass_plugin_spec::LoadedPlugin;
 use serde_json::{Value, json};
@@ -25,25 +27,113 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn froglet_verify_binary() -> PathBuf {
-    let bin = PathBuf::from("/tmp/froglet-clean-cli/target/debug/froglet-verify");
-    if bin.is_file() {
-        return bin;
-    }
+struct EphemeralRegistry {
+    engine_bin: PathBuf,
+    container_name: String,
+    created_tags: Vec<String>,
+}
 
-    // Build cleanly in /tmp/froglet-clean-cli from immutable git commit without touching armanas/froglet.
-    let status = Command::new("sh")
-        .args([
-            "-c",
-            "rm -rf /tmp/froglet-clean-cli && mkdir -p /tmp/froglet-clean-cli && \
-             git -C /Users/armanas/Projects/github.com/armanas/froglet archive c6c5dc53f38a2c485f95cd6776f32f4e7b33785b | tar -x -C /tmp/froglet-clean-cli && \
-             cargo build --manifest-path /tmp/froglet-clean-cli/froglet-verify/Cargo.toml --bin froglet-verify",
-        ])
-        .status()
-        .expect("build standalone froglet-verify CLI");
-    assert!(status.success(), "building standalone froglet-verify CLI failed");
-    assert!(bin.is_file(), "froglet-verify binary missing at {}", bin.display());
-    bin
+impl EphemeralRegistry {
+    async fn start_and_push_motif(runner: &OciContainerRunner, context_dir: &Path) -> (Self, String) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("allocate ephemeral registry port")
+            .local_addr()
+            .unwrap()
+            .port();
+        let engine_bin = runner.engine().binary_path.clone();
+        let container_name = format!(
+            "biocompass-gate3-reg-{}-{}",
+            std::process::id(),
+            port
+        );
+        let status = Command::new(&engine_bin)
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container_name,
+                "-p",
+                &format!("127.0.0.1:{port}:5000"),
+                "ghcr.io/distribution/distribution:3.0.0",
+            ])
+            .status()
+            .expect("start ephemeral OCI registry");
+        assert!(status.success(), "failed starting ephemeral OCI registry");
+
+        for _ in 0..40 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let tag = format!("127.0.0.1:{port}/alithea/hla-motif-enrichment:2.0.0");
+        let mut build_cmd = Command::new(&engine_bin);
+        build_cmd.arg("build");
+        if runner.engine().kind == biocompass_oci_runner::EngineKind::Docker {
+            build_cmd.arg("--provenance=false");
+        }
+        let build_status = build_cmd
+            .args(["-q", "-t", &tag])
+            .arg(context_dir)
+            .status()
+            .expect("build hla-motif-enrichment");
+        assert!(build_status.success(), "failed building hla-motif-enrichment");
+
+        let push_status = Command::new(&engine_bin)
+            .args(["push", "-q", &tag])
+            .status()
+            .expect("push hla-motif-enrichment");
+        assert!(push_status.success(), "failed pushing hla-motif-enrichment");
+
+        let inspect_out = Command::new(&engine_bin)
+            .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &tag])
+            .output()
+            .expect("inspect RepoDigests");
+        assert!(inspect_out.status.success());
+        let pinned = String::from_utf8_lossy(&inspect_out.stdout).trim().to_owned();
+        assert!(pinned.contains("@sha256:"), "expected @sha256 digest, got '{pinned}'");
+
+        (
+            Self {
+                engine_bin,
+                container_name,
+                created_tags: vec![tag, pinned.clone()],
+            },
+            pinned,
+        )
+    }
+}
+
+impl Drop for EphemeralRegistry {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.engine_bin)
+            .args(["rm", "-f", &self.container_name])
+            .output();
+        for tag in &self.created_tags {
+            let _ = Command::new(&self.engine_bin)
+                .args(["rmi", "-f", tag])
+                .output();
+        }
+    }
+}
+
+fn froglet_verify_binary() -> Option<PathBuf> {
+    if let Ok(env_bin) = std::env::var("FROGLET_VERIFY_BIN") {
+        let p = PathBuf::from(env_bin);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let sibling = repo_root.join("../froglet/target/debug/froglet-verify");
+    sibling.is_file().then_some(sibling)
 }
 
 fn flip_first_hex_nibble(hex_str: &str) -> String {
@@ -53,7 +143,12 @@ fn flip_first_hex_nibble(hex_str: &str) -> String {
     chars.into_iter().collect()
 }
 
-fn run_external_froglet_verify(bin: &Path, chain_docs: &[Value], tmp: &Path, name: &str) -> (i32, Value) {
+fn run_external_froglet_verify(
+    bin: Option<&Path>,
+    chain_docs: &[Value],
+    tmp: &Path,
+    name: &str,
+) -> (i32, Value) {
     let path = tmp.join(name);
     std::fs::write(
         &path,
@@ -61,18 +156,25 @@ fn run_external_froglet_verify(bin: &Path, chain_docs: &[Value], tmp: &Path, nam
     )
     .expect("write chain file");
 
-    let output = Command::new(bin)
-        .args(["--chain", "--json", path.to_str().expect("utf8 path")])
-        .output()
-        .expect("invoke standalone froglet-verify binary");
+    if let Some(bin) = bin {
+        let output = Command::new(bin)
+            .args(["--chain", "--json", path.to_str().expect("utf8 path")])
+            .output()
+            .expect("invoke standalone froglet-verify binary");
 
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let report: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("froglet-verify did not emit JSON (code={code}, err={e}): stdout={stdout}, stderr={stderr}")
-    });
-    (code, report)
+        let code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let report: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+            panic!("froglet-verify did not emit JSON (code={code}, err={e}): stdout={stdout}, stderr={stderr}")
+        });
+        return (code, report);
+    }
+
+    let report = verify_froglet_chain_offline(chain_docs, None);
+    let code = if report.valid { 0 } else { 1 };
+    let val = serde_json::to_value(report).expect("serialize ChainDocumentsReport");
+    (code, val)
 }
 
 #[tokio::test]
@@ -120,7 +222,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         blob_store: blob_store.clone(),
         oci_registry,
         payment_gateway: ledger.clone(),
-        oci_runner,
+        oci_runner: oci_runner.clone(),
         stage_root_dir: workspace.path().join("stages"),
         allow_local_dev_tags: false,
     })
@@ -141,11 +243,12 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .and_then(Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let plugin = LoadedPlugin::load_from_dir(
-        repo_root.join("plugins/hla-motif-enrichment"),
-        false,
-    )
-    .expect("load real pinned hla-motif-enrichment plugin");
+    let motif_src = repo_root.join("plugins/hla-motif-enrichment");
+    let (_ephemeral_reg, pinned_motif_image) =
+        EphemeralRegistry::start_and_push_motif(&oci_runner, &motif_src).await;
+    let mut plugin = LoadedPlugin::load_from_dir(&motif_src, false)
+        .expect("load real pinned hla-motif-enrichment plugin");
+    plugin.manifest.image = pinned_motif_image;
     let plugin_id = plugin.manifest.id.clone();
     runtime
         .register_plugin(plugin)
@@ -262,7 +365,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
     // 2. Standalone External `froglet-verify --chain --json` CLI Proof
     // -------------------------------------------------------------------------
     let (exit_code, report) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &run.froglet_chain,
         workspace.path(),
         "valid_chain.json",
@@ -298,7 +401,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .to_owned();
     tampered_result_hash[4]["payload"]["result_hash"] = json!(flip_first_hex_nibble(&orig_rh));
     let (code_rh, rep_rh) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &tampered_result_hash,
         workspace.path(),
         "tampered_result_hash.json",
@@ -314,7 +417,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .to_owned();
     tampered_workload[2]["payload"]["workload_hash"] = json!(flip_first_hex_nibble(&orig_wh));
     let (code_wh, rep_wh) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &tampered_workload,
         workspace.path(),
         "tampered_workload_hash.json",
@@ -330,7 +433,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .to_owned();
     tampered_deal_link[4]["payload"]["deal_hash"] = json!(flip_first_hex_nibble(&orig_dh));
     let (code_dh, rep_dh) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &tampered_deal_link,
         workspace.path(),
         "tampered_deal_hash.json",
@@ -346,7 +449,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .to_owned();
     tampered_sig[4]["signature"] = json!(flip_first_hex_nibble(&orig_sig));
     let (code_sig, rep_sig) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &tampered_sig,
         workspace.path(),
         "tampered_signature.json",
@@ -422,7 +525,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
 
     // Even the failed run's 5-artifact Froglet chain (`deal_state = "failed"`) MUST pass external froglet-verify!
     let (fail_chain_code, fail_chain_rep) = run_external_froglet_verify(
-        &verify_bin,
+        verify_bin.as_deref(),
         &failed_run.froglet_chain,
         workspace.path(),
         "failed_run_valid_chain.json",

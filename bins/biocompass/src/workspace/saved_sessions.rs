@@ -60,8 +60,8 @@ fn offline(error: &reqwest::Error) -> bool {
         if error.is_connect() && cause.to_string() == "dns error" {
             return true;
         }
-        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
-            if matches!(
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
                 io.kind(),
                 ErrorKind::ConnectionRefused
                     | ErrorKind::NetworkUnreachable
@@ -74,7 +74,6 @@ fn offline(error: &reqwest::Error) -> bool {
             ) {
                 return true;
             }
-        }
         source = cause.source();
     }
     false

@@ -19,7 +19,9 @@ node_modules/
 .sunfire/
 
 # Downloaded offline DuckDB extensions (454 MB binaries, fetched per-platform)
-/vendor/duckdb-extensions/
+/vendor/duckdb-extensions/*
+!/vendor/duckdb-extensions/v2.0.0.sha256
+*.duckdb_extension
 
 # OS & editor artifacts
 .DS_Store

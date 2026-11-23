@@ -3396,8 +3396,8 @@ mod tests {
         assert_eq!(row["properties"], serde_json::json!({"a": [2, null]}));
         assert!(
             matches!(&row["numbered"], Value::Array(items) if items.len() == 1
-            && items[0].as_object().unwrap().values().any(|v| *v == Value::from(9))
-            && items[0].as_object().unwrap().values().any(|v| *v == Value::from("nine")))
+            && items[0].as_object().unwrap().values().any(|v| v.as_i64() == Some(9))
+            && items[0].as_object().unwrap().values().any(|v| v.as_str() == Some("nine")))
         );
         assert_eq!(row["dates"], serde_json::json!([row["original_date"]]));
     }
@@ -3933,5 +3933,82 @@ mod tests {
             ),
             Err(CompassError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn dev_07_duckdb_extension_manifest_and_bootstrap_script() {
+        let ws_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
+        let manifest_path = ws_root.join("vendor/duckdb-extensions/v2.0.0.sha256");
+        assert!(
+            manifest_path.is_file(),
+            "expected tracked manifest at {}",
+            manifest_path.display()
+        );
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let mut entries = std::collections::BTreeSet::new();
+        for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
+            let mut parts = line.split_whitespace();
+            let digest = parts.next().expect("sha256 digest");
+            let rel_file = parts.next().expect("relative extension path");
+            assert!(parts.next().is_none(), "unexpected extra column in {line}");
+            assert_eq!(digest.len(), 64, "invalid sha256 length in {line}");
+            assert!(
+                digest.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex sha256 in {line}"
+            );
+            entries.insert(rel_file.to_string());
+        }
+        for platform in ["linux_amd64", "linux_arm64", "osx_arm64"] {
+            for ext in ["ducklake", "httpfs", "parquet", "postgres_scanner"] {
+                let expected = format!("{platform}/{ext}.duckdb_extension");
+                assert!(
+                    entries.contains(&expected),
+                    "manifest missing {expected}"
+                );
+            }
+        }
+        assert_eq!(entries.len(), 12);
+
+        let script_path = ws_root.join("scripts/install-duckdb-extensions.sh");
+        assert!(
+            script_path.is_file(),
+            "expected bootstrap script at {}",
+            script_path.display()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&script_path).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "bootstrap script must be executable");
+        }
+
+        // Verify idempotent check on host extensions when present, and corruption rejection via --verify-only.
+        let status = std::process::Command::new(&script_path)
+            .arg("--verify-only")
+            .current_dir(&ws_root)
+            .status()
+            .expect("run install-duckdb-extensions.sh --verify-only");
+        assert!(status.success(), "expected host extensions to verify cleanly");
+
+        let bad_dir = tempfile::tempdir().unwrap();
+        let bad_plat = bad_dir.path().join("v2.0.0/osx_arm64");
+        std::fs::create_dir_all(&bad_plat).unwrap();
+        for ext in ["ducklake", "httpfs", "parquet", "postgres_scanner"] {
+            std::fs::write(bad_plat.join(format!("{ext}.duckdb_extension")), b"corrupt").unwrap();
+        }
+        let bad_status = std::process::Command::new(&script_path)
+            .args(["--verify-only", "osx_arm64"])
+            .arg(bad_dir.path())
+            .current_dir(&ws_root)
+            .status()
+            .expect("run install-duckdb-extensions.sh --verify-only on corrupt dir");
+        assert!(
+            !bad_status.success(),
+            "corrupt extension directory must fail sha256 verification"
+        );
     }
 }

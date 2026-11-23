@@ -12,6 +12,7 @@ use biocompass_core_traits::{CompassError, CompassResult};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use std::{
     io::Write,
     net::SocketAddr,
@@ -46,7 +47,8 @@ impl Grant {
     }
 
     fn matches(&self, supplied: &str) -> bool {
-        supplied.len() == 64 && Sha256::digest(supplied.as_bytes())[..] == self.hash
+        supplied.len() == 64
+            && bool::from(Sha256::digest(supplied.as_bytes()).as_slice().ct_eq(&self.hash))
     }
 }
 
@@ -254,5 +256,23 @@ mod tests {
             .unwrap()
             .expires = Instant::now();
         assert!(access.check(&h).is_err());
+    }
+
+    #[test]
+    fn r17_operator_grant_uses_constant_time_digest_eq() {
+        let src = include_str!("operator.rs");
+        let prod_src = src.split("#[cfg(test)]").next().unwrap_or("");
+        assert!(
+            prod_src.contains("ConstantTimeEq") && prod_src.contains(".ct_eq("),
+            "Grant::matches must use subtle::ConstantTimeEq"
+        );
+        let (grant, raw) = Grant::mint(Duration::from_secs(60));
+        assert!(grant.matches(&raw));
+        let mut flipped = raw.clone();
+        let last = if flipped.ends_with('0') { '1' } else { '0' };
+        flipped.pop();
+        flipped.push(last);
+        assert!(!grant.matches(&flipped));
+        assert!(!grant.matches("short"));
     }
 }

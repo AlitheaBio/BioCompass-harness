@@ -207,10 +207,10 @@ impl WorkerCache {
                     && i.repo_tags.as_ref().is_none_or(Vec::is_empty)
                     && Some(i.id.as_str()) != requested
                     && !occupied.contains(&i.id)
-                    && !usage
+                    && usage
                         .leases
                         .get(&i.id)
-                        .is_some_and(|lease| lease.strong_count() > 0)
+                        .is_none_or(|lease| lease.strong_count() == 0)
                     && !refs
                         .iter()
                         .filter_map(|r| r.split_once('@'))

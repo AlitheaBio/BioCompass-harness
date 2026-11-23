@@ -136,15 +136,37 @@ pub async fn detect_container_engine() -> CompassResult<DetectedEngine> {
         "/usr/bin/docker",
         "docker",
     ];
+    detect_engine_with_candidates(cfg!(target_os = "linux"), &podman_candidates, &docker_candidates)
+        .await
+}
 
-    if cfg!(target_os = "linux") {
+async fn detect_engine_with_candidates(
+    is_linux: bool,
+    podman_candidates: &[&str],
+    docker_candidates: &[&str],
+) -> CompassResult<DetectedEngine> {
+    if is_linux {
         for bin in podman_candidates {
             if let Some(eng) = probe_podman(bin).await {
+                if !eng.rootless {
+                    tracing::warn!(
+                        binary = %eng.binary_path.display(),
+                        version = %eng.server_version,
+                        "Podman on Linux is running in rootful mode; rootless Podman is recommended for stronger host user-namespace isolation"
+                    );
+                }
                 return Ok(eng);
             }
         }
         for bin in docker_candidates {
             if let Some(eng) = probe_docker(bin).await {
+                if !eng.rootless {
+                    tracing::warn!(
+                        binary = %eng.binary_path.display(),
+                        version = %eng.server_version,
+                        "Rootless Podman unavailable on Linux; falling back to standard Docker engine (rootless=false) — rootless Podman is recommended for stronger host user-namespace isolation"
+                    );
+                }
                 return Ok(eng);
             }
         }
@@ -220,10 +242,20 @@ async fn probe_docker(bin: &str) -> Option<DetectedEngine> {
 }
 
 /// Construct hardened `podman run` / `docker run` CLI arguments enforcing all security invariants.
+/// By default (cloud / marketplace / edge workers), non-airgapped network policies are rejected (`SEC-12`).
 pub fn build_hardened_oci_args(
     engine: &DetectedEngine,
     container_name: &str,
     spec: &ContainerRunSpec,
+) -> CompassResult<Vec<String>> {
+    build_hardened_oci_args_with_local_allowance(engine, container_name, spec, false)
+}
+
+fn build_hardened_oci_args_with_local_allowance(
+    engine: &DetectedEngine,
+    container_name: &str,
+    spec: &ContainerRunSpec,
+    allow_local_bridge_egress: bool,
 ) -> CompassResult<Vec<String>> {
     if !spec.in_dir.is_absolute() || !spec.out_dir.is_absolute() {
         return Err(CompassError::Validation(
@@ -261,9 +293,20 @@ pub fn build_hardened_oci_args(
 
     if spec.network.is_airgapped() {
         args.push("--network=none".into());
-    } else {
-        // Explicit domain allowlists require egress proxy network; default bridge only when declared.
+    } else if allow_local_bridge_egress
+        && let NetworkPolicy::Allowlist { allow_domains } = &spec.network
+        && !allow_domains.is_empty()
+    {
+        tracing::warn!(
+            run_id = %spec.run_id,
+            ?allow_domains,
+            "Local mode allow_domains enabled: running container with --network=bridge (domain-level egress filtering is not enforced locally)"
+        );
         args.push("--network=bridge".into());
+    } else {
+        return Err(CompassError::AccessDenied(
+            "non-airgapped container network policy is rejected outside local mode (--network=none required)".into(),
+        ));
     }
 
     if spec.resources.gpu > 0 {
@@ -317,6 +360,50 @@ pub fn prepare_stage_permissions(stage_root: &Path, in_dir: &Path, out_dir: &Pat
             .map_err(|e| CompassError::Storage(format!("chmod 0777 out_dir: {e}")))?;
     }
     Ok(())
+}
+
+fn hash_bundled_build_context(root: &Path) -> CompassResult<String> {
+    use sha2::{Digest, Sha256};
+
+    fn walk(base: &Path, dir: &Path, entries: &mut Vec<(String, PathBuf)>) -> CompassResult<()> {
+        for item in std::fs::read_dir(dir)
+            .map_err(|e| CompassError::Storage(format!("read {}: {e}", dir.display())))?
+        {
+            let item = item.map_err(|e| CompassError::Storage(e.to_string()))?;
+            let path = item.path();
+            let rel = path
+                .strip_prefix(base)
+                .map_err(|e| CompassError::Internal(e.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "ui" || rel.starts_with("ui/") || rel.contains("__pycache__") {
+                continue;
+            }
+            let ft = item
+                .file_type()
+                .map_err(|e| CompassError::Storage(e.to_string()))?;
+            if ft.is_dir() {
+                walk(base, &path, entries)?;
+            } else if ft.is_file() {
+                entries.push((rel, path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, root, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (rel, path) in files {
+        hasher.update(rel.as_bytes());
+        hasher.update([0u8]);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| CompassError::Storage(format!("read {}: {e}", path.display())))?;
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Hardened OCI container runner executing real Podman/Docker containers with live log streaming.
@@ -386,6 +473,174 @@ impl OciContainerRunner {
             }
         }
         Err(CompassError::NotFound(format!("image is not installed locally: {image}")))
+    }
+
+    async fn inspect_local_image_id(&self, image_ref: &str) -> CompassResult<Option<String>> {
+        let output = tokio::time::timeout(
+            Duration::from_secs(4),
+            Command::new(&self.engine.binary_path)
+                .args(["image", "inspect", "--format", "{{.Id}}", image_ref])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| CompassError::ContainerEngine("local image inspection timed out".into()))?
+        .map_err(|e| CompassError::ContainerEngine(e.to_string()))?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let id = String::from_utf8_lossy(&output.stdout);
+        let digest = id.trim().strip_prefix("sha256:").unwrap_or(id.trim());
+        if digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            Ok(Some(digest.to_owned()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Build (or reuse cached) a bundled local plugin `Dockerfile` under `local/bundled-<slug>:sha256-<id>`
+    /// when the pinned registry is unreachable on a clean local clone (R11).
+    pub async fn build_local_bundled_image(
+        &self,
+        context_dir: &Path,
+        slug: &str,
+        version: &str,
+    ) -> CompassResult<OciImageRef> {
+        let dockerfile = context_dir.join("Dockerfile");
+        if !dockerfile.is_file() {
+            return Err(CompassError::NotFound(format!(
+                "bundled Dockerfile missing at {}",
+                dockerfile.display()
+            )));
+        }
+        let safe_slug: String = slug
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let safe_ver: String = version
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let content_hash = hash_bundled_build_context(context_dir)?;
+        let stage_tag = format!("local/bundled-{safe_slug}:stage-{safe_ver}-{}", &content_hash[..12]);
+
+        let digest = match self.inspect_local_image_id(&stage_tag).await? {
+            Some(existing) => existing,
+            None => {
+                let out = tokio::time::timeout(
+                    Duration::from_secs(OCI_IMAGE_PREPARATION_TIMEOUT_SECS),
+                    Command::new(&self.engine.binary_path)
+                        .args(["build", "-t", &stage_tag])
+                        .arg(context_dir)
+                        .kill_on_drop(true)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output(),
+                )
+                .await
+                .map_err(|_| {
+                    CompassError::ContainerEngine(format!(
+                        "timed out building bundled Dockerfile '{}'",
+                        dockerfile.display()
+                    ))
+                })?
+                .map_err(|e| {
+                    CompassError::ContainerEngine(format!(
+                        "spawn {} build failed: {e}",
+                        self.engine.binary_path.display()
+                    ))
+                })?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                    return Err(CompassError::ContainerEngine(format!(
+                        "failed building bundled Dockerfile '{}': {}",
+                        dockerfile.display(),
+                        if stderr.is_empty() {
+                            format!("exit code {:?}", out.status.code())
+                        } else {
+                            stderr
+                        }
+                    )));
+                }
+                self.inspect_local_image_id(&stage_tag)
+                    .await?
+                    .ok_or_else(|| {
+                        CompassError::ContainerEngine(format!(
+                            "built bundled image '{stage_tag}' could not be inspected"
+                        ))
+                    })?
+            }
+        };
+
+        let pinned_local_tag = format!("local/bundled-{safe_slug}:sha256-{digest}");
+        if self.inspect_local_image_id(&pinned_local_tag).await?.as_deref() != Some(digest.as_str())
+        {
+            let tag_out = tokio::time::timeout(
+                Duration::from_secs(10),
+                Command::new(&self.engine.binary_path)
+                    .args(["tag", &stage_tag, &pinned_local_tag])
+                    .kill_on_drop(true)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output(),
+            )
+            .await
+            .map_err(|_| CompassError::ContainerEngine("local image tag timed out".into()))?
+            .map_err(|e| CompassError::ContainerEngine(format!("tag bundled image failed: {e}")))?;
+            if !tag_out.status.success() {
+                let stderr = String::from_utf8_lossy(&tag_out.stderr).trim().to_owned();
+                return Err(CompassError::ContainerEngine(format!(
+                    "failed tagging bundled image '{pinned_local_tag}': {stderr}"
+                )));
+            }
+        }
+        OciImageRef::parse(&pinned_local_tag, true)
+    }
+
+    /// Verify at `confirm` time that a `local/bundled-<slug>:sha256-<digest>` quote still resolves
+    /// to the exact local container image ID recorded when the quote was signed.
+    pub async fn verify_local_bundled_image(&self, image_ref: &str) -> CompassResult<OciImageRef> {
+        let parsed = OciImageRef::parse(image_ref, true)?;
+        let Some(expected_digest) = parsed
+            .local_tag
+            .as_deref()
+            .filter(|_| parsed.repository.starts_with("local/bundled-"))
+            .and_then(|t| t.strip_prefix("sha256-"))
+        else {
+            return Err(CompassError::Validation(format!(
+                "invalid local bundled image reference '{image_ref}'"
+            )));
+        };
+        let actual = self.inspect_local_image_id(&parsed.raw).await?.ok_or_else(|| {
+            CompassError::NotFound(format!(
+                "locally built bundled image '{image_ref}' is no longer present"
+            ))
+        })?;
+        if actual != expected_digest {
+            return Err(CompassError::IntegrityViolation(format!(
+                "local bundled image '{image_ref}' ID changed (expected {expected_digest}, got {actual})"
+            )));
+        }
+        Ok(parsed)
     }
 
     /// Pull an OCI image into the bound container engine store.
@@ -484,7 +739,12 @@ impl OciContainerRunner {
             ));
         }
         let container_name = self.container_name(&spec.run_id);
-        let mut args = build_hardened_oci_args(&self.engine, &container_name, spec)?;
+        let mut args = build_hardened_oci_args_with_local_allowance(
+            &self.engine,
+            &container_name,
+            spec,
+            self.workspace_scope.is_some(),
+        )?;
         self.label_native_job(&mut args);
         let wait_for_revocation = async {
             match revoked {
@@ -508,7 +768,10 @@ impl OciContainerRunner {
                 }
             };
             args.insert(1, "--pull=never".into());
-        } else if self.worker_cache.is_some() || spec.image.raw.starts_with("sha256:") {
+        } else if self.worker_cache.is_some()
+            || spec.image.raw.starts_with("sha256:")
+            || spec.image.repository.starts_with("local/bundled-")
+        {
             // A development tag may use an already installed image. Only the
             // digest admission path can fetch images into a worker-owned engine.
             args.insert(1, "--pull=never".into());
@@ -938,5 +1201,143 @@ esac
         assert!(args.contains(&"/tmp:rw,noexec,nosuid,nodev,size=512m".to_string()));
         assert!(args.contains(&"/tmp/stage/in:/in:ro".to_string()));
         assert!(args.contains(&"/tmp/stage/out:/out:rw".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sec_12_non_airgapped_network_rejected_outside_local_mode_and_warns_in_local_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine_bin = tmp.path().join("fake-docker");
+        std::fs::write(
+            &engine_bin,
+            r#"#!/bin/sh
+if [ "$1" = "run" ]; then
+  exit 0
+fi
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&engine_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let engine = DetectedEngine {
+            kind: EngineKind::Docker,
+            binary_path: engine_bin,
+            server_version: "29.10.0".into(),
+            rootless: false,
+        };
+        let in_dir = tmp.path().join("in");
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let spec = ContainerRunSpec {
+            run_id: RunId::from("run-sec-12"),
+            image: OciImageRef::parse("local/test:dev", true).unwrap(),
+            in_dir,
+            out_dir,
+            resources: PluginResources {
+                cpus: 1,
+                memory_mb: 256,
+                gpu: 0,
+                timeout_sec: 10,
+                pids_limit: 32,
+            },
+            network: NetworkPolicy::Allowlist {
+                allow_domains: vec!["eutils.ncbi.nlm.nih.gov".into()],
+            },
+            command_override: None,
+        };
+
+        // 1. Default cloud/edge build_hardened_oci_args and non-workspace runner MUST reject non-airgapped!
+        let err = build_hardened_oci_args(&engine, "biocompass-cloud-job", &spec)
+            .expect_err("cloud/edge must reject allow_domains / non-airgapped execution");
+        assert!(matches!(err, CompassError::AccessDenied(_)));
+
+        let cloud_runner = OciContainerRunner::from_engine(engine.clone());
+        let exec_err = cloud_runner
+            .execute(&spec, None)
+            .await
+            .expect_err("cloud/edge runner must reject non-airgapped execution");
+        assert!(matches!(exec_err, CompassError::AccessDenied(_)));
+
+        // 2. Local native workspace runner permits allow_domains -> --network=bridge and emits a WARN.
+        let stage_root = tmp.path().join("stages");
+        std::fs::create_dir_all(&stage_root).unwrap();
+        let local_runner = cloud_runner
+            .for_native_workspace(&stage_root, "provider-pubkey")
+            .unwrap();
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer_buf = Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_writer(move || SharedVecWriter(Arc::clone(&writer_buf)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let report = local_runner
+            .execute(&spec, None)
+            .await
+            .expect("local workstation runner permits allow_domains with warning");
+        assert_eq!(report.exit_code, 0);
+        let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("WARN") && logs.contains("--network=bridge"),
+            "expected local bridge egress warning, got: {logs}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn sec_13_linux_docker_fallback_emits_startup_warning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_podman = tmp.path().join("no-podman");
+        let fake_docker = tmp.path().join("fake-docker");
+        std::fs::write(
+            &fake_docker,
+            "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then printf '29.10.0|[name=seccomp]\\n'; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer_buf = Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_writer(move || SharedVecWriter(Arc::clone(&writer_buf)))
+            .finish();
+        let detected = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            detect_engine_with_candidates(
+                true,
+                &[missing_podman.to_str().unwrap()],
+                &[fake_docker.to_str().unwrap()],
+            )
+            .await
+            .expect("detect standard docker fallback on Linux")
+        };
+        assert_eq!(detected.kind, EngineKind::Docker);
+        assert!(!detected.rootless);
+        let logs = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("WARN") && logs.to_ascii_lowercase().contains("podman") && logs.to_ascii_lowercase().contains("docker"),
+            "expected Linux Podman->Docker fallback WARN, got: {logs}"
+        );
+    }
+
+    struct SharedVecWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedVecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

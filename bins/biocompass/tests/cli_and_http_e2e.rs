@@ -17,8 +17,69 @@ use serde_json::{Value, json};
 use std::process::Command;
 use tempfile::TempDir;
 
+struct EphemeralRegistry {
+    container_name: String,
+    host_port: u16,
+    created_tags: Vec<String>,
+}
+
+impl EphemeralRegistry {
+    async fn start() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("allocate ephemeral registry port")
+            .local_addr()
+            .unwrap()
+            .port();
+        let container_name = format!(
+            "biocompass-gate4-reg-{}-{}",
+            std::process::id(),
+            port
+        );
+        let status = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container_name,
+                "-p",
+                &format!("127.0.0.1:{port}:5000"),
+                "ghcr.io/distribution/distribution:3.0.0",
+            ])
+            .status()
+            .expect("start ephemeral OCI registry container");
+        assert!(status.success(), "failed starting ephemeral OCI registry");
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v2/");
+        for _ in 0..40 {
+            if client.get(&url).send().await.is_ok_and(|r| r.status().is_success()) {
+                return Self {
+                    container_name,
+                    host_port: port,
+                    created_tags: Vec::new(),
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("ephemeral OCI registry on 127.0.0.1:{port} did not become healthy");
+    }
+}
+
+impl Drop for EphemeralRegistry {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.container_name])
+            .output();
+        for tag in &self.created_tags {
+            let _ = Command::new("docker").args(["rmi", "-f", tag]).output();
+        }
+    }
+}
+
 #[tokio::test]
 async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite() {
+    let mut registry = EphemeralRegistry::start().await;
     let bin = env!("CARGO_BIN_EXE_biocompass");
     let tmp = TempDir::new().expect("create temp workspace");
     let plugin_dir = tmp.path().join("gate4-uv-probe");
@@ -59,19 +120,20 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
     )
     .expect("write ui/dist/index.html");
 
-    // 2. Real `docker build` + push to live local OCI v1.1 registry (`127.0.0.1:5500`)
-    let image_tag = "127.0.0.1:5500/alithea/gate4-uv-probe:0.1.0";
+    // 2. Real `docker build` + push to self-contained ephemeral OCI v1.1 registry
+    let image_tag = format!("127.0.0.1:{}/alithea/gate4-uv-probe:0.1.0", registry.host_port);
+    registry.created_tags.push(image_tag.clone());
     let build_status = Command::new("docker")
-        .args(["build", "-q", "-t", image_tag, plugin_dir.to_str().unwrap()])
+        .args(["build", "--provenance=false", "-q", "-t", &image_tag, plugin_dir.to_str().unwrap()])
         .status()
         .expect("docker build scaffolded python-uv plugin");
     assert!(build_status.success(), "docker build of scaffolded python-uv template failed");
 
     let push_status = Command::new("docker")
-        .args(["push", "-q", image_tag])
+        .args(["push", "-q", &image_tag])
         .status()
-        .expect("docker push to 127.0.0.1:5500");
-    assert!(push_status.success(), "docker push to 127.0.0.1:5500 failed");
+        .expect("docker push to ephemeral OCI registry");
+    assert!(push_status.success(), "docker push to ephemeral OCI registry failed");
 
     let inspect_out = Command::new("docker")
         .args([
@@ -79,7 +141,7 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
             "inspect",
             "--format",
             "{{index .RepoDigests 0}}",
-            image_tag,
+            &image_tag,
         ])
         .output()
         .expect("docker image inspect RepoDigests");
@@ -151,9 +213,10 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
     assert_eq!(verify_json["valid"], json!(true));
     assert_eq!(verify_json["chain_evaluated"], json!(true));
 
-    let external_froglet = std::path::Path::new("/tmp/froglet-clean-cli/target/debug/froglet-verify");
-    if external_froglet.is_file() {
-        let ext_out = Command::new(external_froglet)
+    if let Ok(ext_bin) = std::env::var("FROGLET_VERIFY_BIN")
+        && std::path::Path::new(&ext_bin).is_file()
+    {
+        let ext_out = Command::new(ext_bin)
             .args(["--chain", "--json", receipt_path.to_str().unwrap()])
             .output()
             .expect("run standalone froglet-verify");

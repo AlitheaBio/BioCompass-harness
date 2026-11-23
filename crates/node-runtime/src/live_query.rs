@@ -170,7 +170,7 @@ impl LiveQueryResponder for LiveQuerySession {
         let sequence = calls.entries.len() + 1;
         calls.entries.push(Entry {
             sequence, request, started_at, completed_at: Utc::now(), state,
-            response_sha256: outcome.as_ref().ok().map(|bytes| sha256_hex(bytes)),
+            response_sha256: outcome.as_ref().ok().map(sha256_hex),
         });
         let document = serde_json::to_vec(&json!({
             "run_id": self.run_id, "plugin_id": self.plugin_id, "plugin_version": self.plugin_version,

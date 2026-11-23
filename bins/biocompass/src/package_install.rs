@@ -31,6 +31,13 @@ struct Package {
     image_digest: String,
     ui_sha256: Option<String>,
     ui_files: Vec<PackageFile>,
+    #[serde(default)]
+    icon_file: Option<PackageFile>,
+}
+
+struct StagedAssets {
+    ui_files: BTreeMap<String, Vec<u8>>,
+    icon: Option<Vec<u8>>,
 }
 
 // Keep the published JSON representation. Converting a manifest through TOML would lose
@@ -46,6 +53,8 @@ struct Receipt {
     image_digest: String,
     ui_sha256: Option<String>,
     files: Inventory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_sha256: Option<(String, u64)>,
 }
 
 fn io(e: std::io::Error) -> CompassError {
@@ -92,10 +101,19 @@ impl Receipt {
             .manifest
             .icon
             .as_deref()
-            .is_some_and(|icon| !path_ok(icon))
+            .is_some_and(|icon| !path_ok(icon) || !icon.ends_with(".svg"))
         {
             return Err(invalid("invalid module icon path"));
         }
+        if let Some((icon_hash, icon_size)) = &self.icon_sha256
+            && (self.manifest.icon.is_none()
+                || *icon_size == 0
+                || *icon_size > 256 * 1024
+                || icon_hash.len() != 64
+                || !icon_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            {
+                return Err(invalid("invalid module icon metadata"));
+            }
         if self.files.keys().any(|p| !path_ok(p)) {
             return Err(invalid("invalid relative UI asset path"));
         }
@@ -150,6 +168,7 @@ impl Receipt {
             && self.image_digest == other.image_digest
             && self.ui_sha256 == other.ui_sha256
             && self.files == other.files
+            && self.icon_sha256 == other.icon_sha256
             && serde_json::to_value((&self.manifest, &self.skill)).map_err(json_error)?
                 == serde_json::to_value((&other.manifest, &other.skill)).map_err(json_error)?)
     }
@@ -161,7 +180,7 @@ fn validate_payload(
     version: &str,
     origin: String,
     org: OrgId,
-) -> CompassResult<(Receipt, BTreeMap<String, Vec<u8>>)> {
+) -> CompassResult<(Receipt, StagedAssets)> {
     if &package.plugin_id != id
         || &package.manifest.id != id
         || package.plugin_version != version
@@ -170,7 +189,7 @@ fn validate_payload(
         return Err(invalid("hub returned a different module ID or version"));
     }
     let mut files = Inventory::new();
-    let mut bytes = BTreeMap::new();
+    let mut ui_files = BTreeMap::new();
     for file in package.ui_files {
         if !path_ok(&file.path) || files.contains_key(&file.path) {
             return Err(invalid("duplicate or invalid UI path in module package"));
@@ -183,8 +202,28 @@ fn validate_payload(
             )));
         }
         files.insert(file.path.clone(), (file.sha256, file.size_bytes));
-        bytes.insert(file.path, data);
+        ui_files.insert(file.path, data);
     }
+    let (icon_sha256, icon) = if let Some(icon_file) = package.icon_file {
+        if package.manifest.icon.as_deref() != Some(icon_file.path.as_str())
+            || !path_ok(&icon_file.path)
+            || !icon_file.path.ends_with(".svg")
+        {
+            return Err(invalid("module icon_file does not match manifest.icon"));
+        }
+        let data =
+            hex::decode(icon_file.data_hex).map_err(|_| invalid("invalid icon file encoding"))?;
+        if data.is_empty()
+            || data.len() > 256 * 1024
+            || data.len() as u64 != icon_file.size_bytes
+            || sha(&data) != icon_file.sha256
+        {
+            return Err(invalid("module icon failed integrity check"));
+        }
+        (Some((icon_file.sha256, icon_file.size_bytes)), Some(data))
+    } else {
+        (None, None)
+    };
     let receipt = Receipt {
         format: 1,
         origin,
@@ -195,9 +234,10 @@ fn validate_payload(
         image_digest: package.image_digest,
         ui_sha256: package.ui_sha256,
         files,
+        icon_sha256,
     };
     receipt.check()?;
-    Ok((receipt, bytes))
+    Ok((receipt, StagedAssets { ui_files, icon }))
 }
 
 // Inventory every file, including unexpected additions. Never follow directory or file symlinks.
@@ -236,7 +276,7 @@ fn load(directory: &Path) -> CompassResult<Receipt> {
         return Err(invalid("invalid installed module content directory"));
     }
     inventory(&content, &content, &mut actual)?;
-    let expected = receipt
+    let mut expected = receipt
         .files
         .iter()
         .map(|(k, v)| {
@@ -250,6 +290,11 @@ fn load(directory: &Path) -> CompassResult<Receipt> {
             )
         })
         .collect::<Inventory>();
+    if let (Some(icon_rel), Some(icon_entry)) = (&receipt.manifest.icon, &receipt.icon_sha256)
+        && expected.insert(icon_rel.clone(), icon_entry.clone()).is_some()
+    {
+        return Err(invalid("module icon path conflicts with a UI asset"));
+    }
     if actual != expected {
         return Err(invalid(
             "installed module files differ from their published inventory",
@@ -335,7 +380,7 @@ fn commit(
     root: &Path,
     directory: &Path,
     receipt: &Receipt,
-    bytes: &BTreeMap<String, Vec<u8>>,
+    bytes: &StagedAssets,
 ) -> CompassResult<()> {
     let _lock = lock(root)?;
     if verify_existing(directory, receipt)? {
@@ -347,10 +392,16 @@ fn commit(
         .map_err(io)?;
     fs::create_dir(stage.path().join("content")).map_err(io)?;
     let ui_root = receipt.ui_root(stage.path());
-    for (name, data) in bytes {
+    for (name, data) in &bytes.ui_files {
         let path = ui_root.join(name);
         fs::create_dir_all(path.parent().expect("file within staging directory")).map_err(io)?;
         write_new(&path, data)?;
+    }
+    if let (Some(icon_rel), Some(icon_data)) = (&receipt.manifest.icon, &bytes.icon) {
+        let icon_path = stage.path().join("content").join(icon_rel);
+        fs::create_dir_all(icon_path.parent().expect("icon within staging directory"))
+            .map_err(io)?;
+        write_new(&icon_path, icon_data)?;
     }
     let mut committed = receipt.clone();
     committed.installed_at = next_commit_time(root)?;
@@ -583,7 +634,7 @@ mod tests {
                         {"path":"assets/main.js","data_hex":hex::encode(b"const n=1;"),"sha256":sha(b"const n=1;"),"size_bytes":10}]})
     }
 
-    fn read(v: Value) -> CompassResult<(Receipt, BTreeMap<String, Vec<u8>>)> {
+    fn read(v: Value) -> CompassResult<(Receipt, StagedAssets)> {
         validate_payload(
             serde_json::from_value(v).unwrap(),
             &PluginId::new("fixture/math").unwrap(),
@@ -712,5 +763,33 @@ mod tests {
             actual.skill.unwrap().description,
             if result_a { "a" } else { "b" }
         );
+    }
+
+    #[test]
+    fn dev_05_installs_and_verifies_optional_icon_svg_and_rejects_tampered_icon() {
+        let root = tempfile::tempdir().unwrap();
+        let icon_bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"8\" height=\"8\"/></svg>";
+        let mut pkg = package();
+        pkg["manifest"]["icon"] = json!("icon.svg");
+        pkg["icon_file"] = json!({
+            "path": "icon.svg",
+            "size_bytes": icon_bytes.len() as u64,
+            "sha256": sha(icon_bytes),
+            "data_hex": hex::encode(icon_bytes),
+        });
+
+        let (receipt, bytes) = read(pkg).unwrap();
+        let dst = stored_dir(root.path(), &receipt.manifest.id, "1").unwrap();
+        commit(root.path(), &dst, &receipt, &bytes).unwrap();
+        assert_eq!(
+            fs::read(dst.join("content/icon.svg")).expect("installed icon.svg on disk"),
+            icon_bytes
+        );
+        let loaded = load(&dst).unwrap();
+        assert_eq!(loaded.manifest.icon.as_deref(), Some("icon.svg"));
+
+        // Tampering with installed icon.svg must fail load() inventory check.
+        fs::write(dst.join("content/icon.svg"), b"<svg>tampered</svg>").unwrap();
+        assert!(load(&dst).is_err());
     }
 }
