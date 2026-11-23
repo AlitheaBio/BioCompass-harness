@@ -333,6 +333,9 @@ export interface ModuleOfferRequest {
   access: "granted" | "pending";
 }
 
+export type ModuleSource = "workspace" | "org_cloud" | "network_provider";
+export type ModuleRunsIn = "local" | "cloud" | "provider_edge" | "network_provider";
+
 export interface PluginSummary {
   marketplace_offer_id?: string;
   manifest: PluginManifest;
@@ -345,6 +348,13 @@ export interface PluginSummary {
   icon_url: string | null;
   execution_target: "local" | "froglet_node" | "alithea_cloud" | string;
   execution_label: string;
+  source?: ModuleSource;
+  runs_in?: ModuleRunsIn;
+  ui_bundle_hash?: string | null;
+  ui_bundle_size_bytes?: number | null;
+  can_install?: boolean;
+  installed_locally?: boolean;
+  provider_label?: string | null;
   installed: boolean;
   removable_versions?: string[];
   detached_versions?: string[];
@@ -409,6 +419,15 @@ export function runStatusLabel(run: RunRecord): string {
   }
 }
 
+export interface RunInput {
+  alias: string;
+  source_run_id: string;
+  name: string;
+  sha256: string;
+  size_bytes: number;
+  source_receipt_hash: string;
+}
+
 export interface RunRecord {
   run_id: string;
   org_id: string;
@@ -419,6 +438,12 @@ export interface RunRecord {
   admission?: { state: AdmissionState; requested_at: string } | null;
   params: Record<string, unknown>;
   grant: DatasetGrant | null;
+  inputs?: RunInput[];
+  parent_run_id?: string | null;
+  agent_credential_id?: string | null;
+  agent_tool_call_id?: string | null;
+  module_fee_milli_act?: number | null;
+  dataset_fee_milli_act?: number | null;
   quote: RunQuote;
   result_json: Record<string, unknown> | null;
   artifacts: ArtifactRef[];

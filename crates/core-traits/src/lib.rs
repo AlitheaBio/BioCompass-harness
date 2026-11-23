@@ -1,9 +1,24 @@
 //! `biocompass-core-traits`: Cloud-agnostic core interfaces and durable local backing stores.
 
+pub mod commitments;
+pub mod error;
 pub mod fs_blob_store;
 pub mod ids;
-mod commitments;
-pub use commitments::{compute_canonical_workload_hash, result_manifest_hash};
+pub use commitments::{
+    EXTENSION_REF_CHILD_PREFIX, EXTENSION_REF_INPUT_PREFIX, EXTENSION_REF_PARENT_PREFIX,
+    ExtensionRefStage, ParsedExtensionRef, WorkloadDescriptor, compute_canonical_workload_hash,
+    expected_extension_refs, parse_extension_ref, result_manifest_hash, verify_extension_refs,
+};
+pub use error::{
+    ERR_ACCESS_DENIED, ERR_AGENT_CEILING_EXCEEDED, ERR_AGENT_CREDENTIAL_EXPIRED,
+    ERR_AGENT_CREDENTIAL_REVOKED, ERR_CHILD_MODULE_NOT_ALLOWED, ERR_CONTAINER_ENGINE_ERROR,
+    ERR_DAILY_ACT_BREAKER_EXCEEDED, ERR_DOC_VERSION_CONFLICT, ERR_IDEMPOTENCY_CONFLICT,
+    ERR_INPUT_LIMIT_EXCEEDED, ERR_INSUFFICIENT_FUNDS, ERR_INTEGRITY_VIOLATION, ERR_INTERNAL_ERROR,
+    ERR_NOT_FOUND, ERR_OFF_LIST_CATALOG, ERR_OFF_LIST_MODULE, ERR_PAYMENT_ERROR,
+    ERR_PROTOCOL_ERROR, ERR_RATE_LIMITED, ERR_ROW_BUDGET_EXCEEDED, ERR_STORAGE_ERROR,
+    ERR_UI_BUNDLE_TAMPERED, ERR_UNAUTHENTICATED, ERR_UPSTREAM_LLM_ERROR, ERR_VALIDATION_ERROR,
+    ErrorCode,
+};
 #[cfg(feature = "local-sqlite")]
 pub mod ledger;
 #[cfg(feature = "local-sqlite")]
@@ -22,10 +37,12 @@ pub use traits::{BlobStore, OciRegistryClient, PaymentGateway, RunDispatcher, Se
 pub use types::{
     ArtifactRef, AttachedCatalogPin, ColumnDescriptor, CompassError, CompassResult, DatasetGrant,
     DatasetHostingMode, DatasetOfferRecord, DatasetOfferScope, FilterExpr, GrantLevel, IngestFormat, IngestMode,
-    LedgerTx, LedgerTxKind, OciImageRef, PrepareRunRequest, ProjectRecord, QueryAst, RunLogEvent,
+    LedgerTx, LedgerTxKind, MAX_RUN_INPUTS, ModuleListingMeta, ModuleRunsIn, ModuleSource,
+    OciImageRef, PrepareRunRequest, ProjectRecord, QueryAst, RunInput, RunLogEvent,
     ReservationState, RunAdmission, RunQuote, RunRecord, RunReservation, RunStatus, SavedViewPlane, SavedViewRecord, SavedViewSourcePin,
     SavedViewStatus, SavedViewVerificationReport, ScalarValue, SessionEvent, SessionEventKind,
-    ScopedQueryDefinition, SessionRecord, SortDirection, SortSpec, TableSchema, validate_requested_plugin_version,
+    ScopedQueryDefinition, SessionRecord, SortDirection, SortSpec, TableSchema,
+    canonicalize_run_inputs, is_sha256_hex, validate_requested_plugin_version,
 };
 
 #[cfg(test)]
@@ -448,5 +465,127 @@ mod tests {
             !hint.contains("Dataset Grant"),
             "cloud-web mode error should not display Dataset Grant hint, got: {hint}"
         );
+    }
+
+    #[test]
+    fn stable_error_codes_roundtrip_and_classify_independently_of_currency_text() {
+        let insuf = CompassError::insufficient_funds("need 12.50 EUR, available 4.00 EUR");
+        assert_eq!(insuf.error_code(), ErrorCode::InsufficientFunds);
+        assert_eq!(insuf.code(), ERR_INSUFFICIENT_FUNDS);
+        assert!(insuf.is_code(ErrorCode::InsufficientFunds));
+        assert!(matches!(insuf, CompassError::Payment(_)));
+        assert!(insuf.hint().is_some());
+
+        let ceiling = CompassError::agent_ceiling_exceeded("daily spend cap reached");
+        assert_eq!(ceiling.error_code(), ErrorCode::AgentCeilingExceeded);
+        assert_eq!(ceiling.code(), ERR_AGENT_CEILING_EXCEEDED);
+        assert!(matches!(ceiling, CompassError::Payment(_)));
+        assert!(ceiling.hint().is_some());
+
+        let off_mod = CompassError::off_list_module("module 'org/x' not in credential allowlist");
+        assert_eq!(off_mod.error_code(), ErrorCode::OffListModule);
+        assert!(matches!(off_mod, CompassError::AccessDenied(_)));
+
+        let off_cat = CompassError::off_list_catalog("catalog 'org/c' not in credential allowlist");
+        assert_eq!(off_cat.error_code(), ErrorCode::OffListCatalog);
+        assert!(matches!(off_cat, CompassError::AccessDenied(_)));
+
+        let tampered = CompassError::ui_bundle_tampered("bundle SHA-256 mismatch");
+        assert_eq!(tampered.error_code(), ErrorCode::UiBundleTampered);
+        assert!(matches!(tampered, CompassError::IntegrityViolation(_)));
+
+        let child = CompassError::child_module_not_allowed("child module not declared");
+        assert_eq!(child.error_code(), ErrorCode::ChildModuleNotAllowed);
+        assert!(matches!(child, CompassError::AccessDenied(_)));
+
+        let conflict = CompassError::doc_version_conflict("expected base_version 3");
+        assert_eq!(conflict.error_code(), ErrorCode::DocVersionConflict);
+        assert!(matches!(conflict, CompassError::IntegrityViolation(_)));
+
+        for code in [
+            ErrorCode::InsufficientFunds,
+            ErrorCode::DailyActBreakerExceeded,
+            ErrorCode::AgentCeilingExceeded,
+            ErrorCode::AgentCredentialRevoked,
+            ErrorCode::AgentCredentialExpired,
+            ErrorCode::IdempotencyConflict,
+            ErrorCode::OffListModule,
+            ErrorCode::OffListCatalog,
+            ErrorCode::UiBundleTampered,
+            ErrorCode::ChildModuleNotAllowed,
+            ErrorCode::DocVersionConflict,
+            ErrorCode::InputLimitExceeded,
+            ErrorCode::RowBudgetExceeded,
+            ErrorCode::Unauthenticated,
+        ] {
+            assert_eq!(ErrorCode::parse(code.as_str()), Some(code));
+        }
+    }
+
+    #[test]
+    fn run_input_validation_enforces_limits_and_path_safety() {
+        let valid = RunInput {
+            alias: "cohort_a".into(),
+            source_run_id: "run-123".into(),
+            name: "nested/result.parquet".into(),
+            sha256: "ab".repeat(32),
+            size_bytes: 128,
+            source_receipt_hash: "cd".repeat(32),
+        };
+        assert_eq!(
+            canonicalize_run_inputs(std::slice::from_ref(&valid)).unwrap(),
+            vec![valid.clone()]
+        );
+
+        let mut bad_alias = valid.clone();
+        bad_alias.alias = "../escape".into();
+        assert!(canonicalize_run_inputs(&[bad_alias]).is_err());
+
+        let mut bad_name = valid.clone();
+        bad_name.name = "a/../b".into();
+        assert!(canonicalize_run_inputs(&[bad_name]).is_err());
+
+        let mut bad_sha = valid.clone();
+        bad_sha.sha256 = "AB".repeat(32);
+        assert!(canonicalize_run_inputs(&[bad_sha]).is_err());
+
+        // Duplicate stage path rejected
+        assert!(canonicalize_run_inputs(&[valid.clone(), valid.clone()]).is_err());
+
+        // Exceeding MAX_RUN_INPUTS rejected
+        let too_many: Vec<RunInput> = (0..=MAX_RUN_INPUTS)
+            .map(|i| RunInput {
+                alias: format!("in-{i}"),
+                ..valid.clone()
+            })
+            .collect();
+        assert!(canonicalize_run_inputs(&too_many).is_err());
+    }
+
+    #[test]
+    fn module_listing_meta_and_prepare_request_serde_defaults_remain_backwards_compatible() {
+        let meta: ModuleListingMeta = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(meta.source, ModuleSource::Workspace);
+        assert_eq!(meta.runs_in, ModuleRunsIn::Local);
+        assert!(!meta.can_install);
+        assert!(!meta.installed_locally);
+        assert!(meta.ui_bundle_hash.is_none());
+        assert!(meta.ui_bundle_size_bytes.is_none());
+        assert!(meta.provider_label.is_none());
+
+        let legacy_req: PrepareRunRequest = serde_json::from_value(json!({
+            "org_id": "org-1",
+            "session_id": null,
+            "plugin_id": "alithea/demo",
+            "params": {},
+            "dataset_grant": null
+        }))
+        .unwrap();
+        assert!(legacy_req.inputs.is_empty());
+        assert!(legacy_req.parent_run_id.is_none());
+        assert!(legacy_req.agent_credential_id.is_none());
+        assert!(legacy_req.agent_tool_call_id.is_none());
+        assert!(legacy_req.doc_id.is_none());
+        assert!(legacy_req.doc_version.is_none());
     }
 }

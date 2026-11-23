@@ -431,6 +431,7 @@ dependencies = [
  "axum",
  "biocompass-core-traits",
  "biocompass-data-engine",
+ "biocompass-mcp-core",
  "biocompass-node-runtime",
  "biocompass-oci-runner",
  "biocompass-plugin-spec",
@@ -478,6 +479,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "biocompass-mcp-core"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "biocompass-core-traits",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

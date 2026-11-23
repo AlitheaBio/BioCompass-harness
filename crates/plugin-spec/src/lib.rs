@@ -189,6 +189,13 @@ impl ResolvedPluginOffer {
     }
 }
 
+/// Maximum total uncompressed size of a module's UI bundle across client and hub (`U1`, 32 MiB).
+pub const MAX_UI_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
+/// Maximum number of allowed child module slugs declared in `plugin.toml` (`W7`).
+pub const MAX_CHILD_MODULES: usize = 32;
+/// Maximum cumulative wait time (seconds) a parent module may pause while awaiting child runs (`W7`, 24 h).
+pub const MAX_CHILD_WAIT_SEC: u64 = 86_400;
+
 pub const TARGET_VALIDATION_DATASET_INPUT_CONTRACT: &str = "biocompass.target-validation.v1";
 pub const OFF_TARGET_TOXICITY_DATASET_INPUT_CONTRACT: &str = "biocompass.off-target-toxicity.v1";
 pub const TOXICITY_SCREENING_DATASET_INPUT_CONTRACT: &str = "biocompass.toxicity-screening.v1";
@@ -230,6 +237,12 @@ pub struct PluginManifest {
     /// Named measurement aggregates, optionally filtered through an approved release relationship.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runtime_join_queries: std::collections::BTreeMap<String, ScopedQueryDefinition>,
+    /// Allowlist of child module IDs (`<org>/<name>`) this module may invoke via the child-run broker (`W7`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_modules: Vec<String>,
+    /// Maximum cumulative seconds this parent module may pause its execution clock waiting for child runs (`W7`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_child_wait_sec: Option<u64>,
     pub image: String,
     #[serde(default)]
     pub network: NetworkPolicy,
@@ -432,6 +445,39 @@ impl PluginManifest {
             return Err(CompassError::Validation(
                 "runtime_join_queries requires an isolated compute-only module and up to 16 named measures".into(),
             ));
+        }
+        if !self.child_modules.is_empty() {
+            if self.child_modules.len() > MAX_CHILD_MODULES {
+                return Err(CompassError::Validation(format!(
+                    "child_modules may declare at most {MAX_CHILD_MODULES} modules"
+                )));
+            }
+            let mut seen_children = std::collections::HashSet::new();
+            for child in &self.child_modules {
+                validate_scaffold_plugin_id(child).map_err(|_| {
+                    CompassError::Validation(format!(
+                        "invalid child_modules entry '{child}': must be '<namespace>/<slug>' matching ^[a-z0-9][a-z0-9_-]{{0,62}}$"
+                    ))
+                })?;
+                if child == self.id.as_str() {
+                    return Err(CompassError::Validation(format!(
+                        "child_modules cannot include self ('{}')",
+                        self.id
+                    )));
+                }
+                if !seen_children.insert(child.as_str()) {
+                    return Err(CompassError::Validation(format!(
+                        "duplicate child_modules entry '{child}'"
+                    )));
+                }
+            }
+        }
+        if let Some(wait_sec) = self.max_child_wait_sec
+            && (wait_sec == 0 || wait_sec > MAX_CHILD_WAIT_SEC)
+        {
+            return Err(CompassError::Validation(format!(
+                "max_child_wait_sec must be between 1 and {MAX_CHILD_WAIT_SEC} seconds, got {wait_sec}"
+            )));
         }
         if self.inputs.schema.get("x-biocompass-import").is_some() {
             self.version_operation_specs()?;
@@ -827,5 +873,63 @@ dataset_input_contract = "biocompass.toxicity-screening.v1"
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn validates_child_modules_and_max_child_wait_sec() {
+        assert_eq!(MAX_UI_BUNDLE_BYTES, 32 * 1024 * 1024);
+
+        let valid_toml = r#"
+id = "alithea/notebook"
+name = "Notebook"
+version = "1.0.0"
+image = "local/notebook:dev"
+child_modules = ["alithea/hla-motif-enrichment", "alithea/peptide-qc"]
+max_child_wait_sec = 3600
+"#;
+        let parsed = PluginManifest::from_toml_str(valid_toml, true).expect("valid child_modules");
+        assert_eq!(
+            parsed.child_modules,
+            vec!["alithea/hla-motif-enrichment", "alithea/peptide-qc"]
+        );
+        assert_eq!(parsed.max_child_wait_sec, Some(3600));
+
+        // Self-reference rejected
+        let self_ref = r#"
+id = "alithea/notebook"
+name = "Notebook"
+version = "1.0.0"
+image = "local/notebook:dev"
+child_modules = ["alithea/notebook"]
+"#;
+        assert!(PluginManifest::from_toml_str(self_ref, true).is_err());
+
+        // Duplicate rejected
+        let dup = r#"
+id = "alithea/notebook"
+name = "Notebook"
+version = "1.0.0"
+image = "local/notebook:dev"
+child_modules = ["alithea/a", "alithea/a"]
+"#;
+        assert!(PluginManifest::from_toml_str(dup, true).is_err());
+
+        // Bad slug rejected
+        let bad_slug = r#"
+id = "alithea/notebook"
+name = "Notebook"
+version = "1.0.0"
+image = "local/notebook:dev"
+child_modules = ["../evil/mod"]
+"#;
+        assert!(PluginManifest::from_toml_str(bad_slug, true).is_err());
+
+        // Out-of-range max_child_wait_sec rejected
+        for bad_wait in [0_u64, MAX_CHILD_WAIT_SEC + 1] {
+            let doc = format!(
+                "id = \"alithea/notebook\"\nname = \"N\"\nversion = \"1.0.0\"\nimage = \"local/n:dev\"\nmax_child_wait_sec = {bad_wait}\n"
+            );
+            assert!(PluginManifest::from_toml_str(&doc, true).is_err());
+        }
     }
 }

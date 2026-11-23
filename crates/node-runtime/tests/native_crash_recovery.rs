@@ -103,6 +103,12 @@ timeout_sec = TIMEOUT
                 offer_id: None,
                 params: json!({"sample": "one"}),
                 dataset_grant: None,
+                inputs: Vec::new(),
+                parent_run_id: None,
+                agent_credential_id: None,
+                agent_tool_call_id: None,
+                doc_id: None,
+                doc_version: None,
             })
             .await
             .unwrap()

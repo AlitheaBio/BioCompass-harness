@@ -116,12 +116,33 @@ struct HubPluginDto {
     has_ui_bundle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     icon_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<biocompass_core_traits::ModuleSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runs_in: Option<biocompass_core_traits::ModuleRunsIn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ui_bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ui_bundle_size_bytes: Option<u64>,
+    #[serde(default)]
+    can_install: bool,
+    #[serde(default)]
+    installed_locally: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HubPluginMeta {
     pub has_ui_bundle: Option<bool>,
     pub has_remote_icon: bool,
+    pub source: Option<biocompass_core_traits::ModuleSource>,
+    pub runs_in: Option<biocompass_core_traits::ModuleRunsIn>,
+    pub ui_bundle_hash: Option<String>,
+    pub ui_bundle_size_bytes: Option<u64>,
+    pub can_install: bool,
+    pub installed_locally: bool,
+    pub provider_label: Option<String>,
 }
 
 pub struct CompassHubClient {
@@ -214,6 +235,13 @@ impl CompassHubClient {
         let meta = HubPluginMeta {
             has_ui_bundle: dto.has_ui_bundle,
             has_remote_icon: dto.icon_url.is_some(),
+            source: dto.source,
+            runs_in: dto.runs_in,
+            ui_bundle_hash: dto.ui_bundle_hash,
+            ui_bundle_size_bytes: dto.ui_bundle_size_bytes,
+            can_install: dto.can_install,
+            installed_locally: dto.installed_locally,
+            provider_label: dto.provider_label,
         };
         Ok((LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir: None }, meta))
     }
@@ -230,6 +258,13 @@ impl CompassHubClient {
             let meta = HubPluginMeta {
                 has_ui_bundle: dto.has_ui_bundle,
                 has_remote_icon: dto.icon_url.is_some(),
+                source: dto.source,
+                runs_in: dto.runs_in,
+                ui_bundle_hash: dto.ui_bundle_hash,
+                ui_bundle_size_bytes: dto.ui_bundle_size_bytes,
+                can_install: dto.can_install,
+                installed_locally: dto.installed_locally,
+                provider_label: dto.provider_label,
             };
             (LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir }, meta)
         }).collect())
@@ -398,10 +433,19 @@ impl CompassHubClient {
 pub(crate) async fn map_http_error(resp: reqwest::Response) -> CompassError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    let msg = serde_json::from_str::<Value>(&body)
-        .ok()
+    let parsed = serde_json::from_str::<Value>(&body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|v| v.get("code").and_then(Value::as_str))
+        .and_then(biocompass_core_traits::ErrorCode::parse);
+    let msg = parsed
+        .as_ref()
         .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_else(|| format!("hub HTTP {status}: {body}"));
+
+    if let Some(domain_code) = code.filter(|c| c.is_domain_specific()) {
+        return CompassError::coded(domain_code, msg);
+    }
 
     match status {
         StatusCode::NOT_FOUND => CompassError::NotFound(msg),
@@ -1090,6 +1134,13 @@ impl WorkspaceRegistryPort for CompassHubClient {
                     visibility: None,
                     has_ui_bundle: None,
                     icon_url: None,
+                    source: None,
+                    runs_in: None,
+                    ui_bundle_hash: None,
+                    ui_bundle_size_bytes: None,
+                    can_install: false,
+                    installed_locally: false,
+                    provider_label: None,
                 }),
             "POST /api/v1/plugins",
         )

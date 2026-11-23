@@ -279,6 +279,12 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
                 "strong_binder_cutoff_nm": 50.0
             }),
             dataset_grant: Some(partner_grant),
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
         })
         .await
         .expect("prepare_run should succeed");
@@ -489,6 +495,12 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
                 "max_length": 11
             }),
             dataset_grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
         })
         .await
         .expect("prepare failing run");

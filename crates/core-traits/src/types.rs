@@ -41,20 +41,8 @@ pub type CompassResult<T> = Result<T, CompassError>;
 
 impl CompassError {
     /// Canonical machine-readable error code for HTTP/API responses and logs.
-    pub const fn code(&self) -> &'static str {
-        match self {
-            Self::NotFound(_) => "NOT_FOUND",
-            Self::Validation(_) => "VALIDATION_ERROR",
-            Self::AccessDenied(_) => "ACCESS_DENIED",
-            Self::IntegrityViolation(_) => "INTEGRITY_VIOLATION",
-            Self::Storage(_) => "STORAGE_ERROR",
-            Self::ContainerEngine(_) => "CONTAINER_ENGINE_ERROR",
-            Self::Protocol(_) => "PROTOCOL_ERROR",
-            Self::Payment(_) => "PAYMENT_ERROR",
-            Self::RateLimited(_) => "RATE_LIMITED",
-            Self::UpstreamLlm(_) => "UPSTREAM_LLM_ERROR",
-            Self::Internal(_) => "INTERNAL_ERROR",
-        }
+    pub fn code(&self) -> &'static str {
+        self.error_code().as_str()
     }
 
     /// Coherent, user-facing error summary with redundant lowercase prefixes removed
@@ -153,7 +141,21 @@ impl CompassError {
                 }
             }
             Self::AccessDenied(_) => {
-                if lower.contains("only available in cloud-web mode")
+                if matches!(
+                    self.error_code(),
+                    crate::error::ErrorCode::OffListModule
+                        | crate::error::ErrorCode::OffListCatalog
+                        | crate::error::ErrorCode::ChildModuleNotAllowed
+                ) {
+                    Some("Review the credential's allowed modules/catalogs or module manifest allowlist.")
+                } else if matches!(
+                    self.error_code(),
+                    crate::error::ErrorCode::Unauthenticated
+                        | crate::error::ErrorCode::AgentCredentialExpired
+                        | crate::error::ErrorCode::AgentCredentialRevoked
+                ) {
+                    Some("Sign in or provide valid, non-expired organization or agent credentials.")
+                } else if lower.contains("only available in cloud-web mode")
                     || lower.contains("hosted workspace")
                     || lower.contains("paired native workspace")
                     || lower.contains("paired, loopback native workspace")
@@ -174,17 +176,40 @@ impl CompassError {
                 }
             }
             Self::Payment(_) => {
-                if lower.contains("insufficient") || lower.contains("daily act") {
+                if matches!(
+                    self.error_code(),
+                    crate::error::ErrorCode::AgentCeilingExceeded
+                ) {
+                    Some("The agent credential's daily or total spending ceiling was reached. Ask an organization admin to adjust or issue a new credential.")
+                } else if matches!(
+                    self.error_code(),
+                    crate::error::ErrorCode::InsufficientFunds
+                        | crate::error::ErrorCode::DailyActBreakerExceeded
+                ) || lower.contains("insufficient")
+                    || lower.contains("daily act")
+                {
                     Some("Check your available ACT credits and daily ACT breaker in Settings -> Usage.")
                 } else {
                     None
                 }
             }
             Self::RateLimited(_) => {
-                Some("Wait briefly before retrying; your organization's burst request rate limit was reached.")
+                if self.error_code() == crate::error::ErrorCode::RowBudgetExceeded {
+                    Some("The dataset grant's daily row budget was reached. Wait for the next UTC day or request a higher budget.")
+                } else {
+                    Some("Wait briefly before retrying; your organization's burst request rate limit was reached.")
+                }
             }
             Self::IntegrityViolation(_) => {
-                Some("Verify image @sha256 digests and catalog SHA-256 checksums before retrying.")
+                match self.error_code() {
+                    crate::error::ErrorCode::UiBundleTampered => {
+                        Some("Refused tampered module UI bundle; retry or contact the module publisher.")
+                    }
+                    crate::error::ErrorCode::DocVersionConflict => {
+                        Some("Reload the latest document version and retry the update with the current base_version.")
+                    }
+                    _ => Some("Verify image @sha256 digests and catalog SHA-256 checksums before retrying."),
+                }
             }
             _ => None,
         }
@@ -862,6 +887,128 @@ pub enum RunStatus {
     Canceled,
 }
 
+/// Maximum number of upstream run artifact inputs permitted in one chained run (`W6`).
+pub const MAX_RUN_INPUTS: usize = 32;
+
+/// Return `true` when `digest` is a canonical 64-character lowercase hexadecimal SHA-256 string.
+pub fn is_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Cryptographically bound upstream run artifact input staged under `/in/artifacts/<alias>/<name>` (`W6`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RunInput {
+    pub alias: String,
+    pub source_run_id: String,
+    pub name: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub source_receipt_hash: String,
+}
+
+impl RunInput {
+    /// Validate path safety, identifier constraints, and 64-hex SHA-256 digests.
+    pub fn validate(&self) -> CompassResult<()> {
+        if self.alias.is_empty()
+            || self.alias.len() > 64
+            || self.alias.trim() != self.alias
+            || matches!(self.alias.as_str(), "." | "..")
+            || !self
+                .alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            return Err(CompassError::Validation(format!(
+                "invalid run input alias '{}': expected 1..=64 ASCII [a-zA-Z0-9._-] chars",
+                self.alias
+            )));
+        }
+        if self.source_run_id.is_empty()
+            || self.source_run_id.len() > 128
+            || self.source_run_id.trim() != self.source_run_id
+            || self.source_run_id.contains(['/', '\\', '\0'])
+            || self
+                .source_run_id
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(CompassError::Validation(format!(
+                "invalid run input source_run_id '{}'",
+                self.source_run_id
+            )));
+        }
+        if self.name.is_empty()
+            || self.name.len() > 256
+            || self.name.trim() != self.name
+            || self.name.contains(['\\', '\0'])
+            || self.name.chars().any(char::is_control)
+            || self
+                .name
+                .split('/')
+                .any(|segment| matches!(segment, "" | "." | ".."))
+        {
+            return Err(CompassError::Validation(format!(
+                "invalid run input artifact name '{}'",
+                self.name
+            )));
+        }
+        if !is_sha256_hex(&self.sha256) {
+            return Err(CompassError::Validation(format!(
+                "invalid run input sha256 '{}': expected 64 lowercase hex chars",
+                self.sha256
+            )));
+        }
+        if !is_sha256_hex(&self.source_receipt_hash) {
+            return Err(CompassError::Validation(format!(
+                "invalid run input source_receipt_hash '{}': expected 64 lowercase hex chars",
+                self.source_receipt_hash
+            )));
+        }
+        Ok(())
+    }
+
+    /// Relative staging path under `/in/artifacts/` (`<alias>/<name>`).
+    pub fn stage_relative_path(&self) -> String {
+        format!("{}/{}", self.alias, self.name)
+    }
+}
+
+/// Validate a slice of [`RunInput`] entries, enforce [`MAX_RUN_INPUTS`], reject duplicate or
+/// path-colliding `<alias>/<name>` stage paths, and return a deterministically sorted `Vec`.
+pub fn canonicalize_run_inputs(inputs: &[RunInput]) -> CompassResult<Vec<RunInput>> {
+    if inputs.len() > MAX_RUN_INPUTS {
+        return Err(CompassError::Validation(format!(
+            "too many run inputs ({}); maximum is {MAX_RUN_INPUTS}",
+            inputs.len()
+        )));
+    }
+    let mut staged_paths = std::collections::BTreeSet::new();
+    for input in inputs {
+        input.validate()?;
+        let rel = input.stage_relative_path();
+        if !staged_paths.insert(rel.clone()) {
+            return Err(CompassError::Validation(format!(
+                "duplicate run input stage path '/in/artifacts/{rel}'"
+            )));
+        }
+    }
+    for path in &staged_paths {
+        for (idx, _) in path.match_indices('/') {
+            if staged_paths.contains(&path[..idx]) {
+                return Err(CompassError::Validation(format!(
+                    "conflicting run input stage path '/in/artifacts/{path}'"
+                )));
+            }
+        }
+    }
+    let mut canonical = inputs.to_vec();
+    canonical.sort();
+    Ok(canonical)
+}
+
 /// Request to prepare and quote a plugin container execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareRunRequest {
@@ -875,6 +1022,24 @@ pub struct PrepareRunRequest {
     pub offer_id: Option<String>,
     pub params: Value,
     pub dataset_grant: Option<DatasetGrant>,
+    /// Upstream run artifact inputs staged into `/in/artifacts/<alias>/<name>` (`W6`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<RunInput>,
+    /// Parent run ID when spawned as a child module run (`W7`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// Admin-issued agent credential ID stamped at prepare time (`H1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_credential_id: Option<String>,
+    /// MCP / agent tool-call ID for audit correlation (`H1`, `H2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tool_call_id: Option<String>,
+    /// Stored module document ID whose versioned params are loaded server-side (`H5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    /// Stored module document version paired with `doc_id` (`H5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_version: Option<i64>,
 }
 
 /// Reject an invalid exact selector before looking up a plugin or waking a worker.
@@ -979,6 +1144,24 @@ pub struct RunRecord {
     pub admission: Option<RunAdmission>,
     pub params: Value,
     pub grant: Option<DatasetGrant>,
+    /// Canonical upstream run artifact inputs bound into workload_hash & Quote/Deal `extension_refs` (`W6`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<RunInput>,
+    /// Parent run ID when spawned as a child run (`W7`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// Immutable agent credential ID stamped at prepare time (`H1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_credential_id: Option<String>,
+    /// Optional MCP / agent tool-call ID for audit correlation (`H1`, `H2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tool_call_id: Option<String>,
+    /// Module fee component in milli-ACT / milli-EUR (`H1`, `H3`, `H4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_fee_milli_act: Option<i64>,
+    /// Dataset fee component in milli-ACT / milli-EUR (`H1`, `H3`, `H4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_fee_milli_act: Option<i64>,
     pub quote: RunQuote,
     pub result_json: Option<Value>,
     pub artifacts: Vec<ArtifactRef>,
@@ -1309,4 +1492,72 @@ pub struct DatasetOfferRecord {
     pub froglet_offer_doc: Value,
     pub active: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// Provenance / origin of a listed module (`U2`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleSource {
+    /// Authored or installed directly inside the active workspace.
+    #[default]
+    Workspace,
+    /// Published in the caller's own organization cloud hub.
+    OrgCloud,
+    /// Offered by an external network provider hub or peer.
+    NetworkProvider,
+}
+
+impl ModuleSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::OrgCloud => "org_cloud",
+            Self::NetworkProvider => "network_provider",
+        }
+    }
+}
+
+/// Execution plane where a listed module runs (`U2`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRunsIn {
+    /// Runs on the local workstation / laptop container engine.
+    #[default]
+    Local,
+    /// Runs on the connected cloud hub's managed worker pool.
+    Cloud,
+    /// Runs on an organization-owned `provider-edge` worker node.
+    ProviderEdge,
+    /// Runs remotely at an external network provider.
+    NetworkProvider,
+}
+
+impl ModuleRunsIn {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Cloud => "cloud",
+            Self::ProviderEdge => "provider_edge",
+            Self::NetworkProvider => "network_provider",
+        }
+    }
+}
+
+/// Shared module listing metadata (`U1`, `U2`) used across hub, harness server, and web DTOs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleListingMeta {
+    #[serde(default)]
+    pub source: ModuleSource,
+    #[serde(default)]
+    pub runs_in: ModuleRunsIn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub can_install: bool,
+    #[serde(default)]
+    pub installed_locally: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_label: Option<String>,
 }

@@ -293,8 +293,8 @@ impl PaymentGateway for SqliteActLedger {
             let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
             let needed = amount.milli_act();
             if avail < needed {
-                return Err(CompassError::Payment(format!(
-                    "insufficient ACT balance: need {}, available {}",
+                return Err(CompassError::insufficient_funds(format!(
+                    "need {}, available {}",
                     amount.display_act(),
                     CreditAmountAct::from_milli_act(avail).display_act()
                 )));

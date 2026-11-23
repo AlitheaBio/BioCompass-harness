@@ -24,10 +24,11 @@ pub use target_validation::{
 
 use async_trait::async_trait;
 use biocompass_core_traits::{
-    ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant, FilterExpr, GrantLevel,
-    NodeId, OciImageRef, OciRegistryClient, PaymentGateway, PluginId, PrepareRunRequest, QueryAst,
-    RunDispatcher, RunId, RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEventKind,
-    SessionStore,
+    ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant,
+    ExtensionRefStage, FilterExpr, GrantLevel, NodeId, OciImageRef, OciRegistryClient,
+    PaymentGateway, PluginId, PrepareRunRequest, QueryAst, RunDispatcher, RunId, RunLogEvent,
+    RunQuote, RunRecord, RunStatus, SessionEventKind, SessionStore, canonicalize_run_inputs,
+    compute_canonical_workload_hash, expected_extension_refs, verify_extension_refs,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, SealedSnapshot, StagingMode};
 use biocompass_oci_runner::{ContainerRunSpec, OciContainerRunner, prepare_stage_permissions};
@@ -210,6 +211,12 @@ pub fn release_terms_hash(plugin: &LoadedPlugin) -> CompassResult<String> {
     }
     if !m.runtime_join_queries.is_empty() {
         terms["runtime_join_queries"] = json!(m.runtime_join_queries);
+    }
+    if !m.child_modules.is_empty() {
+        terms["child_modules"] = json!(m.child_modules);
+    }
+    if let Some(wait_sec) = m.max_child_wait_sec {
+        terms["max_child_wait_sec"] = json!(wait_sec);
     }
     let bytes = canonical_json::to_vec(&terms)
         .map_err(|e| CompassError::Protocol(format!("canonicalize native module terms: {e}")))?;
@@ -1647,31 +1654,10 @@ pub fn materialize_reviewed_hla_inputs(
     )
 }
 
-fn compute_canonical_workload_hash(
-    plugin: &LoadedPlugin,
-    verified_image: &OciImageRef,
-    params: &Value,
-    dataset_digest: Option<&str>,
-    grant: Option<&DatasetGrant>,
-) -> CompassResult<String> {
-    let workload_descriptor = json!({
-        "plugin_id": plugin.manifest.id,
-        "plugin_version": plugin.manifest.version,
-        "image_digest": verified_image.canonical_module_hash(),
-        "params": params,
-        "dataset_digest": dataset_digest,
-        "grant_id": grant.map(|g| &g.grant_id),
-        "access_level": grant.map(|g| g.level.as_str()),
-        "row_scope": grant.and_then(|g| g.row_scope.as_ref()),
-    });
-    let workload_bytes = canonical_json::to_vec(&workload_descriptor)
-        .map_err(|e| CompassError::Protocol(format!("canonicalize workload: {e}")))?;
-    Ok(crypto::sha256_hex(&workload_bytes))
-}
-
 #[async_trait]
 impl RunDispatcher for InProcessNodeRuntime {
     async fn prepare_run(&self, req: PrepareRunRequest) -> CompassResult<RunQuote> {
+        let canonical_inputs = canonicalize_run_inputs(&req.inputs)?;
         let (plugin, _active_release) = self.local_execution_plugin(&req.plugin_id, req.plugin_version.as_deref()).await?;
         plugin.manifest.validate_dataset_binding(req.dataset_grant.is_some())?;
         if plugin.manifest.has_live_queries()
@@ -1758,12 +1744,28 @@ impl RunDispatcher for InProcessNodeRuntime {
             )));
         }
 
+        let is_curated_approved = self
+            .is_curated_module_approved(
+                &plugin.manifest.id,
+                &plugin.manifest.version,
+                &verified_image.canonical_module_hash(),
+            )
+            .await;
         let workload_hash = compute_canonical_workload_hash(
-            &plugin,
-            &verified_image,
+            &plugin.manifest.id,
+            &plugin.manifest.version,
+            &verified_image.canonical_module_hash(),
             &req.params,
             dataset_digest.as_deref(),
             req.dataset_grant.as_ref(),
+            is_curated_approved,
+            &canonical_inputs,
+        )?;
+        let quote_extension_refs = expected_extension_refs(
+            ExtensionRefStage::QuoteOrDeal,
+            &canonical_inputs,
+            None,
+            &[],
         )?;
 
         let now = Utc::now().timestamp();
@@ -1856,7 +1858,7 @@ impl RunDispatcher for InProcessNodeRuntime {
                 workload_hash: workload_hash.clone(),
                 confidential_session_hash: None,
                 capabilities_granted: capabilities,
-                extension_refs: Vec::new(),
+                extension_refs: quote_extension_refs,
                 quote_use: None,
                 settlement_terms: QuoteSettlementTerms {
                     method: SETTLEMENT_METHOD_NONE.into(),
@@ -1916,6 +1918,12 @@ impl RunDispatcher for InProcessNodeRuntime {
             admission: None,
             params: req.params,
             grant: req.dataset_grant,
+            inputs: canonical_inputs,
+            parent_run_id: req.parent_run_id,
+            agent_credential_id: req.agent_credential_id,
+            agent_tool_call_id: req.agent_tool_call_id,
+            module_fee_milli_act: Some(selected_offer.total_milli_act()),
+            dataset_fee_milli_act: None,
             quote: quote.clone(),
             result_json: None,
             artifacts: Vec::new(),
@@ -2103,12 +2111,22 @@ impl InProcessNodeRuntime {
             None
         };
         let confirm_dataset_digest = confirm_snapshot_pin.as_ref().map(|(_, d)| d.clone());
+        let is_curated_approved = self
+            .is_curated_module_approved(
+                &plugin.manifest.id,
+                &plugin.manifest.version,
+                &verified_image.canonical_module_hash(),
+            )
+            .await;
         let recomputed_wh = compute_canonical_workload_hash(
-            &plugin,
-            &verified_image,
+            &plugin.manifest.id,
+            &plugin.manifest.version,
+            &verified_image.canonical_module_hash(),
             &run.params,
             confirm_dataset_digest.as_deref(),
             run.grant.as_ref(),
+            is_curated_approved,
+            &run.inputs,
         )?;
         if recomputed_wh != signed_quote.payload.workload_hash
             || recomputed_wh != run.quote.workload_hash
@@ -2118,6 +2136,19 @@ impl InProcessNodeRuntime {
                 signed_quote.payload.workload_hash
             )));
         }
+        verify_extension_refs(
+            ExtensionRefStage::QuoteOrDeal,
+            &signed_quote.payload.extension_refs,
+            &run.inputs,
+            None,
+            &[],
+        )?;
+        let deal_extension_refs = expected_extension_refs(
+            ExtensionRefStage::QuoteOrDeal,
+            &run.inputs,
+            None,
+            &[],
+        )?;
 
         let deal_now = Utc::now().timestamp();
         let admission_deadline = (deal_now + 60).min(signed_quote.payload.expires_at);
@@ -2139,7 +2170,7 @@ impl InProcessNodeRuntime {
                 quote_hash: signed_quote.hash.clone(),
                 workload_hash: signed_quote.payload.workload_hash.clone(),
                 confidential_session_hash: None,
-                extension_refs: Vec::new(),
+                extension_refs: deal_extension_refs,
                 authority_ref: None,
                 supersedes_deal_hash: None,
                 client_nonce: Some(idempotency_key.to_owned()),
@@ -2275,6 +2306,12 @@ mod sec_31_tests {
                     "cohort_filter": { "limit": "not-a-number" }
                 }),
                 dataset_grant: Some(grant.clone()),
+                inputs: Vec::new(),
+                parent_run_id: None,
+                agent_credential_id: None,
+                agent_tool_call_id: None,
+                doc_id: None,
+                doc_version: None,
             })
             .await;
         assert!(bad_prep.is_err(), "SEC-31: malformed cohort_filter must fail in prepare_run");
@@ -2294,6 +2331,12 @@ mod sec_31_tests {
                     "max_length": 11
                 }),
                 dataset_grant: Some(grant.clone()),
+                inputs: Vec::new(),
+                parent_run_id: None,
+                agent_credential_id: None,
+                agent_tool_call_id: None,
+                doc_id: None,
+                doc_version: None,
             })
             .await
             .unwrap();

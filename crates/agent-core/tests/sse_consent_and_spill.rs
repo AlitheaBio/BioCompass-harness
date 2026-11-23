@@ -498,6 +498,12 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
             "cells": [{ "cell_type": "code", "source": "print(1)" }]
         }),
         grant: Some(grant.clone()),
+        inputs: Vec::new(),
+        parent_run_id: None,
+        agent_credential_id: None,
+        agent_tool_call_id: None,
+        module_fee_milli_act: None,
+        dataset_fee_milli_act: None,
         quote: RunQuote {
             run_id: run_id.clone(),
             plugin_id,

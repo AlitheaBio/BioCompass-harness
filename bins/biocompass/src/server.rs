@@ -1024,6 +1024,16 @@ struct PluginSummaryDto {
     icon_url: Option<String>,
     execution_target: String,
     execution_label: String,
+    source: biocompass_core_traits::ModuleSource,
+    runs_in: biocompass_core_traits::ModuleRunsIn,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ui_bundle_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ui_bundle_size_bytes: Option<u64>,
+    can_install: bool,
+    installed_locally: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_label: Option<String>,
     requires_catalog_level: GrantLevel,
     removable: bool,
     removable_versions: Vec<String>,
@@ -1146,6 +1156,17 @@ async fn to_plugin_dto(
             .collect(),
         _ => Vec::new(),
     };
+    let source = hub_meta.source.unwrap_or(match state.mode {
+        DeploymentMode::Local => biocompass_core_traits::ModuleSource::Workspace,
+        DeploymentMode::CloudWeb => biocompass_core_traits::ModuleSource::OrgCloud,
+    });
+    let runs_in = hub_meta.runs_in.unwrap_or(match execution_target {
+        "local" => biocompass_core_traits::ModuleRunsIn::Local,
+        "froglet_node" => biocompass_core_traits::ModuleRunsIn::ProviderEdge,
+        _ => biocompass_core_traits::ModuleRunsIn::Cloud,
+    });
+    let installed_locally =
+        hub_meta.installed_locally || (installed && runs_in == biocompass_core_traits::ModuleRunsIn::Local);
     let views = plugin.manifest.views.clone();
     let effective_offers = plugin.manifest.effective_offers();
     PluginSummaryDto {
@@ -1159,6 +1180,13 @@ async fn to_plugin_dto(
         icon_url,
         execution_target: execution_target.into(),
         execution_label: execution_label.into(),
+        source,
+        runs_in,
+        ui_bundle_hash: hub_meta.ui_bundle_hash,
+        ui_bundle_size_bytes: hub_meta.ui_bundle_size_bytes,
+        can_install: hub_meta.can_install,
+        installed_locally,
+        provider_label: hub_meta.provider_label,
         requires_catalog_level,
         removable,
         removable_versions,
@@ -2066,6 +2094,14 @@ struct ApiPrepareRunRequest {
     params: Value,
     grant_id: Option<String>,
     session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inputs: Vec<biocompass_core_traits::RunInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doc_version: Option<i64>,
 }
 
 fn empty_json_obj() -> Value {
@@ -2122,6 +2158,12 @@ async fn prepare_run_handler(
         offer_id: req.offer_id,
         params: req.params,
         dataset_grant: grant,
+        inputs: req.inputs,
+        parent_run_id: req.parent_run_id,
+        agent_credential_id: None,
+        agent_tool_call_id: None,
+        doc_id: req.doc_id,
+        doc_version: req.doc_version,
     };
     if let Some(hub) = &state.hub_client {
         let upstream = hub.request_bound_quote(&request, None, req.workspace_id, req.request_key).await?;
@@ -4180,6 +4222,12 @@ mod sec_06_tests {
             admission: None,
             params: json!({}),
             grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
             quote: biocompass_core_traits::RunQuote {
                 run_id: run_id.clone(),
                 plugin_id: PluginId::new("alithea/hla-motif-enrichment").unwrap(),

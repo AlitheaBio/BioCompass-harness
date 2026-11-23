@@ -96,6 +96,12 @@ fn request(version: Option<&str>) -> PrepareRunRequest {
         params: json!({}),
         dataset_grant: None,
         offer_id: None,
+        inputs: Vec::new(),
+        parent_run_id: None,
+        agent_credential_id: None,
+        agent_tool_call_id: None,
+        doc_id: None,
+        doc_version: None,
     }
 }
 
@@ -370,6 +376,12 @@ image="localhost/fixture/target-validation@sha256:{module_hash}"
         }),
         dataset_grant: Some(grant),
         offer_id: None,
+        inputs: Vec::new(),
+        parent_run_id: None,
+        agent_credential_id: None,
+        agent_tool_call_id: None,
+        doc_id: None,
+        doc_version: None,
     };
     assert!(matches!(
         node.prepare_run(run(DatasetGrant::full_access(org.clone(), catalog_id.clone())))
