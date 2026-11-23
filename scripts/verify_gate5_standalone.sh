@@ -94,10 +94,18 @@ done
 curl -fsS "http://127.0.0.1:${PORT}/api/v1/health"
 echo ""
 
+OWNER_LINK_FILE="${STANDALONE_DIR}/data/owner-link.txt"
+if [[ ! -s "${OWNER_LINK_FILE}" ]]; then
+  echo "[gate-5] ERROR: expected local owner link file at ${OWNER_LINK_FILE}" >&2
+  exit 1
+fi
+
 echo "[gate-5] 4. Running Chromium Playwright E2E + <iframe sandbox='allow-scripts'> exploit suite..."
 (
   cd "${REPO_ROOT}"
-  BIOCOMPASS_E2E_URL="http://127.0.0.1:${PORT}" npx playwright test e2e/gate5_workbench_and_sandbox.spec.ts
+  BIOCOMPASS_E2E_URL="http://127.0.0.1:${PORT}" \
+    BIOCOMPASS_E2E_OWNER_LINK_FILE="${OWNER_LINK_FILE}" \
+    npx playwright test e2e/gate5_workbench_and_sandbox.spec.ts
 )
 
 curl -fsS "http://127.0.0.1:${PORT}/api/v1/runs" > "${STANDALONE_DIR}/runs.json"

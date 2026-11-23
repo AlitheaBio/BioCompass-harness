@@ -690,6 +690,12 @@ impl DuckLakeCatalogEngine {
         conn.execute_batch("DETACH dl;")
             .map_err(|e| CompassError::Storage(format!("detach dl: {e}")))?;
 
+        if sealed.snapshot_id == self.summary.latest_snapshot_id
+            && sealed.dataset_digest == self.summary.dataset_digest
+        {
+            return Ok(self.summary.latest_sealed.clone());
+        }
+
         self.record_new_sealed_snapshot(sealed.clone(), msg)?;
         Ok(sealed)
     }
@@ -1807,6 +1813,9 @@ pub fn execute_cloud_ducklake_mutation(
                     )
                 },
             )?;
+            if let Some(cur) = current_summary {
+                return Ok(finalize_cloud_mutation_outcome(cur, sealed, msg));
+            }
             let snap_summary = SnapshotSummary {
                 snapshot_id: sealed.snapshot_id,
                 dataset_digest: sealed.dataset_digest.clone(),
@@ -1815,49 +1824,37 @@ pub fn execute_cloud_ducklake_mutation(
                 commit_message: msg,
                 pinned: false,
             };
-            let summary = if let Some(cur) = current_summary {
-                let mut next = cur.clone();
-                next.row_count = sealed.total_row_count();
-                next.latest_snapshot_id = sealed.snapshot_id;
-                next.dataset_digest = sealed.dataset_digest.clone();
-                next.tables = sealed.tables.iter().map(|t| t.schema.clone()).collect();
-                next.facets = sealed.facets.clone();
-                next.snapshots.push(snap_summary);
-                next.latest_sealed = sealed.clone();
-                next
-            } else {
-                CatalogSummary {
-                    id: catalog_id.clone(),
-                    name: catalog_name
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| catalog_id.as_str().to_owned()),
-                    version: "1.0.0".into(),
-                    description: catalog_description
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            "Curated DuckLake tabular catalog imported via two-stage quarantine pipeline.".into()
-                        }),
-                    organism: organism
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "Unspecified".into()),
-                    row_count: sealed.total_row_count(),
-                    latest_snapshot_id: sealed.snapshot_id,
-                    dataset_digest: sealed.dataset_digest.clone(),
-                    tables: sealed.tables.iter().map(|t| t.schema.clone()).collect(),
-                    facets: sealed.facets.clone(),
-                    snapshots: vec![snap_summary],
-                    latest_sealed: sealed.clone(),
-                    scope_relation: None,
-                }
+            let summary = CatalogSummary {
+                id: catalog_id.clone(),
+                name: catalog_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| catalog_id.as_str().to_owned()),
+                version: "1.0.0".into(),
+                description: catalog_description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        "Curated DuckLake tabular catalog imported via two-stage quarantine pipeline.".into()
+                    }),
+                organism: organism
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "Unspecified".into()),
+                row_count: sealed.total_row_count(),
+                latest_snapshot_id: sealed.snapshot_id,
+                dataset_digest: sealed.dataset_digest.clone(),
+                tables: sealed.tables.iter().map(|t| t.schema.clone()).collect(),
+                facets: sealed.facets.clone(),
+                snapshots: vec![snap_summary],
+                latest_sealed: sealed.clone(),
+                scope_relation: None,
             };
             Ok(CloudMutationOutcome {
                 summary,
@@ -2001,28 +1998,52 @@ pub fn execute_cloud_ducklake_mutation(
                 },
             )?;
 
-            let mut next = cur.clone();
-            next.row_count = sealed.total_row_count();
-            next.latest_snapshot_id = sealed.snapshot_id;
-            next.dataset_digest = sealed.dataset_digest.clone();
-            next.tables = sealed.tables.iter().map(|t| t.schema.clone()).collect();
-            next.facets = sealed.facets.clone();
-            next.snapshots.push(SnapshotSummary {
-                snapshot_id: sealed.snapshot_id,
-                dataset_digest: sealed.dataset_digest.clone(),
-                row_count: sealed.total_row_count(),
-                created_at: sealed.created_at.clone(),
-                commit_message: commit_msg,
-                pinned: false,
-            });
-            next.latest_sealed = sealed.clone();
-
-            Ok(CloudMutationOutcome {
-                summary: next,
-                new_sealed: Some(sealed),
-                expired_snapshot_ids: Vec::new(),
-            })
+            Ok(finalize_cloud_mutation_outcome(cur, sealed, commit_msg))
         }
+    }
+}
+
+/// Finalize a cloud DuckLake mutation against the previous catalog summary.
+///
+/// When a mutation changes 0 rows (e.g., `DeleteWhere` / `UpdateWhere` matching no rows),
+/// DuckLake does not advance `snapshot_id` and the sealed `dataset_digest` is unchanged.
+/// Return the existing summary with `new_sealed: None` so callers do not append a duplicate
+/// `SnapshotSummary` or collide with the immutable snapshot record in `hub-registry`.
+fn finalize_cloud_mutation_outcome(
+    cur: &CatalogSummary,
+    sealed: SealedSnapshot,
+    commit_msg: String,
+) -> CloudMutationOutcome {
+    if sealed.snapshot_id == cur.latest_snapshot_id
+        && sealed.dataset_digest == cur.dataset_digest
+    {
+        return CloudMutationOutcome {
+            summary: cur.clone(),
+            new_sealed: None,
+            expired_snapshot_ids: Vec::new(),
+        };
+    }
+
+    let mut next = cur.clone();
+    next.row_count = sealed.total_row_count();
+    next.latest_snapshot_id = sealed.snapshot_id;
+    next.dataset_digest = sealed.dataset_digest.clone();
+    next.tables = sealed.tables.iter().map(|t| t.schema.clone()).collect();
+    next.facets = sealed.facets.clone();
+    next.snapshots.push(SnapshotSummary {
+        snapshot_id: sealed.snapshot_id,
+        dataset_digest: sealed.dataset_digest.clone(),
+        row_count: sealed.total_row_count(),
+        created_at: sealed.created_at.clone(),
+        commit_message: commit_msg,
+        pinned: false,
+    });
+    next.latest_sealed = sealed.clone();
+
+    CloudMutationOutcome {
+        summary: next,
+        new_sealed: Some(sealed),
+        expired_snapshot_ids: Vec::new(),
     }
 }
 
@@ -4101,5 +4122,104 @@ mod tests {
             err.to_string().contains("catalog_id") || err.to_string().contains("mismatch"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn noop_delete_where_preserves_immutable_snapshot_without_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat_dir = tmp.path().join("cat");
+        seed_demo_hla_catalog(&cat_dir).unwrap();
+        let mut engine = DuckDbCatalogEngine::open_verified(&cat_dir).unwrap();
+
+        let before_summary = engine.manifest().clone();
+        let initial_snap_count = before_summary.snapshots.len();
+        let initial_sid = before_summary.latest_snapshot_id;
+        let initial_digest = before_summary.dataset_digest.clone();
+        let initial_created_at = before_summary.snapshots[0].created_at.clone();
+        let initial_commit_msg = before_summary.snapshots[0].commit_message.clone();
+
+        // 1. Local DuckLake no-op DELETE matching 0 rows leaves snapshot_id and digest unchanged
+        // and MUST NOT push a duplicate SnapshotSummary or overwrite snapshot metadata.
+        let noop_tbl = before_summary.latest_sealed.resolve_table(None).unwrap();
+        let (where_sql, filter_vals) = compile_filter_expr(
+            Some(&FilterExpr::Eq {
+                column: "peptide_id".into(),
+                value: ScalarValue::Text("PEP-DOES-NOT-EXIST-9999".into()),
+            }),
+            &noop_tbl.schema,
+        )
+        .unwrap();
+        let after_noop = engine
+            .commit_mutation("No-op delete_where matching 0 rows", |conn| {
+                let sql = format!("DELETE FROM dl.peptides WHERE {where_sql}");
+                conn.execute(&sql, params_from_iter(filter_vals.iter()))
+                    .map_err(|e| CompassError::Storage(format!("execute noop delete: {e}")))?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(after_noop.snapshot_id, initial_sid);
+        assert_eq!(after_noop.dataset_digest, initial_digest);
+        assert_eq!(engine.manifest().snapshots.len(), initial_snap_count);
+        assert_eq!(engine.manifest().latest_snapshot_id, initial_sid);
+        assert_eq!(engine.manifest().dataset_digest, initial_digest);
+        assert_eq!(engine.manifest().snapshots[0].created_at, initial_created_at);
+        assert_eq!(engine.manifest().snapshots[0].commit_message, initial_commit_msg);
+
+        // 2. Cloud DuckLake helper: when a 0-row delete_where re-seals the unchanged snapshot_id
+        // with a newer timestamp and commit message, finalize_cloud_mutation_outcome must return
+        // `summary == cur` and `new_sealed == None` (no collision with immutable snapshot #1).
+        let mut resealed_same = before_summary.latest_sealed.clone();
+        resealed_same.created_at = "2099-01-01T00:00:00Z".into();
+        resealed_same.commit_message = "No-op cloud delete_where".into();
+        let noop_outcome = finalize_cloud_mutation_outcome(
+            &before_summary,
+            resealed_same,
+            "No-op cloud delete_where".into(),
+        );
+        assert!(noop_outcome.new_sealed.is_none());
+        assert!(noop_outcome.expired_snapshot_ids.is_empty());
+        assert_eq!(noop_outcome.summary.snapshots.len(), initial_snap_count);
+        assert_eq!(noop_outcome.summary.latest_snapshot_id, initial_sid);
+        assert_eq!(noop_outcome.summary.dataset_digest, initial_digest);
+        assert_eq!(
+            noop_outcome.summary.snapshots[0].created_at,
+            initial_created_at
+        );
+        assert_eq!(
+            noop_outcome.summary.snapshots[0].commit_message,
+            initial_commit_msg
+        );
+
+        // 3. Advancing snapshot_id still records the new SnapshotSummary and returns Some(sealed).
+        let mut advanced = before_summary.latest_sealed.clone();
+        advanced.snapshot_id = initial_sid + 1;
+        advanced.dataset_digest = SealedSnapshot::compute_dataset_digest(
+            &advanced.catalog_id,
+            advanced.snapshot_id,
+            &advanced.tables,
+        );
+        let advanced_outcome = finalize_cloud_mutation_outcome(
+            &before_summary,
+            advanced.clone(),
+            "Real advancing mutation".into(),
+        );
+        assert_eq!(
+            advanced_outcome.new_sealed.as_ref().map(|s| s.snapshot_id),
+            Some(initial_sid + 1)
+        );
+        assert_eq!(advanced_outcome.summary.snapshots.len(), initial_snap_count + 1);
+        assert_eq!(advanced_outcome.summary.latest_snapshot_id, initial_sid + 1);
+
+        // 4. Integrity check: same snapshot_id with a DIFFERENT dataset_digest is NOT suppressed
+        // as a no-op, allowing downstream immutable snapshot checks to reject tampering.
+        let mut tampered_same_sid = before_summary.latest_sealed.clone();
+        tampered_same_sid.dataset_digest = "f".repeat(64);
+        let tampered_outcome = finalize_cloud_mutation_outcome(
+            &before_summary,
+            tampered_same_sid,
+            "Tampered same sid".into(),
+        );
+        assert!(tampered_outcome.new_sealed.is_some());
     }
 }

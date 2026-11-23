@@ -1,7 +1,23 @@
+import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 
+function resolveEntryUrl(): { url: string; hasOwnerLink: boolean } {
+  const directLink = process.env["BIOCOMPASS_E2E_OWNER_LINK"]?.trim();
+  if (directLink) {
+    return { url: directLink, hasOwnerLink: true };
+  }
+  const linkFile = process.env["BIOCOMPASS_E2E_OWNER_LINK_FILE"]?.trim();
+  if (linkFile && fs.existsSync(linkFile)) {
+    const fromFile = fs.readFileSync(linkFile, "utf-8").trim();
+    if (fromFile) {
+      return { url: fromFile, hasOwnerLink: true };
+    }
+  }
+  return { url: "/", hasOwnerLink: false };
+}
+
 test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sandbox Exploit Suite", () => {
-  test("verifies BrandWordmark, DuckLake 3-level Grant governance (zero '***' masking), real OCI Prepare->Confirm + Schnorr Receipt, and <iframe sandbox='allow-scripts'> exploit blocks", async ({
+  test("verifies BrandWordmark, [A1] consent/zero-outbound, DuckLake 3-level Grant governance (zero '***' masking), real OCI Prepare->Confirm + [SEC-20]/[SEC-18] + Schnorr Receipt, and <iframe sandbox='allow-scripts'> exploit blocks", async ({
     page,
     request,
   }) => {
@@ -10,14 +26,124 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
       pageErrors.push(err.message);
     });
 
-    // 1. Load standalone single-binary SPA & verify BrandWordmark + live health + genesis ACT
-    await page.goto("/");
+    const initialHealthResp = await request.get("/api/v1/health");
+    expect(initialHealthResp.ok()).toBe(true);
+    const initialHealth = (await initialHealthResp.json()) as {
+      mode: string;
+      marketplace_prompt_required?: boolean;
+      marketplace_status?: {
+        state: string;
+        consent: string;
+        prompt_required: boolean;
+        airgapped: boolean;
+        hub_url: string;
+        default_hub_url: string;
+        feed_offer_count: number;
+        last_synced_at?: string | null;
+      };
+    };
+    expect(initialHealth.mode).toBe("local");
+
+    const marketplaceHosts = new Set<string>();
+    for (const candidate of [
+      initialHealth.marketplace_status?.hub_url,
+      initialHealth.marketplace_status?.default_hub_url,
+      "https://hub.biocompass.alithea.bio",
+    ]) {
+      if (!candidate) continue;
+      try {
+        marketplaceHosts.add(new URL(candidate).host);
+      } catch {
+        // Ignore malformed candidates
+      }
+    }
+
+    let allowDeliberateExploitProbes = false;
+    const outboundMarketplaceRequests: string[] = [];
+    const unexpectedExternalRequests: string[] = [];
+    page.on("request", (req) => {
+      try {
+        const u = new URL(req.url());
+        const isHttp = u.protocol === "http:" || u.protocol === "https:";
+        const isLoopback =
+          u.hostname === "127.0.0.1" ||
+          u.hostname === "localhost" ||
+          u.hostname === "::1" ||
+          u.hostname === "[::1]";
+        if (
+          marketplaceHosts.has(u.host) ||
+          u.pathname === "/v1/feed" ||
+          u.pathname.startsWith("/api/v1/marketplace/sync")
+        ) {
+          outboundMarketplaceRequests.push(`${req.method()} ${req.url()}`);
+        } else if (isHttp && !isLoopback && !allowDeliberateExploitProbes) {
+          unexpectedExternalRequests.push(`${req.method()} ${req.url()}`);
+        }
+      } catch {
+        // Ignore non-HTTP requests (blob:, data:, about:)
+      }
+    });
+
+    const entry = resolveEntryUrl();
+
+    // 1. Load standalone single-binary SPA & verify BrandWordmark + live health + [A1] consent + genesis ACT
+    await page.goto(entry.url);
     await expect(page.getByTestId("brand-wordmark")).toBeVisible();
     await expect(page.getByTestId("health-pill")).toHaveText("Local");
     await expect(page.getByTestId("health-pill")).toHaveAttribute(
       "title",
       /docker|podman/i,
     );
+
+    // 1b. [A1] First-Run Marketplace Consent Modal:
+    // Fresh interactive local boot prompts explicitly; CI/air-gapped boot suppresses cleanly.
+    const consentModal = page.getByTestId("marketplace-consent-modal");
+    if (initialHealth.marketplace_prompt_required) {
+      await expect(consentModal).toBeVisible();
+      await expect(consentModal).toContainText(
+        "Connect to Global BioCompass Marketplace?",
+      );
+      expect(outboundMarketplaceRequests).toEqual([]);
+      expect(unexpectedExternalRequests).toEqual([]);
+
+      if (entry.hasOwnerLink) {
+        const declineRespPromise = page.waitForResponse(
+          (resp) =>
+            resp.url().includes("/api/v1/marketplace/consent") &&
+            resp.request().method() === "PUT",
+        );
+        await page.getByTestId("marketplace-consent-decline").click();
+        const declineResp = await declineRespPromise;
+        expect(declineResp.ok()).toBe(true);
+        const declinedStatus = (await declineResp.json()) as {
+          consent: string;
+          prompt_required: boolean;
+          state: string;
+          feed_offer_count: number;
+          last_synced_at?: string | null;
+        };
+        expect(declinedStatus.consent).toBe("declined");
+        expect(declinedStatus.prompt_required).toBe(false);
+        expect(declinedStatus.state).toBe("disconnected");
+        expect(declinedStatus.feed_offer_count).toBe(0);
+        expect(declinedStatus.last_synced_at ?? null).toBeNull();
+      } else {
+        await consentModal.getByRole("button", { name: "Ask later" }).click();
+      }
+
+      await expect(consentModal).toBeHidden();
+      expect(outboundMarketplaceRequests).toEqual([]);
+      expect(unexpectedExternalRequests).toEqual([]);
+    } else {
+      expect(
+        initialHealth.marketplace_status?.airgapped === true ||
+          initialHealth.marketplace_status?.consent !== "unset",
+      ).toBe(true);
+      await expect(consentModal).toBeHidden();
+      expect(outboundMarketplaceRequests).toEqual([]);
+      expect(unexpectedExternalRequests).toEqual([]);
+    }
+
     const initialLedgerResp = await request.get("/api/v1/ledger");
     expect(initialLedgerResp.ok()).toBe(true);
     const initialLedger = (await initialLedgerResp.json()) as {
@@ -124,21 +250,93 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
       "hla-motif-enrichment",
     );
 
-    // Native scientific SVG charts & table rendered from /out/result.json
+    // Native scientific SVG charts & aggregate-only table rendered from /out/result.json ([SEC-20])
     await expect(page.getByTestId("view-summary-metrics")).toBeVisible();
     await expect(page.getByTestId("view-length-dist")).toBeVisible();
     await expect(page.getByTestId("view-allele-enrichment")).toBeVisible();
-    await expect(page.getByTestId("view-top-candidates")).toBeVisible();
+    await expect(page.getByTestId("view-organ-breakdown")).toBeVisible();
+    await expect(page.getByTestId("view-top-candidates")).toHaveCount(0);
+    await expect(page.getByTestId("view-summary-metrics")).toContainText(
+      "Aggregate Only (compute_only)",
+    );
+    const organBreakdownText =
+      (await page.getByTestId("view-organ-breakdown").textContent()) ?? "";
+    expect(organBreakdownText).toContain("organ");
+    expect(organBreakdownText).toContain("condition");
+    expect(organBreakdownText).not.toMatch(/\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/);
+    const scientificViewsText =
+      (await page.getByTestId("scientific-views").textContent()) ?? "";
+    expect(scientificViewsText).not.toMatch(/\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/);
 
-    // Artifact download endpoint serves real CSV output from BlobStore
-    const artifactLink = page.getByTestId("run-artifacts").locator("a").first();
-    await expect(artifactLink).toContainText("allele_binding_summary.csv");
-    const artifactHref = await artifactLink.getAttribute("href");
-    expect(artifactHref).toBeTruthy();
-    const csvResp = await request.get(artifactHref!);
+    const motifRunsResp = await request.get("/api/v1/runs");
+    expect(motifRunsResp.ok()).toBe(true);
+    const motifRunsPayload = (await motifRunsResp.json()) as {
+      runs: Array<{
+        plugin_id: string;
+        result_json?: Record<string, unknown> | null;
+      }>;
+    };
+    const motifRun = motifRunsPayload.runs.find(
+      (r) => r.plugin_id === "alithea/hla-motif-enrichment",
+    );
+    expect(motifRun?.result_json).toBeTruthy();
+    expect(motifRun!.result_json!["sequence_policy"]).toBe(
+      "aggregate_compute_only",
+    );
+    expect(motifRun!.result_json!["top_candidates"]).toBeUndefined();
+    expect(
+      Array.isArray(motifRun!.result_json!["organ_condition_breakdown"]),
+    ).toBe(true);
+    expect(
+      (motifRun!.result_json!["organ_condition_breakdown"] as unknown[]).length,
+    ).toBeGreaterThan(0);
+    expect(JSON.stringify(motifRun!.result_json)).not.toMatch(
+      /\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/,
+    );
+
+    // [SEC-18] Hardened artifact chip uses <button class="bc-artifact-chip"> authenticated Blob download,
+    // and the artifact endpoint enforces sandbox CSP, nosniff, and attachment disposition.
+    const runArtifacts = page.getByTestId("run-artifacts");
+    await expect(runArtifacts.locator("a")).toHaveCount(0);
+    const artifactButton = runArtifacts
+      .locator("button.bc-artifact-chip")
+      .first();
+    await expect(artifactButton).toBeVisible();
+    await expect(artifactButton).toContainText("allele_binding_summary.csv");
+
+    const [artifactResp, artifactDownload] = await Promise.all([
+      page.waitForResponse(
+        (resp) =>
+          resp.url().includes("/api/v1/runs/") &&
+          resp.url().includes("/artifacts/allele_binding_summary.csv") &&
+          resp.request().method() === "GET",
+      ),
+      page.waitForEvent("download"),
+      artifactButton.click(),
+    ]);
+    expect(artifactResp.ok()).toBe(true);
+    expect(artifactDownload.suggestedFilename()).toBe(
+      "allele_binding_summary.csv",
+    );
+    expect(artifactDownload.url()).toMatch(/^blob:/);
+    expect(await artifactDownload.failure()).toBeNull();
+
+    const artifactHeaders = artifactResp.headers();
+    expect(artifactHeaders["content-security-policy"]).toBe("sandbox");
+    expect(artifactHeaders["x-content-type-options"]).toBe("nosniff");
+    expect(artifactHeaders["content-disposition"]).toMatch(/^attachment;/i);
+    expect(artifactHeaders["content-disposition"]).toContain(
+      "allele_binding_summary.csv",
+    );
+
+    const csvResp = await request.get(artifactResp.url());
     expect(csvResp.ok()).toBe(true);
+    expect(csvResp.headers()["content-security-policy"]).toBe("sandbox");
+    expect(csvResp.headers()["x-content-type-options"]).toBe("nosniff");
+    expect(csvResp.headers()["content-disposition"]).toMatch(/^attachment;/i);
     const csvBody = await csvResp.text();
     expect(csvBody).toContain("HLA-A*02:01");
+    expect(csvBody).not.toMatch(/\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/);
 
     // Froglet v1 5-artifact Schnorr chain inspector + adversarial 1-byte tamper test
     await expect(page.getByTestId("receipt-inspector")).toBeVisible();
@@ -227,6 +425,8 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     expect(domExploitVerdict).toContain("BLOCKED:SecurityError");
 
     // Adversarial Exploit 2: Attempt external network exfiltration (fetch https://example.com)
+    expect(unexpectedExternalRequests).toEqual([]);
+    allowDeliberateExploitProbes = true;
     const externalFetchVerdict = await childFrame!.evaluate(async () => {
       try {
         await fetch("https://example.com");
@@ -315,7 +515,8 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     };
     expect(finalLedger.available_milli_act).toBe(240_000);
 
-    // Zero uncaught page errors across the entire workbench & sandbox session
+    // Zero uncaught page errors and zero outbound marketplace requests across the entire session
+    expect(outboundMarketplaceRequests).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
 });

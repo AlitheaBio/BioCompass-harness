@@ -53,8 +53,8 @@ enum Commands {
         mode: String,
         #[arg(long, default_value_t = false)]
         allow_local_dev_tags: bool,
-        /// Disable all outbound marketplace and hub sync connections and suppress the first-run marketplace prompt.
-        #[arg(long, env = "COMPASS_AIRGAPPED", default_value_t = false)]
+        /// Disable all outbound marketplace and hub sync connections and suppress the first-run marketplace prompt (also honors COMPASS_AIRGAPPED=1/true/yes).
+        #[arg(long, default_value_t = false)]
         airgapped: bool,
     },
     /// Scaffold a new OCI container plugin from one of the 4 starter templates.
@@ -1347,4 +1347,86 @@ async fn execute_catalog_import(
         .unwrap_or_default()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a1_cli_accepts_numeric_compass_airgapped_env_and_enables_airgapped_mode() {
+        if std::env::var_os("BIOCOMPASS_TEST_AIRGAPPED_CHILD").is_none() {
+            // Spawn this exact test in clean child processes so we exercise real OS
+            // environment parsing safely under Rust 2024 + `unsafe_code = "forbid"`.
+            let exe = std::env::current_exe().expect("current test binary");
+            for (raw_val, expected_airgapped) in [
+                ("1", "true"),
+                ("0", "false"),
+                ("true", "true"),
+                ("false", "false"),
+                ("yes", "true"),
+                ("no", "false"),
+            ] {
+                let output = std::process::Command::new(&exe)
+                    .env("BIOCOMPASS_TEST_AIRGAPPED_CHILD", expected_airgapped)
+                    .env("COMPASS_AIRGAPPED", raw_val)
+                    .env_remove("CI")
+                    .arg("--exact")
+                    .arg("tests::a1_cli_accepts_numeric_compass_airgapped_env_and_enables_airgapped_mode")
+                    .output()
+                    .expect("spawn child test");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    output.status.success(),
+                    "COMPASS_AIRGAPPED={raw_val} failed:\nstdout: {stdout}\nstderr: {stderr}"
+                );
+                assert!(
+                    stdout.contains("1 passed"),
+                    "expected child test to execute for COMPASS_AIRGAPPED={raw_val}:\nstdout: {stdout}\nstderr: {stderr}"
+                );
+            }
+            return;
+        }
+
+        let expected = std::env::var("BIOCOMPASS_TEST_AIRGAPPED_CHILD").unwrap() == "true";
+
+        for argv in [
+            vec!["biocompass", "up"],
+            vec!["biocompass", "up", "--mode", "cloud-web"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+                panic!("Cli::try_parse_from({argv:?}) must accept numeric/bool COMPASS_AIRGAPPED env: {e}")
+            });
+            let Commands::Up {
+                mode, airgapped, ..
+            } = cli.command
+            else {
+                panic!("expected Commands::Up");
+            };
+            assert!(
+                !airgapped,
+                "CLI --airgapped flag should default to false when omitted"
+            );
+            let deploy_mode = DeploymentMode::parse(&mode).expect("valid deployment mode");
+            let cfg = biocompass::marketplace::MarketplaceConfig::from_env(deploy_mode, airgapped);
+            assert_eq!(cfg.airgapped, expected);
+        }
+
+        // Explicit --airgapped CLI flag always enforces airgapped mode even when COMPASS_AIRGAPPED=0.
+        let cli_flag = Cli::try_parse_from(["biocompass", "up", "--airgapped"])
+            .expect("Cli::try_parse_from with --airgapped flag");
+        let Commands::Up {
+            mode, airgapped, ..
+        } = cli_flag.command
+        else {
+            panic!("expected Commands::Up");
+        };
+        assert!(airgapped);
+        let cfg_flag = biocompass::marketplace::MarketplaceConfig::from_env(
+            DeploymentMode::parse(&mode).expect("valid mode"),
+            airgapped,
+        );
+        assert!(cfg_flag.airgapped);
+    }
 }
