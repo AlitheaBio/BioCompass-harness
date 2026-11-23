@@ -546,8 +546,22 @@ impl AppState {
             .await
     }
 
-    /// Resolve a `grant_id` (or `"full"` / `"partner"` shorthand) into a `DatasetGrant`.
+    /// Resolve a `grant_id` (or `"full"` / `"partner"` / `"compute_only"` shorthand) into a `DatasetGrant`.
     pub async fn resolve_grant(&self, grant_id: Option<&str>) -> CompassResult<Option<DatasetGrant>> {
+        self.resolve_grant_for_catalog(grant_id, None).await
+    }
+
+    /// Resolve a `grant_id` (or preset shorthand) preferring `catalog_id` (or `self.default_catalog_id`).
+    ///
+    /// Never uses positional indexing on `available_grants()` because cloud Postgres lists grants
+    /// alphabetically by `grant_id` (`grant-compute-only-*` before `grant-full-*` before
+    /// `grant-partner-*`), which would misresolve `"full"` to `compute_only` and escalate
+    /// `"partner"` to unscoped `full` rows.
+    pub async fn resolve_grant_for_catalog(
+        &self,
+        grant_id: Option<&str>,
+        catalog_id: Option<&CatalogId>,
+    ) -> CompassResult<Option<DatasetGrant>> {
         let Some(raw) = grant_id else {
             return Ok(None);
         };
@@ -556,17 +570,9 @@ impl AppState {
             return Ok(None);
         }
         let grants = self.available_grants().await?;
-        if trimmed.eq_ignore_ascii_case("full") {
-            return Ok(grants.into_iter().next());
-        }
-        if trimmed.eq_ignore_ascii_case("partner") {
-            return Ok(grants.into_iter().nth(1));
-        }
-        if trimmed.eq_ignore_ascii_case("compute_only") {
-            return Ok(grants
-                .iter()
-                .find(|g| g.level == GrantLevel::ComputeOnly)
-                .cloned());
+        let preferred_catalog = catalog_id.unwrap_or(&self.default_catalog_id);
+        if let Some(matched) = select_grant_shorthand(&grants, trimmed, preferred_catalog) {
+            return Ok(matched);
         }
         grants
             .into_iter()
@@ -581,6 +587,49 @@ impl AppState {
                 }
             })
     }
+}
+
+/// Resolve preset grant shorthands (`"full"`, `"partner"`, `"compute_only"`, `"compute-only"`)
+/// strictly by prefix and access semantics (never by list index).
+///
+/// Returns `Some(found)` when `trimmed` is a recognized shorthand (with `found == None` if the
+/// caller holds no matching grant), or `None` when `trimmed` should be looked up by exact `grant_id`.
+fn select_grant_shorthand(
+    grants: &[DatasetGrant],
+    trimmed: &str,
+    preferred_catalog: &CatalogId,
+) -> Option<Option<DatasetGrant>> {
+    let pick = |prefix: &str, semantic: fn(&DatasetGrant) -> bool| -> Option<DatasetGrant> {
+        grants
+            .iter()
+            .find(|g| g.catalog_id == *preferred_catalog && g.grant_id.starts_with(prefix))
+            .or_else(|| {
+                grants
+                    .iter()
+                    .find(|g| g.catalog_id == *preferred_catalog && semantic(g))
+            })
+            .or_else(|| grants.iter().find(|g| g.grant_id.starts_with(prefix)))
+            .or_else(|| grants.iter().find(|g| semantic(g)))
+            .cloned()
+    };
+
+    if trimmed.eq_ignore_ascii_case("full") {
+        return Some(pick("grant-full-", |g| {
+            g.level == GrantLevel::Rows && g.row_scope.is_none()
+        }));
+    }
+    if trimmed.eq_ignore_ascii_case("partner") {
+        return Some(pick("grant-partner-", |g| {
+            g.level == GrantLevel::Rows && g.row_scope.is_some()
+        }));
+    }
+    if trimmed.eq_ignore_ascii_case("compute_only") || trimmed.eq_ignore_ascii_case("compute-only")
+    {
+        return Some(pick("grant-compute-only-", |g| {
+            g.level == GrantLevel::ComputeOnly
+        }));
+    }
+    None
 }
 
 fn collect_bundled_ui_roots(bundled_dir: &Path) -> HashMap<PluginId, PathBuf> {
@@ -791,5 +840,69 @@ async fn load_additional_local_catalogs(
                 tracing::warn!(dir = %dir.display(), error = %err, "failed to verify local catalog");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grant_shorthands_resolve_semantically_regardless_of_postgres_sort_order() {
+        let org = OrgId::from("org-alithea-cloud");
+        let atlas = CatalogId::from("alithea/hla-atlas-v2026.1");
+        let demo = CatalogId::from("alithea/hla-public-demo-v1");
+
+        // Mirror PostgreSQL `ORDER BY created_at ASC, grant_id ASC` when all 3 presets share NOW().
+        let grants = vec![
+            DatasetGrant::compute_only_partner(org.clone(), demo.clone()),
+            DatasetGrant::compute_only_partner(org.clone(), atlas.clone()),
+            DatasetGrant::full_access(org.clone(), demo.clone()),
+            DatasetGrant::full_access(org.clone(), atlas.clone()),
+            DatasetGrant::scoped_rows_partner(org.clone(), demo.clone()),
+            DatasetGrant::scoped_rows_partner(org.clone(), atlas.clone()),
+        ];
+
+        let full = select_grant_shorthand(&grants, "full", &atlas)
+            .flatten()
+            .expect("full shorthand must match atlas full grant");
+        assert_eq!(full.grant_id, "grant-full-alithea/hla-atlas-v2026.1");
+        assert_eq!(full.level, GrantLevel::Rows);
+        assert!(full.row_scope.is_none());
+
+        let partner = select_grant_shorthand(&grants, "partner", &atlas)
+            .flatten()
+            .expect("partner shorthand must match atlas scoped partner grant");
+        assert_eq!(
+            partner.grant_id,
+            "grant-partner-lung-rows-alithea/hla-atlas-v2026.1"
+        );
+        assert_eq!(partner.level, GrantLevel::Rows);
+        assert!(
+            partner.row_scope.is_some(),
+            "partner shorthand must NEVER escalate to unscoped full grant"
+        );
+
+        for alias in ["compute_only", "compute-only", "COMPUTE-ONLY"] {
+            let co = select_grant_shorthand(&grants, alias, &atlas)
+                .flatten()
+                .expect("compute-only shorthand must match atlas compute_only grant");
+            assert_eq!(co.grant_id, "grant-compute-only-alithea/hla-atlas-v2026.1");
+            assert_eq!(co.level, GrantLevel::ComputeOnly);
+        }
+
+        // Preferred catalog disambiguates when multiple catalogs exist.
+        let demo_full = select_grant_shorthand(&grants, "full", &demo)
+            .flatten()
+            .expect("full shorthand on demo catalog");
+        assert_eq!(demo_full.grant_id, "grant-full-alithea/hla-public-demo-v1");
+
+        // Partner shorthand must NEVER escalate to unscoped full rows when no scoped grant exists.
+        let unscoped_only = vec![DatasetGrant::full_access(org, atlas.clone())];
+        assert!(
+            select_grant_shorthand(&unscoped_only, "partner", &atlas)
+                .expect("recognized shorthand")
+                .is_none()
+        );
     }
 }

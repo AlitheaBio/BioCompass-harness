@@ -909,6 +909,8 @@ async fn read_catalog_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Response> {
+    let catalog_id =
+        CatalogId::new(format!("{ns}/{name}")).map_err(CompassError::Validation)?;
     if let Some(hub) = &state.hub_client {
         let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         let mut upstream = body.to_vec();
@@ -916,10 +918,12 @@ async fn read_catalog_handler(
             let mut payload: Value = serde_json::from_slice(&body)
                 .map_err(|e| CompassError::Validation(format!("invalid catalog query JSON: {e}")))?;
             let requested = payload.get("grant_id").and_then(Value::as_str).unwrap_or("full");
-            if ["full", "partner", "compute_only", "none", ""].iter()
+            if ["full", "partner", "compute_only", "compute-only", "none", ""].iter()
                 .any(|alias| requested.trim().eq_ignore_ascii_case(alias))
             {
-                let grant = state.resolve_grant(Some(requested)).await?
+                let grant = state
+                    .resolve_grant_for_catalog(Some(requested), Some(&catalog_id))
+                    .await?
                     .ok_or_else(|| CompassError::AccessDenied("a DatasetGrant is required".into()))?;
                 let fields = payload.as_object_mut()
                     .ok_or_else(|| CompassError::Validation("expected a catalog query object".into()))?;
@@ -934,10 +938,8 @@ async fn read_catalog_handler(
     }
     let req: CatalogQueryRequest = serde_json::from_slice(&body)
         .map_err(|e| CompassError::Validation(format!("invalid catalog query JSON: {e}")))?;
-    let catalog_id =
-        CatalogId::new(format!("{ns}/{name}")).map_err(CompassError::Validation)?;
     let grant = state
-        .resolve_grant(req.grant_id.as_deref().or(Some("full")))
+        .resolve_grant_for_catalog(req.grant_id.as_deref().or(Some("full")), Some(&catalog_id))
         .await?
         .ok_or_else(|| CompassError::AccessDenied("a DatasetGrant is required".into()))?;
     if grant.catalog_id != catalog_id {
