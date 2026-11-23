@@ -78,6 +78,7 @@ duckdb = { version = "1.4", features = ["bundled"] }
 
 # Crypto, IDs, Time & CLI
 sha2 = "0.10"
+subtle = "2.6"
 hex = "0.4"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
