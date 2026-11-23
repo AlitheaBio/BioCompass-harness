@@ -504,14 +504,12 @@ impl OciContainerRunner {
         }
     }
 
-    /// Build (or reuse cached) a bundled local plugin `Dockerfile` under `local/bundled-<slug>:sha256-<id>`
-    /// when the pinned registry is unreachable on a clean local clone (R11).
-    pub async fn build_local_bundled_image(
-        &self,
+    /// Deterministic local stage tag for a bundled plugin `Dockerfile` context (`R11`).
+    pub fn bundled_local_stage_tag(
         context_dir: &Path,
         slug: &str,
         version: &str,
-    ) -> CompassResult<OciImageRef> {
+    ) -> CompassResult<(String, String)> {
         let dockerfile = context_dir.join("Dockerfile");
         if !dockerfile.is_file() {
             return Err(CompassError::NotFound(format!(
@@ -541,6 +539,32 @@ impl OciContainerRunner {
             .collect();
         let content_hash = hash_bundled_build_context(context_dir)?;
         let stage_tag = format!("local/bundled-{safe_slug}:stage-{safe_ver}-{}", &content_hash[..12]);
+        Ok((safe_slug, stage_tag))
+    }
+
+    /// Return whether the local clean-clone fallback build for a bundled plugin already exists (`R11`).
+    pub async fn has_local_bundled_image(
+        &self,
+        context_dir: &Path,
+        slug: &str,
+        version: &str,
+    ) -> bool {
+        match Self::bundled_local_stage_tag(context_dir, slug, version) {
+            Ok((_, stage_tag)) => self.has_local_image(&stage_tag).await,
+            Err(_) => false,
+        }
+    }
+
+    /// Build (or reuse cached) a bundled local plugin `Dockerfile` under `local/bundled-<slug>:sha256-<id>`
+    /// when the pinned registry is unreachable on a clean local clone (R11).
+    pub async fn build_local_bundled_image(
+        &self,
+        context_dir: &Path,
+        slug: &str,
+        version: &str,
+    ) -> CompassResult<OciImageRef> {
+        let dockerfile = context_dir.join("Dockerfile");
+        let (safe_slug, stage_tag) = Self::bundled_local_stage_tag(context_dir, slug, version)?;
 
         let digest = match self.inspect_local_image_id(&stage_tag).await? {
             Some(existing) => existing,

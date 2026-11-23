@@ -390,15 +390,8 @@ impl InProcessNodeRuntime {
         }
     }
 
-    async fn resolve_local_bundled_fallback(
-        &self,
-        plugin: &LoadedPlugin,
-        registry_err: CompassError,
-    ) -> CompassResult<(OciImageRef, Option<String>)> {
-        let Some(bundled_dir) = self.bundled_dockerfile_dir(plugin) else {
-            return Err(registry_err);
-        };
-        let slug = bundled_dir
+    fn bundled_slug<'a>(bundled_dir: &'a Path, plugin: &'a LoadedPlugin) -> &'a str {
+        bundled_dir
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_else(|| {
@@ -408,7 +401,39 @@ impl InProcessNodeRuntime {
                     .as_str()
                     .split_once('/')
                     .map_or(plugin.manifest.id.as_str(), |(_, s)| s)
-            });
+            })
+    }
+
+    /// Return whether a clean-clone local bundled `Dockerfile` fallback image is already built (`R11`).
+    pub async fn has_local_bundled_fallback_image(&self, plugin: &LoadedPlugin) -> bool {
+        let Some(bundled_dir) = self.bundled_dockerfile_dir(plugin) else {
+            return false;
+        };
+        let slug = Self::bundled_slug(&bundled_dir, plugin);
+        self.oci_runner
+            .has_local_bundled_image(&bundled_dir, slug, &plugin.manifest.version)
+            .await
+    }
+
+    /// Build a bundled plugin `Dockerfile` locally when pulling the pinned registry image fails on
+    /// a clean clone (`R11`).
+    pub async fn ensure_local_bundled_fallback_image(
+        &self,
+        plugin: &LoadedPlugin,
+        pull_err: CompassError,
+    ) -> CompassResult<(OciImageRef, Option<String>)> {
+        self.resolve_local_bundled_fallback(plugin, pull_err).await
+    }
+
+    async fn resolve_local_bundled_fallback(
+        &self,
+        plugin: &LoadedPlugin,
+        registry_err: CompassError,
+    ) -> CompassResult<(OciImageRef, Option<String>)> {
+        let Some(bundled_dir) = self.bundled_dockerfile_dir(plugin) else {
+            return Err(registry_err);
+        };
+        let slug = Self::bundled_slug(&bundled_dir, plugin);
         let built = self
             .oci_runner
             .build_local_bundled_image(&bundled_dir, slug, &plugin.manifest.version)

@@ -375,9 +375,17 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await page.getByTestId("nav-catalogs").click();
     await grantSelect.selectOption(scopedGrantValue!);
     await page.getByTestId("nav-plugins").click();
-    await page
-      .getByTestId("plugin-card-alithea/hla-interactive-explorer")
-      .click();
+    const explorerCard = page.getByTestId(
+      "plugin-card-alithea/hla-interactive-explorer",
+    );
+    const installBtn = explorerCard.getByRole("button", { name: "Install" });
+    if (await installBtn.isVisible().catch(() => false)) {
+      await installBtn.click();
+      await expect(
+        explorerCard.getByRole("button", { name: "Open" }),
+      ).toBeVisible({ timeout: 60_000 });
+    }
+    await explorerCard.click();
     await expect(
       page.getByTestId("module-window-alithea/hla-interactive-explorer"),
     ).toBeVisible();

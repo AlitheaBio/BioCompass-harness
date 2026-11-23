@@ -1121,7 +1121,15 @@ async fn to_plugin_dto(
     let author = resolve_plugin_author(&plugin.manifest);
     let (execution_target, execution_label) = resolve_execution_target(state, &plugin.manifest);
     let installed = match (&state.oci_runner, execution_target) {
-        (Some(runner), "local") => runner.has_local_image(&plugin.manifest.image).await,
+        (Some(runner), "local") => {
+            if runner.has_local_image(&plugin.manifest.image).await {
+                true
+            } else if let Some(rt) = &state.local_runtime {
+                rt.has_local_bundled_fallback_image(&plugin).await
+            } else {
+                false
+            }
+        }
         _ => true,
     };
     let requires_catalog_level = plugin.manifest.requires_catalog_level;
@@ -1307,7 +1315,24 @@ async fn install_plugin_handler(
                         CompassError::AccessDenied("this module cannot be installed locally".into())
                     })?;
                 if !runner.has_local_image(&plugin.manifest.image).await {
-                    runner.pull_image(&plugin.manifest.image).await?;
+                    let already_bundled = match &state.local_runtime {
+                        Some(rt) => rt.has_local_bundled_fallback_image(&plugin).await,
+                        None => false,
+                    };
+                    if !already_bundled
+                        && let Err(pull_err) = runner.pull_image(&plugin.manifest.image).await
+                    {
+                        if let Some(rt) = &state.local_runtime {
+                            let (_, notice) = rt
+                                .ensure_local_bundled_fallback_image(&plugin, pull_err)
+                                .await?;
+                            if let Some(msg) = notice {
+                                tracing::warn!("{msg}");
+                            }
+                        } else {
+                            return Err(pull_err.into());
+                        }
+                    }
                 }
                 plugin
             }
