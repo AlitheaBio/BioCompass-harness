@@ -1,7 +1,7 @@
 import { beginPrepareRequest } from "./prepareRequest";
 import { setWorkspaceReadHandle, workspaceReadGeneration, workspaceReadHandle } from "./workspaceReadSession";
 import { compileSdkCatalogQuery } from "@biocompass/plugin-sdk";
-import { localOwnerRequest } from "./localOwner";
+import { localOwnerHeaders, localOwnerRequest } from "./localOwner";
 import type {
   ApiKeyRecord,
   AuditLogRecord,
@@ -20,6 +20,7 @@ import type {
   DatasetOfferRequest,
   DatasetOfferSubscription,
   EnumerationMonitorEntry,
+  FederationPeerRecord,
   FilterExpr,
   FrogletVerifyReport,
   GrantAccessLevel,
@@ -31,6 +32,7 @@ import type {
   LedgerState,
   LedgerTx,
   LlmConfigResponse,
+  MarketplaceStatus,
   ModuleDownload,
   ModuleOffer,
   FederatedModuleOffer,
@@ -245,6 +247,7 @@ export async function updateLlmConfig(
 ): Promise<LlmConfigResponse> {
   return apiFetch<LlmConfigResponse>("/api/v1/llm/config", {
     method: "PUT",
+    headers: localOwnerHeaders(),
     body: JSON.stringify(payload),
   });
 }
@@ -254,6 +257,7 @@ export async function testLlmConnection(
 ): Promise<TestLlmConnectionResponse> {
   return apiFetch<TestLlmConnectionResponse>("/api/v1/llm/test", {
     method: "POST",
+    headers: localOwnerHeaders(),
     body: JSON.stringify(payload ?? {}),
   });
 }
@@ -454,6 +458,7 @@ export async function rollbackCatalogSnapshot(
     `${catalogPath(catalogId)}/rollback`,
     {
       method: "POST",
+      headers: localOwnerHeaders(),
       body: JSON.stringify({ target_snapshot_id: targetSnapshotId }),
     },
   );
@@ -633,7 +638,11 @@ export async function installModuleDownload(release: ModuleDownload, bearer?: st
     installed: boolean; plugin_id: string; plugin_version: string; plugin: PluginSummary;
   }>(`/api/v1/plugins/${parts.map(encodeURIComponent).join("/")}/install`, {
     method: "POST",
-    ...(bearer ? { credentials: "omit", headers: { Authorization: `Bearer ${bearer}` } } : {}),
+    ...(bearer ? { credentials: "omit" } : {}),
+    headers: {
+      ...localOwnerHeaders(),
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
     body: JSON.stringify({ plugin_version: release.version }),
   });
   if (!response.installed || response.plugin_id !== release.plugin_id || response.plugin_version !== release.version ||
@@ -655,7 +664,11 @@ export async function removeModuleRelease(id: string, version: string, bearer?: 
   const response = await apiFetch<{ plugin_id: string; plugin_version: string; removed: boolean }>(
     `${workspaceModulePath(id)}/versions/${encodeURIComponent(version)}/install`, {
       method: "DELETE",
-      ...(bearer ? { credentials: "omit", headers: { Authorization: `Bearer ${bearer}` } } : {}),
+      ...(bearer ? { credentials: "omit" } : {}),
+      headers: {
+        ...localOwnerHeaders(),
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
     },
   );
   if (response.plugin_id !== id || response.plugin_version !== version || typeof response.removed !== "boolean") {
@@ -668,7 +681,11 @@ export async function restoreModuleSource(id: string, version: string, bearer?: 
     plugin_id: string; plugin_version: string; installed: boolean; plugin: PluginSummary;
   }>(`${workspaceModulePath(id)}/install`, {
     method: "POST",
-    ...(bearer ? { credentials: "omit", headers: { Authorization: `Bearer ${bearer}` } } : {}),
+    ...(bearer ? { credentials: "omit" } : {}),
+    headers: {
+      ...localOwnerHeaders(),
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
     body: JSON.stringify({ plugin_version: version, source: "workspace" }),
   });
   if (!response.installed || response.plugin_id !== id || response.plugin_version !== version ||
@@ -681,13 +698,14 @@ export async function restoreModuleSource(id: string, version: string, bearer?: 
 export async function installPlugin(
   pluginId: string,
 ): Promise<{ plugin_id: string; installed: boolean }> {
-  const [ns, slug] = pluginId.split("/");
-  if (!ns || !slug) {
+  const parts = pluginId.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(`Invalid plugin ID: ${pluginId}`);
   }
+  const [ns, slug] = parts;
   return apiFetch<{ plugin_id: string; installed: boolean }>(
-    `/api/v1/plugins/${ns}/${slug}/install`,
-    { method: "POST" },
+    `/api/v1/plugins/${encodeURIComponent(ns)}/${encodeURIComponent(slug)}/install`,
+    { method: "POST", headers: localOwnerHeaders(), body: JSON.stringify({}) },
   );
 }
 
@@ -699,6 +717,7 @@ export async function scaffoldPlugin(payload: {
 }): Promise<ScaffoldResult> {
   return apiFetch<ScaffoldResult>("/api/v1/plugins/scaffold", {
     method: "POST",
+    headers: localOwnerHeaders(),
     body: JSON.stringify(payload),
   });
 }
@@ -724,6 +743,7 @@ export async function openPluginInDefaultIde(
     "/api/v1/plugins/open-ide",
     {
       method: "POST",
+      headers: localOwnerHeaders(),
       body: JSON.stringify({
         directory,
         ...(options?.ide ? { ide: options.ide } : {}),
@@ -1424,7 +1444,10 @@ export async function importCatalogFile(
     const buf = await opts.file.arrayBuffer();
     const resp = await fetchWithNetworkError(`/api/v1/catalogs/import-local?${qs.toString()}`, {
       method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
+      headers: {
+        "Content-Type": "application/octet-stream",
+        ...localOwnerHeaders(),
+      },
       body: buf,
     });
     if (!resp.ok) {
@@ -1687,12 +1710,13 @@ export async function reviewAdminPluginVisibility(
     note?: string;
   },
 ): Promise<PluginVersionRecord> {
-  const [ns, slug] = pluginId.split("/");
-  if (!ns || !slug) {
+  const parts = pluginId.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(`Invalid plugin ID: ${pluginId}`);
   }
+  const [ns, slug] = parts;
   const data = await apiFetch<{ plugin_version: PluginVersionRecord }>(
-    `/api/v1/admin/plugins/${ns}/${slug}/versions/${encodeURIComponent(version)}/visibility`,
+    `/api/v1/admin/plugins/${encodeURIComponent(ns)}/${encodeURIComponent(slug)}/versions/${encodeURIComponent(version)}/visibility`,
     {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1853,5 +1877,79 @@ export async function fetchEnumerationMonitor(days = 30): Promise<{
 }> {
   return apiFetch<{ lookback_days: number; entries: EnumerationMonitorEntry[] }>(
     `/api/v1/admin/enumeration-monitor?days=${encodeURIComponent(String(days))}`,
+  );
+}
+
+export async function fetchMarketplaceStatus(): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/status");
+}
+
+export async function updateMarketplaceConsent(payload: {
+  decision: "accepted" | "declined";
+  hub_url?: string;
+  sync_now?: boolean;
+}): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/consent", {
+    method: "PUT",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function syncMarketplaceNow(): Promise<MarketplaceStatus> {
+  return apiFetch<MarketplaceStatus>("/api/v1/marketplace/sync", {
+    method: "POST",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchAdminFederationPeers(): Promise<FederationPeerRecord[]> {
+  const data = await apiFetch<{ peers: FederationPeerRecord[] }>("/api/v1/admin/federation/peers");
+  return data.peers;
+}
+
+export async function approveAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function rejectAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function suspendAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
+  const data = await apiFetch<{ peer: FederationPeerRecord }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/suspend`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+  return data.peer;
+}
+
+export async function syncAdminFederationPeer(
+  peerId: string,
+): Promise<{ peer: FederationPeerRecord; synced_offers: number }> {
+  return apiFetch<{ peer: FederationPeerRecord; synced_offers: number }>(
+    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/sync`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
   );
 }

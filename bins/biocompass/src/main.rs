@@ -53,6 +53,9 @@ enum Commands {
         mode: String,
         #[arg(long, default_value_t = false)]
         allow_local_dev_tags: bool,
+        /// Disable all outbound marketplace and hub sync connections and suppress the first-run marketplace prompt.
+        #[arg(long, env = "COMPASS_AIRGAPPED", default_value_t = false)]
+        airgapped: bool,
     },
     /// Scaffold a new OCI container plugin from one of the 4 starter templates.
     InitPlugin {
@@ -226,6 +229,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
             data_dir,
             mode,
             allow_local_dev_tags,
+            airgapped,
         } => {
             let deploy_mode = DeploymentMode::parse(&mode)?;
             let dir = data_dir.unwrap_or_else(default_data_dir);
@@ -233,16 +237,28 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 .parse()
                 .map_err(|e| CompassError::Validation(format!("invalid listen address: {e}")))?;
 
-            let installed_workspace = if deploy_mode == DeploymentMode::Local && addr.ip().is_loopback() {
+            let marketplace_cfg =
+                biocompass::marketplace::MarketplaceConfig::from_env(deploy_mode, airgapped);
+            let installed_workspace = if deploy_mode == DeploymentMode::Local
+                && addr.ip().is_loopback()
+                && !marketplace_cfg.airgapped
+            {
                 std::env::var("COMPASS_HUB_URL")
                     .ok()
+                    .filter(|url| !url.trim().is_empty())
                     .map(|url| biocompass::workspace::InstalledWorkspace::open(&dir, &url))
                     .transpose()?
                     .map(std::sync::Arc::new)
             } else {
                 None
             };
-            let mut state = AppState::bootstrap(&dir, deploy_mode, allow_local_dev_tags).await?;
+            let mut state = AppState::bootstrap_with_marketplace(
+                &dir,
+                deploy_mode,
+                allow_local_dev_tags,
+                marketplace_cfg,
+            )
+            .await?;
             if let Some(workspace) = &installed_workspace {
                 workspace.start_sync();
             }
@@ -521,6 +537,7 @@ fn load_optional_plugin_icon(
     }
     let bytes = std::fs::read(&full)
         .map_err(|e| CompassError::Storage(format!("read {}: {e}", full.display())))?;
+    biocompass::server::validate_safe_svg_icon(&bytes)?;
     Ok(Some(IconFileUploadDto {
         path: icon_rel.to_owned(),
         size_bytes: bytes.len() as u64,
@@ -640,6 +657,9 @@ async fn execute_publish_plugin(
     }
 
     let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| CompassError::Internal(format!("build HTTP client: {e}")))?;
 
@@ -708,7 +728,7 @@ async fn execute_publish_plugin(
             .await?;
     if remote_digest != expected_digest {
         return Err(CompassError::IntegrityViolation(format!(
-            "OCI registry digest mismatch: expected sha256:{expected_digest}, got sha256:{remote_digest}"
+            "OCI registry digest mismatch: expected sha256:{expected_digest}"
         )));
     }
 
@@ -797,17 +817,47 @@ async fn fetch_oci_manifest_sha256(
     repository: &str,
     reference: &str,
 ) -> CompassResult<String> {
+    if reference.is_empty()
+        || reference.chars().any(|c| c.is_control() || c.is_whitespace())
+        || reference.contains('/')
+        || reference.contains('?')
+        || reference.contains('#')
+        || reference.contains("..")
+    {
+        return Err(CompassError::Validation(format!(
+            "invalid OCI manifest reference '{reference}'"
+        )));
+    }
     let (host, repo_path) = repository.split_once('/').ok_or_else(|| {
         CompassError::Validation(format!(
             "OCI repository '{repository}' must include registry host and repo path"
         ))
     })?;
-    let is_local = host.starts_with("127.0.0.1")
-        || host.starts_with("localhost")
-        || host.starts_with("registry:");
+    let parsed_origin = reqwest::Url::parse(&format!("https://{host}/")).map_err(|_| {
+        CompassError::Validation(format!("invalid OCI registry host '{host}'"))
+    })?;
+    if !parsed_origin.username().is_empty()
+        || parsed_origin.password().is_some()
+        || parsed_origin.query().is_some()
+        || parsed_origin.fragment().is_some()
+        || parsed_origin.path() != "/"
+    {
+        return Err(CompassError::Validation(format!(
+            "OCI registry host '{host}' must not contain userinfo, path, query, or fragment"
+        )));
+    }
+    let host_str = parsed_origin
+        .host_str()
+        .ok_or_else(|| CompassError::Validation(format!("missing host in '{repository}'")))?;
+    let unbracketed = host_str.trim_start_matches('[').trim_end_matches(']');
+    let is_local = unbracketed.eq_ignore_ascii_case("localhost")
+        || unbracketed.eq_ignore_ascii_case("registry")
+        || unbracketed
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
     let scheme = if is_local { "http" } else { "https" };
     let url = format!("{scheme}://{host}/v2/{repo_path}/manifests/{reference}");
-    let resp = http
+    let mut resp = http
         .get(&url)
         .header(
             "Accept",
@@ -816,6 +866,12 @@ async fn fetch_oci_manifest_sha256(
         .send()
         .await
         .map_err(|e| CompassError::ContainerEngine(format!("GET OCI manifest {url} failed: {e}")))?;
+    if resp.status().is_redirection() {
+        return Err(CompassError::Validation(format!(
+            "OCI registry manifest endpoint returned forbidden redirect (HTTP {}) for {url}",
+            resp.status()
+        )));
+    }
     if !resp.status().is_success() {
         return Err(CompassError::NotFound(format!(
             "OCI manifest '{repository}:{reference}' not found in registry (HTTP {})",
@@ -828,17 +884,37 @@ async fn fetch_oci_manifest_sha256(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().strip_prefix("sha256:"))
         .map(str::to_ascii_lowercase);
-    let body = resp
-        .bytes()
+    if let Some(len) = resp.content_length()
+        && len > biocompass_oci_runner::registry::MAX_OCI_MANIFEST_BYTES as u64
+    {
+        return Err(CompassError::IntegrityViolation(format!(
+            "OCI manifest response exceeded {} byte cap",
+            biocompass_oci_runner::registry::MAX_OCI_MANIFEST_BYTES
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| CompassError::ContainerEngine(format!("read OCI manifest body: {e}")))?;
+        .map_err(|e| CompassError::ContainerEngine(format!("read OCI manifest body: {e}")))?
+    {
+        if body.len().saturating_add(chunk.len())
+            > biocompass_oci_runner::registry::MAX_OCI_MANIFEST_BYTES
+        {
+            return Err(CompassError::IntegrityViolation(format!(
+                "OCI manifest response exceeded {} byte cap",
+                biocompass_oci_runner::registry::MAX_OCI_MANIFEST_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
     let computed = hex::encode(Sha256::digest(&body));
     if let Some(hdr) = header_digest
         && hdr != computed
     {
-        return Err(CompassError::IntegrityViolation(format!(
-            "OCI registry Docker-Content-Digest (sha256:{hdr}) != body SHA-256 (sha256:{computed})"
-        )));
+        return Err(CompassError::IntegrityViolation(
+            "OCI registry Docker-Content-Digest does not match manifest body SHA-256".into(),
+        ));
     }
     Ok(computed)
 }

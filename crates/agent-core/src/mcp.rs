@@ -11,7 +11,8 @@
 use crate::AgentStreamEvent;
 use crate::llm::LlmToolCall;
 use crate::tools::{
-    AgentExecutionPort, allowed_tool_definitions, execute_agent_tool, spill_tool_output_if_needed,
+    AgentExecutionPort, allowed_tool_definitions_for, execute_agent_tool_with_options,
+    spill_tool_output_if_needed,
 };
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -48,6 +49,7 @@ struct McpAppState {
     session_store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
     scaffold_root_dir: PathBuf,
+    allow_scaffold: bool,
     spill_threshold_bytes: usize,
     stream_tx: Option<mpsc::Sender<AgentStreamEvent>>,
     metrics: Arc<Mutex<McpTurnMetrics>>,
@@ -75,6 +77,35 @@ impl ScopedMcpServer {
         spill_threshold_bytes: usize,
         stream_tx: Option<mpsc::Sender<AgentStreamEvent>>,
     ) -> CompassResult<Self> {
+        Self::start_with_options(
+            org_id,
+            session_id,
+            active_grant,
+            execution_port,
+            session_store,
+            blob_store,
+            scaffold_root_dir,
+            spill_threshold_bytes,
+            stream_tx,
+            true,
+        )
+        .await
+    }
+
+    /// Spawn a temporary loopback HTTP MCP server with explicit `allow_scaffold` policy (`SEC-24`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_options(
+        org_id: OrgId,
+        session_id: SessionId,
+        active_grant: Option<DatasetGrant>,
+        execution_port: Arc<dyn AgentExecutionPort>,
+        session_store: Arc<dyn SessionStore>,
+        blob_store: Arc<dyn BlobStore>,
+        scaffold_root_dir: PathBuf,
+        spill_threshold_bytes: usize,
+        stream_tx: Option<mpsc::Sender<AgentStreamEvent>>,
+        allow_scaffold: bool,
+    ) -> CompassResult<Self> {
         let token = Uuid::new_v4().simple().to_string();
         let metrics = Arc::new(Mutex::new(McpTurnMetrics::default()));
         let state = McpAppState {
@@ -86,6 +117,7 @@ impl ScopedMcpServer {
             session_store,
             blob_store,
             scaffold_root_dir,
+            allow_scaffold,
             spill_threshold_bytes,
             stream_tx,
             metrics: Arc::clone(&metrics),
@@ -238,7 +270,7 @@ async fn handle_mcp_post(
         }
         "ping" => json_rpc_ok(id, json!({})),
         "tools/list" => {
-            let tools: Vec<Value> = allowed_tool_definitions()
+            let tools: Vec<Value> = allowed_tool_definitions_for(state.allow_scaffold)
                 .into_iter()
                 .map(|t| {
                     let read_only = matches!(
@@ -273,7 +305,10 @@ async fn handle_tools_call(state: &McpAppState, id: Value, params: &Value) -> Re
         return json_rpc_err(id, -32602, "tools/call requires params.name");
     };
 
-    if !allowed_tool_definitions().iter().any(|t| t.name == name) {
+    if !allowed_tool_definitions_for(state.allow_scaffold)
+        .iter()
+        .any(|t| t.name == name)
+    {
         return json_rpc_ok(
             id,
             json!({
@@ -323,7 +358,7 @@ async fn handle_tools_call(state: &McpAppState, id: Value, params: &Value) -> Re
             .await;
     }
 
-    let raw_val = execute_agent_tool(
+    let raw_val = execute_agent_tool_with_options(
         &tc,
         &state.org_id,
         &state.session_id,
@@ -333,6 +368,7 @@ async fn handle_tools_call(state: &McpAppState, id: Value, params: &Value) -> Re
         state.blob_store.as_ref(),
         &state.scaffold_root_dir,
         state.stream_tx.as_ref(),
+        state.allow_scaffold,
     )
     .await;
 

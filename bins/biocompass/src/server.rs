@@ -28,7 +28,8 @@ use biocompass_data_engine::{
 use biocompass_node_runtime::verify_froglet_chain_offline;
 use biocompass_plugin_spec::{
     DeclarativeViewSpec, LoadedPlugin, PluginExecutionPlane, PluginManifest, ResolvedPluginOffer,
-    SkillDoc, TemplateKind, render_template_files, write_template_to_dir,
+    SkillDoc, TemplateKind, render_template_files, validate_scaffold_plugin_id,
+    write_template_to_dir,
 };
 use futures::StreamExt;
 use rust_embed::RustEmbed;
@@ -46,13 +47,310 @@ use uuid::Uuid;
 #[folder = "../../web/dist/"]
 struct WebDistAssets;
 
-/// Strict Content-Security-Policy applied to `/plugin-ui/:ns/:slug/*` iframe documents.
+/// Strict Content-Security-Policy applied to `/plugin-ui/:ns/:slug/*`, `/plugin-ui-version/*`,
+/// and `/plugin-ui-access/*` iframe documents (`SEC-17`).
+/// `sandbox allow-scripts` forces an opaque `null` origin even if an asset is opened directly;
 /// `connect-src 'none'` blocks direct network egress (`fetch`, `XHR`, `WebSocket`), forcing all
 /// communication through `@biocompass/plugin-sdk` `postMessage` JSON-RPC 2.0.
-pub const PLUGIN_SANDBOX_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'";
+pub const PLUGIN_SANDBOX_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
 
-/// Strict Content-Security-Policy applied to `/plugin-icon/:ns/:slug` SVG icons.
-const PLUGIN_ICON_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+/// Strict Content-Security-Policy applied to `/plugin-icon/:ns/:slug` icons (`SEC-17`).
+const PLUGIN_ICON_CSP: &str = "default-src 'none'; sandbox";
+
+/// Strictly validate that SVG icon bytes contain no active scripts, event handlers, SMIL
+/// animations, foreignObject/iframe/object/embed tags, external links, or dangerous URL schemes (`SEC-17`).
+pub fn validate_safe_svg_icon(bytes: &[u8]) -> biocompass_core_traits::CompassResult<()> {
+    const MAX_ICON_BYTES: usize = 256 * 1024;
+    if bytes.is_empty() || bytes.len() > MAX_ICON_BYTES {
+        return Err(CompassError::Validation(format!(
+            "SVG icon must be 1..={MAX_ICON_BYTES} bytes"
+        )));
+    }
+    if bytes.contains(&0) {
+        return Err(CompassError::Validation("SVG icon must not contain NUL bytes".into()));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| CompassError::Validation("SVG icon must be valid UTF-8".into()))?;
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("<svg") {
+        return Err(CompassError::Validation("SVG icon must contain an <svg> root element".into()));
+    }
+    if lower.contains("<!doctype") || lower.contains("<!entity") {
+        return Err(CompassError::Validation(
+            "SVG icon must not contain DOCTYPE or XML ENTITY declarations".into(),
+        ));
+    }
+
+    let mut saw_svg = false;
+    let mut emitter = html5gum::DefaultEmitter::default();
+    emitter.naively_switch_states(true);
+    for token in html5gum::Tokenizer::new_with_emitter(bytes, emitter).flatten() {
+        let html5gum::Token::StartTag(tag) = token else {
+            continue;
+        };
+        let tag_name = String::from_utf8_lossy(tag.name.as_slice()).to_ascii_lowercase();
+        if tag_name == "svg" {
+            saw_svg = true;
+        }
+        if matches!(
+            tag_name.as_str(),
+            "script"
+                | "foreignobject"
+                | "iframe"
+                | "object"
+                | "embed"
+                | "animate"
+                | "animatemotion"
+                | "animatetransform"
+                | "set"
+                | "handler"
+                | "use"
+                | "image"
+                | "a"
+                | "style"
+                | "meta"
+                | "link"
+                | "base"
+                | "form"
+                | "input"
+        ) {
+            return Err(CompassError::Validation(format!(
+                "SVG icon contains forbidden active element '<{tag_name}>'"
+            )));
+        }
+        for (raw_attr, raw_val) in &tag.attributes {
+            let attr = String::from_utf8_lossy(raw_attr.as_slice()).to_ascii_lowercase();
+            if attr.starts_with("on")
+                || matches!(attr.as_str(), "href" | "xlink:href" | "formaction" | "action")
+            {
+                return Err(CompassError::Validation(format!(
+                    "SVG icon contains forbidden attribute '{attr}'"
+                )));
+            }
+            let val_compact: String = String::from_utf8_lossy(raw_val.as_slice())
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace() && !c.is_control())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if val_compact.contains("javascript:")
+                || val_compact.contains("vbscript:")
+                || val_compact.contains("data:text/html")
+                || val_compact.contains("data:image/svg")
+            {
+                return Err(CompassError::Validation(format!(
+                    "SVG icon attribute '{attr}' contains forbidden executable URI scheme"
+                )));
+            }
+        }
+    }
+    if !saw_svg {
+        return Err(CompassError::Validation("SVG icon must contain an <svg> element".into()));
+    }
+    Ok(())
+}
+
+fn is_allowed_local_host_authority(state: &AppState, raw_host: &str) -> bool {
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('@') {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("http://{trimmed}/")) else {
+        return false;
+    };
+    let Some(host_str) = url.host_str() else {
+        return false;
+    };
+    let unbracketed = host_str.trim_start_matches('[').trim_end_matches(']');
+    let is_loopback = unbracketed.eq_ignore_ascii_case("localhost")
+        || unbracketed
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !is_loopback {
+        return false;
+    }
+    if let Some(bound) = state.listen_addr {
+        let port = url.port().unwrap_or(80);
+        if port == bound.port() {
+            return true;
+        }
+        let env_dev_cors = std::env::var("BIOCOMPASS_DEV_CORS")
+            .ok()
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+        if (env_dev_cors || state.allow_local_dev_tags || cfg!(debug_assertions))
+            && matches!(port, 5173 | 5174)
+        {
+            return true;
+        }
+        return false;
+    }
+    true
+}
+
+fn is_allowed_local_origin(state: &AppState, raw_origin: &str) -> bool {
+    let Some(rest) = raw_origin.trim().strip_prefix("http://") else {
+        return false;
+    };
+    is_allowed_local_host_authority(state, rest)
+}
+
+fn is_mutating_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
+}
+
+/// Router-level DNS-rebinding & CSRF protection for `DeploymentMode::Local` (`SEC-16`).
+async fn local_loopback_guard_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.mode == DeploymentMode::Local {
+        let headers = req.headers();
+        if let Some(host_val) = headers.get(header::HOST) {
+            let ok = host_val
+                .to_str()
+                .ok()
+                .is_some_and(|h| is_allowed_local_host_authority(&state, h));
+            if !ok {
+                return ApiError(CompassError::AccessDenied(
+                    "FORBIDDEN: non-loopback Host header rejected in local mode".into(),
+                ))
+                .into_response();
+            }
+        } else if state.listen_addr.is_some() && is_mutating_method(req.method()) {
+            return ApiError(CompassError::AccessDenied(
+                "FORBIDDEN: missing loopback Host header on local mutating request".into(),
+            ))
+            .into_response();
+        }
+
+        if is_mutating_method(req.method()) {
+            if let Some(origin_val) = headers.get(header::ORIGIN) {
+                let ok = origin_val
+                    .to_str()
+                    .ok()
+                    .is_some_and(|o| is_allowed_local_origin(&state, o));
+                if !ok {
+                    return ApiError(CompassError::AccessDenied(
+                        "FORBIDDEN: cross-origin mutating request rejected in local mode".into(),
+                    ))
+                    .into_response();
+                }
+            }
+            if let Some(sfs) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+                let allowed_sfs = match sfs {
+                    "same-origin" | "none" => true,
+                    "same-site" => headers
+                        .get(header::ORIGIN)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|o| is_allowed_local_origin(&state, o)),
+                    _ => false,
+                };
+                if !allowed_sfs {
+                    return ApiError(CompassError::AccessDenied(
+                        "FORBIDDEN: cross-site Sec-Fetch-Site rejected on local mutating request".into(),
+                    ))
+                    .into_response();
+                }
+            }
+        }
+    }
+    next.run(req).await
+}
+
+fn require_json_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim().to_ascii_lowercase());
+    if ct.as_deref() == Some("application/json") {
+        Ok(())
+    } else {
+        Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "Content-Type must be application/json",
+                    "code": "UNSUPPORTED_MEDIA_TYPE",
+                })),
+            )
+                .into_response(),
+        ))
+    }
+}
+
+fn require_non_simple_upload_content_type(headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim().to_ascii_lowercase());
+    match ct.as_deref() {
+        Some("application/octet-stream" | "application/json") => Ok(()),
+        _ => Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "Content-Type must be application/octet-stream (CORS-safelisted simple POST types are rejected)",
+                    "code": "UNSUPPORTED_MEDIA_TYPE",
+                })),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+fn reject_top_level_plugin_ui_navigation(headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(dest) = headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok())
+        && dest.eq_ignore_ascii_case("document")
+    {
+        return Err(CompassError::AccessDenied(
+            "FORBIDDEN: plugin UI assets may only be rendered inside a sandboxed workbench iframe (top-level document navigation is blocked)".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn sanitize_attachment_filename(raw: &str) -> String {
+    let base = Path::new(raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact.bin");
+    let clean: String = base
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .take(128)
+        .collect();
+    if clean.is_empty() || clean == "." || clean == ".." {
+        "artifact.bin".to_owned()
+    } else {
+        clean
+    }
+}
+
+fn apply_sandboxed_attachment_headers(resp: &mut Response, filename: &str) {
+    let safe_name = sanitize_attachment_filename(filename);
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    if let Ok(cd) = HeaderValue::from_str(&format!("attachment; filename=\"{safe_name}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, cd);
+    }
+}
 
 async fn caller_auth_middleware(req: Request, next: Next) -> Response {
     let hdrs = req.headers();
@@ -178,7 +476,13 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(crate::workspace::routes())
+        .route("/v1/feed", get(proxy_public_marketplace_handler))
+        .route("/v1/artifacts/:hash", get(proxy_public_marketplace_artifact_handler))
+        .route("/v1/registrations", post(proxy_public_marketplace_handler))
         .route("/api/v1/health", get(get_health))
+        .route("/api/v1/marketplace/status", get(get_marketplace_status_handler))
+        .route("/api/v1/marketplace/consent", put(update_marketplace_consent_handler))
+        .route("/api/v1/marketplace/sync", post(sync_marketplace_handler))
         .route("/api/v1/app-distribution", get(crate::app_distribution::discover))
         .route("/api/v1/app-distribution/download", get(crate::app_distribution::download))
         .route("/api/v1/auth/whoami", get(get_whoami_handler))
@@ -338,9 +642,13 @@ pub fn build_router(state: AppState) -> Router {
             get(serve_plugin_ui_asset),
         )
         .route("/plugin-ui-version/:ns/:slug/:version/*asset_path", get(serve_pinned_plugin_ui))
-        .route("/plugin-ui-access/:ticket/*asset_path", get(proxy_cloud_route_handler))
+        .route("/plugin-ui-access/:ticket/*asset_path", get(serve_plugin_ui_access))
         .route("/plugin-icon/:ns/:slug", get(serve_plugin_icon))
         .fallback(serve_embedded_spa)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            local_loopback_guard_middleware,
+        ))
         .layer(middleware::from_fn(caller_auth_middleware))
         .layer(cors)
         .with_state(state)
@@ -394,6 +702,7 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         .await
         .unwrap_or_default();
     let plugins = state.registry.list_plugins().await.unwrap_or_default();
+    let marketplace = state.marketplace.status().await;
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -407,7 +716,108 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         "catalog_count": catalogs.len(),
         "plugin_count": plugins.len(),
         "workspace_hub_url": state.installed_workspace.as_deref().map(|w| w.hub_url()),
+        "marketplace_prompt_required": marketplace.prompt_required,
+        "marketplace_status": marketplace,
     }))
+}
+
+async fn get_marketplace_status_handler(
+    State(state): State<AppState>,
+) -> Json<crate::marketplace::MarketplaceStatusSnapshot> {
+    Json(state.marketplace.status().await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateMarketplaceConsentRequest {
+    decision: crate::marketplace::MarketplaceConsentDecision,
+    #[serde(default)]
+    hub_url: Option<String>,
+    #[serde(default = "default_true")]
+    sync_now: bool,
+}
+
+async fn update_marketplace_consent_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateMarketplaceConsentRequest>,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let snapshot = state
+        .marketplace
+        .set_consent(req.decision, req.hub_url, req.sync_now)
+        .await?;
+    Ok(Json(snapshot).into_response())
+}
+
+async fn sync_marketplace_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let snapshot = state.marketplace.sync_now().await?;
+    Ok(Json(snapshot).into_response())
+}
+
+async fn proxy_public_marketplace_handler(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let Some(hub) = &state.hub_client else {
+        return Err(CompassError::NotFound(
+            "public marketplace routes are only available in cloud-web mode".into(),
+        )
+        .into());
+    };
+    let req_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(|e| CompassError::Validation(format!("invalid HTTP method: {e}")))?;
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    Ok(hub
+        .proxy_raw(req_method, path_and_query, &headers, body.to_vec())
+        .await?)
+}
+
+async fn proxy_public_marketplace_artifact_handler(
+    State(state): State<AppState>,
+    AxumPath(hash): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let Some(hub) = &state.hub_client else {
+        return Err(CompassError::NotFound(
+            "public marketplace routes are only available in cloud-web mode".into(),
+        )
+        .into());
+    };
+    let valid_hash = !hash.is_empty()
+        && hash.len() <= 256
+        && !hash.contains("..")
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.'));
+    if !valid_hash {
+        return Err(CompassError::Validation("invalid marketplace artifact hash".into()).into());
+    }
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/v1/artifacts/");
+    Ok(hub
+        .proxy_raw(reqwest::Method::GET, path_and_query, &headers, Vec::new())
+        .await?)
 }
 
 async fn get_whoami_handler(
@@ -558,9 +968,13 @@ struct RollbackCatalogRequest {
 
 async fn rollback_catalog_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((ns, name)): AxumPath<(String, String)>,
     Json(req): Json<RollbackCatalogRequest>,
 ) -> ApiResult<Json<Value>> {
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
     let catalog_id =
         CatalogId::new(format!("{ns}/{name}")).map_err(CompassError::Validation)?;
     catalog_id.ensure_legacy_writable()?;
@@ -658,7 +1072,14 @@ fn resolve_execution_target(state: &AppState, manifest: &PluginManifest) -> (&'s
 
 fn resolve_safe_plugin_icon(plugin: &LoadedPlugin) -> Option<std::path::PathBuf> {
     let icon_rel = plugin.manifest.icon.as_deref()?.trim();
-    if icon_rel.is_empty() {
+    if icon_rel.is_empty() || icon_rel.contains('\\') || icon_rel.chars().any(char::is_control) {
+        return None;
+    }
+    let ext = Path::new(icon_rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)?;
+    if !matches!(ext.as_str(), "svg" | "png" | "webp" | "jpg" | "jpeg") {
         return None;
     }
     let root = plugin.root_dir.as_ref()?;
@@ -817,8 +1238,12 @@ enum InstallSource {
 
 async fn remove_plugin_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((ns, slug, version)): AxumPath<(String, String, String)>,
 ) -> ApiResult<Json<Value>> {
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
     let id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
     let removed = crate::package_install::removal::remove(&state, &id, &version).await?;
     Ok(Json(
@@ -828,9 +1253,16 @@ async fn remove_plugin_handler(
 
 async fn install_plugin_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath((ns, slug)): AxumPath<(String, String)>,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
     let request: InstallPluginRequest = if body.is_empty() {
         InstallPluginRequest::default()
     } else {
@@ -892,7 +1324,8 @@ async fn install_plugin_handler(
         "plugin_version": dto.manifest.version,
         "installed": dto.installed,
         "plugin": dto,
-    })))
+    }))
+    .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -906,28 +1339,24 @@ struct ScaffoldPluginRequest {
 
 async fn scaffold_plugin_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ScaffoldPluginRequest>,
 ) -> ApiResult<Json<Value>> {
+    if state.mode != DeploymentMode::Local {
+        return Err(CompassError::AccessDenied(
+            "FORBIDDEN: plugin scaffolding is only available in local workstation mode".into(),
+        )
+        .into());
+    }
+    crate::native_import::operator::authorize(&state, &headers)?;
     let kind = TemplateKind::parse(&req.template)?;
+    let (_ns, slug) = validate_scaffold_plugin_id(&req.plugin_id)?;
     let files = render_template_files(
         kind,
         &req.plugin_id,
         &req.display_name,
         req.include_vite_ui,
     )?;
-
-    let slug = req
-        .plugin_id
-        .split('/')
-        .nth(1)
-        .filter(|s| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        })
-        .ok_or_else(|| {
-            CompassError::Validation("plugin_id must be '<org>/<alphanumeric-slug>'".into())
-        })?;
 
     let target_dir = state.user_plugins_dir.join(slug);
     write_template_to_dir(
@@ -1002,6 +1431,7 @@ async fn list_installed_ides_handler(
 
 async fn open_plugin_ide_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<OpenPluginIdeRequest>,
 ) -> ApiResult<Json<Value>> {
     if state.mode != DeploymentMode::Local {
@@ -1010,6 +1440,7 @@ async fn open_plugin_ide_handler(
         )
         .into());
     }
+    crate::native_import::operator::authorize(&state, &headers)?;
     let plugins_root = std::fs::canonicalize(&state.user_plugins_dir).map_err(|e| {
         CompassError::NotFound(format!(
             "plugins directory '{}' unavailable: {e}",
@@ -1076,6 +1507,7 @@ async fn get_llm_config_handler(State(state): State<AppState>) -> Json<LlmConfig
 
 async fn update_llm_config_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<UpdateLlmConfigRequest>,
 ) -> ApiResult<Json<LlmConfigResponse>> {
     if state.mode != DeploymentMode::Local {
@@ -1084,6 +1516,7 @@ async fn update_llm_config_handler(
         )
         .into());
     }
+    crate::native_import::operator::authorize(&state, &headers)?;
     let previous = state.agent.llm_config().await;
     let next = normalize_llm_config_request(req, previous.as_ref())?;
     save_saved_llm_config(&state.data_dir, next.as_ref())?;
@@ -1093,13 +1526,18 @@ async fn update_llm_config_handler(
 
 async fn test_llm_connection_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Option<Json<UpdateLlmConfigRequest>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     if state.mode != DeploymentMode::Local {
         return Err(CompassError::AccessDenied(
             "local LLM connectivity probes are only permitted in local mode".into(),
         )
         .into());
+    }
+    crate::native_import::operator::authorize(&state, &headers)?;
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
     }
     let previous = state.agent.llm_config().await;
     let target_cfg = match body {
@@ -1122,7 +1560,8 @@ async fn test_llm_connection_handler(
     Ok(Json(
         serde_json::to_value(result)
             .map_err(|e| CompassError::Internal(format!("encode test result: {e}")))?,
-    ))
+    )
+    .into_response())
 }
 
 fn spawn_detached(program: &str, args: &[&std::ffi::OsStr]) -> bool {
@@ -1444,6 +1883,53 @@ fn discover_installed_ides(plugins_root: &Path) -> (Vec<InstalledIdeInfo>, Optio
     (ides, default_ide_id)
 }
 
+const ALLOWED_IDE_CLI_BINARIES: &[&str] = &[
+    "code",
+    "code-insiders",
+    "cursor",
+    "codium",
+    "windsurf",
+    "zed",
+    "antigravity",
+    "agy",
+    "subl",
+    "idea",
+    "pycharm",
+    "goland",
+    "rustrover",
+    "clion",
+    "webstorm",
+    "fleet",
+    "hx",
+    "nvim",
+    "vim",
+    "emacs",
+    "rstudio",
+    "positron",
+    "open",
+    "xdg-open",
+];
+
+const ALLOWED_MACOS_IDE_APPS: &[&str] = &[
+    "Visual Studio Code",
+    "Visual Studio Code - Insiders",
+    "Cursor",
+    "VSCodium",
+    "Antigravity",
+    "Windsurf",
+    "Zed",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "RustRover",
+    "GoLand",
+    "CLion",
+    "WebStorm",
+    "Positron",
+    "RStudio",
+    "Sublime Text",
+    "Finder",
+];
+
 fn launch_custom_ide(dir: &Path, raw: &str) -> Result<String, CompassError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1452,38 +1938,39 @@ fn launch_custom_ide(dir: &Path, raw: &str) -> Result<String, CompassError> {
         ));
     }
     if trimmed.starts_with('-')
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
         || trimmed
             .chars()
             .any(|c| c.is_control() || matches!(c, ';' | '&' | '|' | '`' | '$' | '<' | '>'))
     {
         return Err(CompassError::Validation(
-            "custom IDE command contains disallowed characters".into(),
+            "custom IDE command must be an allowlisted IDE name without paths or shell metacharacters".into(),
         ));
     }
 
     let dir_os = dir.as_os_str();
-    if !trimmed.contains(' ')
-        && find_executable_in_path(trimmed).is_some()
-        && spawn_detached(trimmed, &[dir_os])
+    let lower = trimmed.to_ascii_lowercase();
+    if ALLOWED_IDE_CLI_BINARIES.contains(&lower.as_str()) {
+        if find_executable_in_path(&lower).is_some() && spawn_detached(&lower, &[dir_os]) {
+            return Ok(lower);
+        }
+        return Err(CompassError::NotFound(format!(
+            "IDE executable '{trimmed}' was not found on PATH"
+        )));
+    }
+
+    if cfg!(target_os = "macos")
+        && let Some(matched_app) = ALLOWED_MACOS_IDE_APPS
+            .iter()
+            .find(|app| app.eq_ignore_ascii_case(trimmed))
     {
-        let label = Path::new(trimmed)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(trimmed);
-        return Ok(label.to_owned());
+        open_macos_app(std::ffi::OsStr::new(*matched_app), dir_os)?;
+        return Ok((*matched_app).to_owned());
     }
 
-    if cfg!(target_os = "macos") {
-        open_macos_app(std::ffi::OsStr::new(trimmed), dir_os)?;
-        let label = Path::new(trimmed)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(trimmed);
-        return Ok(label.to_owned());
-    }
-
-    Err(CompassError::NotFound(format!(
-        "IDE executable or application '{trimmed}' was not found on PATH"
+    Err(CompassError::AccessDenied(format!(
+        "FORBIDDEN: '{trimmed}' is not an allowlisted IDE application or CLI executable"
     )))
 }
 
@@ -1612,8 +2099,8 @@ async fn prepare_run_handler(
     if let Some(hub) = &state.hub_client {
         let upstream = hub.request_bound_quote(&request, None, req.workspace_id, req.request_key).await?;
         let retry_after = upstream.headers().get(header::RETRY_AFTER).cloned();
-        let response = match CompassHubClient::read_bound_quote(&request, upstream).await {
-            Ok(quote) => Json(quote).into_response(),
+        let response = match CompassHubClient::read_bound_quote_json(&request, upstream).await {
+            Ok(quote_json) => Json(quote_json).into_response(),
             Err(error) => ApiError::from(error).into_response(),
         };
         return Ok(with_retry_after(response, retry_after));
@@ -1641,10 +2128,14 @@ struct ApiConfirmRunRequest {
 
 async fn confirm_run_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     AxumPath(run_id_raw): AxumPath<String>,
     uri: Uri,
     body: Option<Json<ApiConfirmRunRequest>>,
 ) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
     let run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
     let idem = body
         .and_then(|b| b.0.idempotency_key)
@@ -1742,9 +2233,7 @@ async fn get_run_artifact_handler(
         let mut response =
             proxy_cloud_route_handler(State(state), Method::GET, uri, headers, Bytes::new()).await?;
         if response.status().is_success() {
-            let headers = response.headers_mut();
-            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-            headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+            apply_sandboxed_attachment_headers(&mut response, &artifact_name);
         }
         return Ok(response);
     }
@@ -1764,10 +2253,7 @@ async fn get_run_artifact_handler(
     if let Ok(ct) = HeaderValue::from_str(&art.media_type) {
         resp.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
-    resp.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
+    apply_sandboxed_attachment_headers(&mut resp, &art.name);
     Ok(resp)
 }
 
@@ -2084,11 +2570,45 @@ struct UiAssetSelection {
     version: Option<String>,
 }
 
+fn apply_plugin_ui_sandbox_headers(resp: &mut Response) {
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(PLUGIN_SANDBOX_CSP),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Allow `<script type="module" crossorigin>` subresources to load from the opaque `null`
+    // sandboxed iframe origin (`SEC-17`).
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+}
+
+async fn serve_plugin_ui_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> ApiResult<Response> {
+    reject_top_level_plugin_ui_navigation(&headers)?;
+    let mut resp =
+        proxy_cloud_route_handler(State(state), Method::GET, uri, headers, Bytes::new()).await?;
+    if resp.status().is_success() {
+        apply_plugin_ui_sandbox_headers(&mut resp);
+    }
+    Ok(resp)
+}
+
 async fn serve_pinned_plugin_ui(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath((ns, slug, version, asset)): AxumPath<(String, String, String, String)>,
 ) -> ApiResult<Response> {
+    reject_top_level_plugin_ui_navigation(&headers)?;
     let version = version.strip_prefix('v')
         .ok_or_else(|| CompassError::Validation("invalid UI release path".into()))?;
     serve_plugin_asset(&state, &headers, ns, slug, asset, Some(version)).await
@@ -2101,9 +2621,14 @@ async fn serve_plugin_ui_asset(
     Query(selection): Query<UiAssetSelection>,
     uri: Uri,
 ) -> ApiResult<Response> {
+    reject_top_level_plugin_ui_navigation(&headers)?;
     if let Some(hub) = &state.hub_client {
-        return Ok(hub.proxy_raw(reqwest::Method::GET,
-            uri.path_and_query().map_or(uri.path(), |pq| pq.as_str()), &headers, Vec::new()).await?);
+        let mut resp = hub.proxy_raw(reqwest::Method::GET,
+            uri.path_and_query().map_or(uri.path(), |pq| pq.as_str()), &headers, Vec::new()).await?;
+        if resp.status().is_success() {
+            apply_plugin_ui_sandbox_headers(&mut resp);
+        }
+        return Ok(resp);
     }
     serve_plugin_asset(&state, &headers, ns, slug, asset, selection.version.as_deref()).await
 }
@@ -2112,6 +2637,7 @@ async fn serve_plugin_asset(
     state: &AppState, headers: &HeaderMap, ns: String, slug: String,
     asset_path: String, version: Option<&str>,
 ) -> ApiResult<Response> {
+    reject_top_level_plugin_ui_navigation(headers)?;
     let requested = asset_path.trim_start_matches('/');
     let rel = if requested.is_empty() {
         "index.html"
@@ -2123,7 +2649,11 @@ async fn serve_plugin_asset(
     biocompass_core_traits::validate_requested_plugin_version(version)?;
     if let (Some(version), Some(hub)) = (version, state.hub_client.as_ref()) {
         // The hub authorizes the exact version and returns a release-scoped redirect.
-        return Ok(hub.proxy_raw(reqwest::Method::GET, &pinned_ui_path(&plugin_id, version, rel), headers, Vec::new()).await?);
+        let mut resp = hub.proxy_raw(reqwest::Method::GET, &pinned_ui_path(&plugin_id, version, rel), headers, Vec::new()).await?;
+        if resp.status().is_success() {
+            apply_plugin_ui_sandbox_headers(&mut resp);
+        }
+        return Ok(resp);
     }
     let plugin = state.registry.get_plugin_version(&plugin_id, version).await?;
     let ui_spec = plugin.manifest.ui.as_ref().ok_or_else(|| {
@@ -2167,17 +2697,25 @@ async fn serve_plugin_asset(
     if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
         resp.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
-    resp.headers_mut().insert(
+    apply_plugin_ui_sandbox_headers(&mut resp);
+    Ok(resp)
+}
+
+fn apply_plugin_icon_headers(resp: &mut Response) {
+    let headers = resp.headers_mut();
+    headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(PLUGIN_SANDBOX_CSP),
+        HeaderValue::from_static(PLUGIN_ICON_CSP),
     );
-    resp.headers_mut().insert(
+    headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    resp.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(resp)
+    headers.insert(
+        axum::http::HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
 }
 
 async fn serve_plugin_icon(
@@ -2192,21 +2730,32 @@ async fn serve_plugin_icon(
     {
         let bytes = std::fs::read(&target)
             .map_err(|e| CompassError::Storage(format!("read plugin icon: {e}")))?;
-        let mime = mime_guess::from_path(&target).first_or_octet_stream();
-        let mut resp = (StatusCode::OK, bytes).into_response();
-        if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
-            resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+        let is_svg = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        if is_svg {
+            validate_safe_svg_icon(&bytes)?;
         }
-        resp.headers_mut().insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(PLUGIN_ICON_CSP),
-        );
-        resp.headers_mut().insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
+        let mime = if is_svg {
+            "image/svg+xml"
+        } else {
+            match target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("png") => "image/png",
+                Some("webp") => "image/webp",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                _ => "application/octet-stream",
+            }
+        };
+        let mut resp = (StatusCode::OK, bytes).into_response();
         resp.headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+        apply_plugin_icon_headers(&mut resp);
         return Ok(resp);
     }
     if let Some(hub) = &state.hub_client {
@@ -2218,14 +2767,23 @@ async fn serve_plugin_icon(
                 Vec::new(),
             )
             .await?;
-        resp.headers_mut().insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(PLUGIN_ICON_CSP),
-        );
-        resp.headers_mut().insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
+        if resp.status().is_success() {
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ct.starts_with("image/svg") {
+                let (parts, body) = resp.into_parts();
+                let bytes = axum::body::to_bytes(body, 256 * 1024 + 1)
+                    .await
+                    .map_err(|e| CompassError::Storage(format!("read proxied icon: {e}")))?;
+                validate_safe_svg_icon(&bytes)?;
+                resp = Response::from_parts(parts, axum::body::Body::from(bytes));
+            }
+            apply_plugin_icon_headers(&mut resp);
+        }
         return Ok(resp);
     }
     if plugin_opt.is_none() {
@@ -2738,6 +3296,7 @@ struct ImportLocalCatalogQuery {
 
 async fn import_local_catalog_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ImportLocalCatalogQuery>,
     body: Bytes,
 ) -> ApiResult<Response> {
@@ -2747,6 +3306,10 @@ async fn import_local_catalog_handler(
                 .into(),
         )
         .into());
+    }
+    crate::native_import::operator::authorize(&state, &headers)?;
+    if let Err(resp) = require_non_simple_upload_content_type(&headers) {
+        return Ok(*resp);
     }
     if body.is_empty() {
         return Err(CompassError::Validation("uploaded file body cannot be empty".into()).into());
@@ -3169,5 +3732,1183 @@ mod sec_06_tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), svg_bytes);
+    }
+
+    async fn redeem_test_owner_session(app: &Router, link: &str, host: &str) -> String {
+        let ticket = link
+            .trim()
+            .split_once("#local-owner=")
+            .expect("owner link ticket")
+            .1;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/local/owner-session")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "ticket": ticket }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 16_384).await.unwrap();
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        val["owner_session"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn sec_16_enforces_loopback_host_origin_owner_token_content_type_and_open_ide_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:18422".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18422";
+        let app = build_router(state.clone());
+        let owner_token = redeem_test_owner_session(&app, &link, host).await;
+
+        // 1. DNS rebinding: non-loopback Host header MUST be rejected (403) even on GET!
+        let rebind_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/health")
+                    .header(header::HOST, "rebind.attacker.tld:18422")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rebind_resp.status(), StatusCode::FORBIDDEN);
+
+        // 2. Cross-origin / cross-site simple POST CSRF MUST be rejected (403).
+        let csrf_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/runs/run-1/confirm")
+                    .header(header::HOST, host)
+                    .header(header::ORIGIN, "https://evil.example")
+                    .header("sec-fetch-site", "cross-site")
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("pwn"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(csrf_resp.status(), StatusCode::FORBIDDEN);
+
+        // 3. Non-JSON Content-Type on Option<Json<_>> / Bytes mutating endpoints MUST return 415.
+        let confirm_ct_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/runs/run-1/confirm")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirm_ct_resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let install_ct_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/alithea/hla-motif-enrichment/install")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(install_ct_resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let import_ct_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/catalogs/import-local?filename=a.csv&format=csv&mode=replace&target_catalog_id=local/t")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("a,b\n1,2\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(import_ct_resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // 4. Missing x-biocompass-local-owner MUST fail with 401 on llm/config, llm/test, open-ide,
+        //    scaffold, install, import-local, and rollback!
+        for (method, uri, ct, body) in [
+            (
+                Method::PUT,
+                "/api/v1/llm/config",
+                "application/json",
+                r#"{"protocol":"acp_stdio","command":"/bin/sh","args":["-c","id"]}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/llm/test",
+                "application/json",
+                r#"{"protocol":"acp_stdio","command":"/bin/sh","args":["-c","id"]}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/plugins/open-ide",
+                "application/json",
+                r#"{"directory":"/tmp","custom_command":"/bin/sh"}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/plugins/scaffold",
+                "application/json",
+                r#"{"template":"python-uv","plugin_id":"local/demo","display_name":"Demo"}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/plugins/alithea/hla-motif-enrichment/install",
+                "application/json",
+                "{}",
+            ),
+            (
+                Method::POST,
+                "/api/v1/catalogs/import-local?filename=a.csv&format=csv&mode=replace&target_catalog_id=local/t",
+                "application/octet-stream",
+                "a,b\n1,2\n",
+            ),
+            (
+                Method::POST,
+                "/api/v1/catalogs/alithea/hla-atlas-v2026.1/rollback",
+                "application/json",
+                r#"{"target_snapshot_id":1}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .header(header::HOST, host)
+                        .header(header::CONTENT_TYPE, ct)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "SEC-16: {method} {uri} must require x-biocompass-local-owner"
+            );
+        }
+
+        // 5. Even WITH valid owner token, arbitrary shell commands in llm/config & open-ide are blocked!
+        let shell_llm_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/llm/config")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"protocol":"acp_stdio","command":"/bin/sh","args":["-c","id"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shell_llm_resp.status(), StatusCode::BAD_REQUEST);
+
+        let mod_dir = state.user_plugins_dir.join("ide-probe");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        let shell_ide_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/open-ide")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "directory": mod_dir.to_string_lossy(),
+                            "custom_command": "/bin/sh",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                shell_ide_resp.status(),
+                StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN
+            ),
+            "SEC-16: open-ide must reject /bin/sh, got {}",
+            shell_ide_resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn sec_17_enforces_sandbox_csp_blocks_top_level_document_nav_and_rejects_script_svg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+
+        // Register a plugin with UI + malicious SVG icon and another with clean SVG icon.
+        let mod_dir = tmp.path().join("ui-sec17");
+        std::fs::create_dir_all(mod_dir.join("ui/dist")).unwrap();
+        std::fs::write(
+            mod_dir.join("ui/dist/index.html"),
+            "<!doctype html><html><body>hi</body></html>",
+        )
+        .unwrap();
+        std::fs::write(
+            mod_dir.join("evil.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"alert(1)\"><script>alert(2)</script></svg>",
+        )
+        .unwrap();
+        let evil_manifest = PluginManifest::from_toml_unvalidated(&format!(
+            "id = \"fixture/sec17-evil\"\nname = \"Evil\"\nversion = \"1.0.0\"\nicon = \"evil.svg\"\nimage = \"127.0.0.1:5500/fixture/sec17-evil@sha256:{}\"\n[ui]\nentry = \"ui/dist/index.html\"\n",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        state
+            .local_runtime
+            .as_ref()
+            .unwrap()
+            .register_plugin(LoadedPlugin {
+                manifest: evil_manifest,
+                skill: None,
+                root_dir: Some(mod_dir.clone()),
+            })
+            .await
+            .unwrap();
+
+        let good_dir = tmp.path().join("ui-sec17-good");
+        std::fs::create_dir_all(&good_dir).unwrap();
+        std::fs::write(
+            good_dir.join("icon.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><rect width=\"16\" height=\"16\" fill=\"#000\"/></svg>",
+        )
+        .unwrap();
+        let good_manifest = PluginManifest::from_toml_unvalidated(&format!(
+            "id = \"fixture/sec17-good\"\nname = \"Good\"\nversion = \"1.0.0\"\nicon = \"icon.svg\"\nimage = \"127.0.0.1:5500/fixture/sec17-good@sha256:{}\"\n",
+            "b".repeat(64)
+        ))
+        .unwrap();
+        state
+            .local_runtime
+            .as_ref()
+            .unwrap()
+            .register_plugin(LoadedPlugin {
+                manifest: good_manifest,
+                skill: None,
+                root_dir: Some(good_dir),
+            })
+            .await
+            .unwrap();
+
+        let app = build_router(state);
+
+        // 1. Iframe request to /plugin-ui/* gets strict sandbox CSP + ACAO: *.
+        let iframe_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-ui/fixture/sec17-evil/index.html")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(iframe_resp.status(), StatusCode::OK);
+        let csp = iframe_resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(csp.contains("sandbox allow-scripts"));
+        assert!(csp.contains("base-uri 'none'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert_eq!(
+            iframe_resp
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+
+        // 2. Direct top-level document navigation to /plugin-ui* and /plugin-ui-access/* MUST be 403!
+        for uri in [
+            "/plugin-ui/fixture/sec17-evil/index.html",
+            "/plugin-ui-version/fixture/sec17-evil/v1.0.0/index.html",
+            "/plugin-ui-access/fake-ticket/index.html",
+        ] {
+            let nav_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("sec-fetch-dest", "document")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                nav_resp.status(),
+                StatusCode::FORBIDDEN,
+                "SEC-17: top-level Sec-Fetch-Dest: document must be rejected on {uri}"
+            );
+        }
+
+        // 3. Script-bearing SVG icon MUST be rejected on serve (400).
+        let evil_icon_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/fixture/sec17-evil")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(evil_icon_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 4. Clean SVG icon served with sandbox CSP + nosniff + CORP: same-origin.
+        let good_icon_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/fixture/sec17-good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(good_icon_resp.status(), StatusCode::OK);
+        assert_eq!(
+            good_icon_resp
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some("default-src 'none'; sandbox")
+        );
+        assert_eq!(
+            good_icon_resp
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            good_icon_resp
+                .headers()
+                .get("cross-origin-resource-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+    }
+
+    #[tokio::test]
+    async fn sec_18_run_artifacts_served_with_sandbox_csp_nosniff_and_attachment_disposition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let run_id = RunId::from("run-sec18-html");
+        let blob_key = "runs/run-sec18-html/artifacts/report.html";
+        let html = b"<html><body><script>alert('xss')</script></body></html>";
+        let sha = state.blob_store.put_bytes(blob_key, html).await.unwrap();
+        let now = chrono::Utc::now();
+        let run = biocompass_core_traits::RunRecord {
+            run_id: run_id.clone(),
+            org_id: state.default_org_id.clone(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/hla-motif-enrichment").unwrap(),
+            plugin_version: "2.0.0".into(),
+            status: biocompass_core_traits::RunStatus::Succeeded,
+            admission: None,
+            params: json!({}),
+            grant: None,
+            quote: biocompass_core_traits::RunQuote {
+                run_id: run_id.clone(),
+                plugin_id: PluginId::new("alithea/hla-motif-enrichment").unwrap(),
+                plugin_version: "2.0.0".into(),
+                image_ref: format!("127.0.0.1:5500/alithea/test@sha256:{}", "a".repeat(64)),
+                target_node_id: biocompass_core_traits::NodeId::new("local").unwrap(),
+                offer_id: "standard".into(),
+                offer_name: "Standard".into(),
+                base_fee_act: CreditAmountAct::ZERO,
+                estimated_cost_act: CreditAmountAct::ZERO,
+                max_input_bytes: 1024,
+                max_output_bytes: 1024,
+                max_runtime_sec: 60,
+                max_memory_mb: 256,
+                workload_hash: "0".repeat(64),
+                dataset_grant_summary: None,
+                froglet_quote: json!({}),
+                expires_at: now,
+            },
+            result_json: Some(json!({})),
+            artifacts: vec![biocompass_core_traits::ArtifactRef {
+                name: "report.html".into(),
+                blob_key: blob_key.into(),
+                media_type: "text/html".into(),
+                size_bytes: html.len() as u64,
+                sha256: sha,
+            }],
+            froglet_receipt: None,
+            froglet_chain: Vec::new(),
+            receipt_verified: false,
+            logs: Vec::new(),
+            error_message: None,
+            created_at: now,
+            completed_at: Some(now),
+        };
+        state.session_store.save_run(&run).await.unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/runs/run-sec18-html/artifacts/report.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some("sandbox")
+        );
+        assert_eq!(
+            resp.headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        let cd = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cd.starts_with("attachment"), "expected attachment Content-Disposition, got {cd}");
+    }
+
+    #[tokio::test]
+    async fn sec_24_scaffold_plugin_http_returns_403_in_cloud_web_and_enforces_no_overwrite_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+
+        // 1. In CloudWeb mode, POST /api/v1/plugins/scaffold MUST return 403 FORBIDDEN!
+        let mut cloud_state = state.clone();
+        cloud_state.mode = DeploymentMode::CloudWeb;
+        let cloud_app = build_router(cloud_state);
+        let cloud_resp = cloud_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/scaffold")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"template":"python-uv","plugin_id":"alithea/cloud-pwn","display_name":"Pwn"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cloud_resp.status(), StatusCode::FORBIDDEN);
+        assert!(!state.user_plugins_dir.join("cloud-pwn").exists());
+
+        // 2. In Local mode with valid owner token, first scaffold succeeds, second overwrite returns 409 Conflict!
+        let addr: std::net::SocketAddr = "127.0.0.1:18423".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18423";
+        let local_app = build_router(state);
+        let owner_token = redeem_test_owner_session(&local_app, &link, host).await;
+
+        let req_body = json!({
+            "template": "python-uv",
+            "plugin_id": "alithea/sec24-mod",
+            "display_name": "Safe <script>alert(1)</script> Mod",
+            "include_vite_ui": true
+        })
+        .to_string();
+        let first = local_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/scaffold")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(req_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = local_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/scaffold")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(req_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+}
+
+#[cfg(test)]
+mod milestone_b_tests {
+    use super::*;
+    use crate::cloud_client::CompassHubConfig;
+    use crate::marketplace::{
+        MarketplaceConfig, MarketplaceConsentDecision, MarketplaceSyncState,
+    };
+    use axum::body::Body;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    async fn redeem_owner(app: &Router, link: &str, host: &str) -> String {
+        let ticket = link
+            .split_once("#local-owner=")
+            .expect("owner link fragment")
+            .1
+            .trim();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/local/owner-session")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "ticket": ticket }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        parsed["owner_session"].as_str().unwrap().to_owned()
+    }
+
+    async fn spawn_counting_marketplace_hub() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_feed = Arc::clone(&hits);
+        let hits_art = Arc::clone(&hits);
+        let hits_reg = Arc::clone(&hits);
+
+        let router = Router::new()
+            .route(
+                "/api/v1/health",
+                get(|| async {
+                    Json(json!({
+                        "node_id": "hub-test-node",
+                        "provider_id": "provider-alithea",
+                        "requester_id": "requester-cloud-web",
+                        "container_engine": "mock-hub-engine"
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/grants",
+                get(|| async { Json(json!({ "grants": [] })) }),
+            )
+            .route(
+                "/api/v1/runs/prepare",
+                post(|| async {
+                    let now = chrono::Utc::now();
+                    Json(json!({
+                        "run_id": "run-a2-provider-edge",
+                        "plugin_id": "partner-bio/motif-pro",
+                        "plugin_version": "1.2.0",
+                        "image_ref": format!("ghcr.io/partner/motif-pro@sha256:{}", "b".repeat(64)),
+                        "target_node_id": "provider-edge-zurich-01",
+                        "offer_id": "standard",
+                        "offer_name": "Standard Provider Run",
+                        "base_fee_act": 1000,
+                        "estimated_cost_act": 2500,
+                        "max_input_bytes": 1048576,
+                        "max_output_bytes": 1048576,
+                        "max_runtime_sec": 300,
+                        "max_memory_mb": 2048,
+                        "workload_hash": "c".repeat(64),
+                        "dataset_grant_summary": null,
+                        "froglet_quote": { "schema": "froglet/v1", "type": "quote" },
+                        "expires_at": now,
+                        "serving_org_id": "org-zurich-proteomics",
+                        "external_provider_org": "Zurich Proteomics AG",
+                        "external_provider_notice": "Your run parameters and uploaded files will execute on an external provider-edge node operated by Zurich Proteomics AG."
+                    }))
+                }),
+            )
+            .route(
+                "/v1/feed",
+                get(move |uri: Uri| {
+                    let hits = Arc::clone(&hits_feed);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [(header::ETAG, "\"feed-v1\""), (header::CACHE_CONTROL, "public, max-age=60")],
+                            Json(json!({
+                                "query": uri.query().unwrap_or(""),
+                                "artifacts": [
+                                    {
+                                        "cursor": 1,
+                                        "artifact_hash": "hash-desc-1",
+                                        "payload_hash": "ph-desc-1",
+                                        "artifact_kind": "descriptor",
+                                        "actor_id": "provider-alithea",
+                                        "created_at": 1760000000,
+                                        "document": { "hash": "hash-desc-1", "signer": "aaaa", "payload": {} }
+                                    },
+                                    {
+                                        "cursor": 2,
+                                        "artifact_hash": "hash-offer-1",
+                                        "payload_hash": "ph-1",
+                                        "artifact_kind": "offer",
+                                        "actor_id": "provider-alithea",
+                                        "created_at": 1760000001,
+                                        "document": {
+                                            "hash": "hash-offer-1",
+                                            "signer": "aaaa",
+                                            "payload": {
+                                                "provider_id": "provider-alithea",
+                                                "offer_id": "mo-1",
+                                                "offer_kind": "biocompass.module.run.v1",
+                                                "execution_profile": {
+                                                    "access_handles": ["alithea/hla-motif-enrichment@2.0.0"]
+                                                }
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "cursor": 3,
+                                        "artifact_hash": "hash-offer-2",
+                                        "payload_hash": "ph-2",
+                                        "artifact_kind": "offer",
+                                        "actor_id": "provider-partner",
+                                        "created_at": 1760000002,
+                                        "document": {
+                                            "hash": "hash-offer-2",
+                                            "signer": "bbbb",
+                                            "payload": {
+                                                "provider_id": "provider-partner",
+                                                "offer_id": "do-2",
+                                                "offer_kind": "dataset.ducklake.v1",
+                                                "execution_profile": {
+                                                    "access_handles": ["alithea/hla-atlas-v2026.1"]
+                                                }
+                                            }
+                                        }
+                                    }
+                                ],
+                                "active_offer_hashes": ["hash-offer-1", "hash-offer-2"],
+                                "has_more": false,
+                                "next_cursor": 3
+                            })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/artifacts/:hash",
+                get(move |AxumPath(hash): AxumPath<String>| {
+                    let hits = Arc::clone(&hits_art);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [
+                                (header::CONTENT_TYPE, "application/octet-stream"),
+                                (header::HeaderName::from_static("x-content-sha256"), "deadbeef"),
+                            ],
+                            format!("artifact-bytes:{hash}"),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/registrations",
+                post(move |body: Bytes| {
+                    let hits = Arc::clone(&hits_reg);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        (
+                            StatusCode::CREATED,
+                            [(header::RETRY_AFTER, "5")],
+                            Json(json!({
+                                "status": "pending",
+                                "received": parsed
+                            })),
+                        )
+                    }
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn a1_http_fresh_local_zero_outbound_before_consent_and_persists_decline() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_url.clone(),
+            explicit_hub_url: None,
+            airgapped: false,
+        };
+        let mut state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:18491".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18491";
+        let app = build_router(state);
+        let owner_token = redeem_owner(&app, &link, host).await;
+
+        // 1. Fresh local directory: health + status + plugins make ZERO outbound requests.
+        for uri in ["/api/v1/health", "/api/v1/marketplace/status", "/api/v1/plugins"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).header(header::HOST, host).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "fresh boot must make zero outbound marketplace calls");
+
+        // 2. Sync before consent is rejected (403) with zero outbound traffic.
+        let pre_sync = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/marketplace/sync")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pre_sync.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 3. Unauthenticated consent update is rejected (401).
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 4. Decline persists across restart with ZERO outbound requests.
+        let decline = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"declined"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decline.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // Restart AppState on same data_dir.
+        let mut restarted_state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg,
+        )
+        .await
+        .unwrap();
+        let link2 = restarted_state.enable_local_owner(addr).unwrap().unwrap();
+        let app2 = build_router(restarted_state);
+        let owner_token2 = redeem_owner(&app2, &link2, host).await;
+
+        let status_resp = app2
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/marketplace/status")
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_bytes = axum::body::to_bytes(status_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let status_json: Value = serde_json::from_slice(&status_bytes).unwrap();
+        assert_eq!(status_json["prompt_required"], false);
+        assert_eq!(status_json["consent"], "declined");
+        assert_eq!(status_json["state"], "disconnected");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // 5. Explicit accept triggers sync and transitions to connected.
+        let accept = app2
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token2)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted","sync_now":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accept.status(), StatusCode::OK);
+        let accept_bytes = axum::body::to_bytes(accept.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let accept_json: Value = serde_json::from_slice(&accept_bytes).unwrap();
+        assert_eq!(accept_json["state"], "connected");
+        assert_eq!(accept_json["consent"], "accepted");
+        assert_eq!(accept_json["feed_offer_count"], 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a1_http_airgapped_suppresses_prompt_and_blocks_all_outbound_calls() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_url.clone(),
+            explicit_hub_url: Some(hub_url),
+            airgapped: true,
+        };
+        let mut state = AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            cfg,
+        )
+        .await
+        .unwrap();
+        let addr: std::net::SocketAddr = "127.0.0.1:18492".parse().unwrap();
+        let link = state.enable_local_owner(addr).unwrap().unwrap();
+        let host = "127.0.0.1:18492";
+        let app = build_router(state);
+        let owner_token = redeem_owner(&app, &link, host).await;
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        let health_json: Value =
+            serde_json::from_slice(&axum::body::to_bytes(health.into_body(), 1024 * 64).await.unwrap())
+                .unwrap();
+        assert_eq!(health_json["marketplace_prompt_required"], false);
+        assert_eq!(health_json["marketplace_status"]["state"], "air-gapped");
+        assert_eq!(health_json["marketplace_status"]["airgapped"], true);
+
+        let consent = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/marketplace/consent")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"decision":"accepted"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(consent.status(), StatusCode::FORBIDDEN);
+
+        let sync = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/marketplace/sync")
+                    .header(header::HOST, host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sync.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "air-gapped mode must never contact marketplace");
+    }
+
+    #[tokio::test]
+    async fn a2_and_b1_cloud_web_preserves_external_provider_consent_and_proxies_public_marketplace() {
+        let (hub_url, hits) = spawn_counting_marketplace_hub().await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let (hub_client, default_org_id, engine_label) = CompassHubClient::connect(
+            CompassHubConfig {
+                base_url: hub_url.clone(),
+                bundled_plugins_dir: tmp.path().join("bundled"),
+            },
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let hub = Arc::new(hub_client);
+
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        // Verify local mode returns 404 for public /v1/feed.
+        let local_app = build_router(state.clone());
+        let local_feed = local_app
+            .oneshot(Request::builder().uri("/v1/feed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(local_feed.status(), StatusCode::NOT_FOUND);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // Switch state into CloudWeb backed by our mock hub.
+        state.mode = DeploymentMode::CloudWeb;
+        state.default_org_id = default_org_id;
+        state.container_engine_label = engine_label;
+        state.hub_client = Some(Arc::clone(&hub));
+        state.registry = hub.clone();
+        state.dispatcher = hub.clone();
+        state.session_store = hub.clone();
+        state.blob_store = hub.clone();
+        state.payment_gateway = hub;
+        state.marketplace = Arc::new(
+            crate::marketplace::MarketplaceClient::new(
+                tmp.path(),
+                MarketplaceConfig {
+                    mode: DeploymentMode::CloudWeb,
+                    default_hub_url: hub_url.clone(),
+                    explicit_hub_url: Some(hub_url),
+                    airgapped: false,
+                },
+            )
+            .unwrap(),
+        );
+        let cloud_app = build_router(state);
+
+        // [A2] POST /api/v1/runs/prepare preserves serving_org_id, external_provider_org, external_provider_notice.
+        let prep_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/runs/prepare")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "plugin_id": "partner-bio/motif-pro",
+                            "plugin_version": "1.2.0",
+                            "offer_id": "standard",
+                            "params": { "alpha": 1 }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prep_resp.status(), StatusCode::OK);
+        let prep_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(prep_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prep_json["target_node_id"], "provider-edge-zurich-01");
+        assert_eq!(prep_json["serving_org_id"], "org-zurich-proteomics");
+        assert_eq!(prep_json["external_provider_org"], "Zurich Proteomics AG");
+        assert!(
+            prep_json["external_provider_notice"]
+                .as_str()
+                .is_some_and(|s| s.contains("Zurich Proteomics AG"))
+        );
+
+        // [B1] GET /v1/feed proxied with query & headers.
+        let feed_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/feed?kind=run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(feed_resp.status(), StatusCode::OK);
+        assert_eq!(
+            feed_resp.headers().get(header::ETAG).and_then(|v| v.to_str().ok()),
+            Some("\"feed-v1\"")
+        );
+        let feed_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(feed_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(feed_json["query"], "kind=run");
+        assert_eq!(feed_json["artifacts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(feed_json["active_offer_hashes"].as_array().map(Vec::len), Some(2));
+
+        // [B1] GET /v1/artifacts/:hash proxied with digest header; traversal rejected.
+        let art_resp = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/artifacts/sha256:0123456789abcdef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(art_resp.status(), StatusCode::OK);
+        assert_eq!(
+            art_resp
+                .headers()
+                .get("x-content-sha256")
+                .and_then(|v| v.to_str().ok()),
+            Some("deadbeef")
+        );
+        let art_body = axum::body::to_bytes(art_resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        assert_eq!(&art_body[..], b"artifact-bytes:sha256:0123456789abcdef");
+
+        let bad_art = cloud_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/artifacts/bad..hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_art.status(), StatusCode::BAD_REQUEST);
+
+        // [B1] POST /v1/registrations proxied with body & status.
+        let reg_resp = cloud_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/registrations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"peer_url":"https://client.hospital.org"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg_resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            reg_resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("5")
+        );
+        let reg_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(reg_resp.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reg_json["status"], "pending");
+        assert_eq!(reg_json["received"]["peer_url"], "https://client.hospital.org");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+        // Confirm status enum serialization strings match DEV-07 UI contract.
+        assert_eq!(
+            serde_json::to_string(&MarketplaceSyncState::AirGapped).unwrap(),
+            "\"air-gapped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MarketplaceConsentDecision::Accepted).unwrap(),
+            "\"accepted\""
+        );
     }
 }

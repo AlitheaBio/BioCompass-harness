@@ -1,18 +1,23 @@
 import { ConfirmTierChange } from "./ConfirmTierChange";
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  approveAdminFederationPeer,
   approveCuratedModule,
   creditOrgInvoice,
   enrollNode,
+  fetchAdminFederationPeers,
   fetchAdminPluginVersions,
   fetchAdminTiers,
   fetchCuratedModuleApprovals,
   fetchEnumerationMonitor,
   fetchNodes,
   formatErrorInline,
-   reviewAdminPluginVisibility,
+  rejectAdminFederationPeer,
+  reviewAdminPluginVisibility,
   revokeCuratedModule,
   revokeNode,
+  suspendAdminFederationPeer,
+  syncAdminFederationPeer,
   updateAdminTier,
 } from "../api";
 import {
@@ -21,6 +26,7 @@ import {
   type CreatedNodeEnrollment,
   type CuratedModuleApprovalRecord,
   type EnumerationMonitorEntry,
+  type FederationPeerRecord,
   type NodeMode,
   type NodeSummaryRecord,
   type PluginVersionRecord,
@@ -46,6 +52,7 @@ type ControlTowerTab =
   | "curated"
   | "plugins"
   | "nodes"
+  | "federation"
   | "billing"
   | "monitor";
 
@@ -67,6 +74,7 @@ export function ControlTowerView({
   const [pluginVisFilter, setPluginVisFilter] = useState<string>("all");
   const [approveAsCurated, setApproveAsCurated] = useState<boolean>(true);
   const [nodes, setNodes] = useState<NodeSummaryRecord[]>([]);
+  const [federationPeers, setFederationPeers] = useState<FederationPeerRecord[]>([]);
   const [enumEntries, setEnumEntries] = useState<EnumerationMonitorEntry[]>([]);
   const [enumThreshold, setEnumThreshold] = useState<number>(30);
 
@@ -113,6 +121,7 @@ export function ControlTowerView({
       loadSection("curated", fetchCuratedModuleApprovals(), setCuratedApprovals),
       loadSection("plugins", fetchAdminPluginVersions(), setPluginVersions),
       loadSection("nodes", fetchNodes(), setNodes),
+      loadSection("federation", fetchAdminFederationPeers(), setFederationPeers),
       loadSection("monitor", fetchEnumerationMonitor(enumThreshold), data => setEnumEntries(data.entries)),
     ]);
     setLoadErrors(errors);
@@ -244,7 +253,8 @@ export function ControlTowerView({
       const res = await enrollNode({
         node_id: newNodeId.trim(),
         mode: newNodeMode,
-        ...(newNodeMode === "hospital-edge" && newNodeOrgId.trim()
+        ...((newNodeMode === "provider-edge" || newNodeMode === "hospital-edge") &&
+        newNodeOrgId.trim()
           ? { org_id: newNodeOrgId.trim() }
           : {}),
         provider_pubkey:
@@ -268,6 +278,37 @@ export function ControlTowerView({
     try {
       await revokeNode(nodeId);
       setStatusMsg(`Revoked worker node ${nodeId}.`);
+      await loadAll();
+    } catch (err: unknown) {
+      setError(formatErrorInline(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleFederationAction = async (
+    peer: FederationPeerRecord,
+    action: "approve" | "reject" | "suspend" | "sync",
+  ) => {
+    setBusy(true);
+    setError(null);
+    setStatusMsg(null);
+    try {
+      if (action === "approve") {
+        const updated = await approveAdminFederationPeer(peer.id);
+        setStatusMsg(`Approved federation peer ${updated.org_name || updated.label} (${updated.id}).`);
+      } else if (action === "reject") {
+        const updated = await rejectAdminFederationPeer(peer.id);
+        setStatusMsg(`Rejected federation peer ${updated.org_name || updated.label} (${updated.id}).`);
+      } else if (action === "suspend") {
+        const updated = await suspendAdminFederationPeer(peer.id);
+        setStatusMsg(`Suspended federation peer ${updated.org_name || updated.label} (${updated.id}).`);
+      } else {
+        const res = await syncAdminFederationPeer(peer.id);
+        setStatusMsg(
+          `Synced federation peer ${res.peer.org_name || res.peer.label}: ${res.synced_offers} offer(s).`,
+        );
+      }
       await loadAll();
     } catch (err: unknown) {
       setError(formatErrorInline(err));
@@ -305,12 +346,21 @@ export function ControlTowerView({
       ? pluginVersions
       : pluginVersions.filter((p) => p.visibility === pluginVisFilter);
 
+  const pendingFederationCount = federationPeers.filter((p) => p.status === "pending").length;
+
   const navTabs: { id: ControlTowerTab; label: string }[] = [
     { id: "tiers", label: `Tier Definitions (${tiers.length})` },
     { id: "org-tier", label: "Organization tiers" },
     { id: "curated", label: `Curated Digests (${curatedApprovals.length})` },
     { id: "plugins", label: `Plugin Review (${pluginVersions.length})` },
     { id: "nodes", label: `Worker Fleet (${nodes.length})` },
+    {
+      id: "federation",
+      label:
+        pendingFederationCount > 0
+          ? `Federation Peers (${federationPeers.length} · ${pendingFederationCount} pending)`
+          : `Federation Peers (${federationPeers.length})`,
+    },
     { id: "billing", label: "Invoice ACT Credits" },
     { id: "monitor", label: `Enumeration Monitor (${enumEntries.length})` },
   ];
@@ -828,7 +878,9 @@ export function ControlTowerView({
           <div className="bc-settings-stack">
             <div className="bc-card">
               <div className="bc-card-header">
-                <span className="bc-card-title">Enroll Cloud-Pool or Hospital-Edge Node</span>
+                <span className="bc-card-title">
+                  Enroll Cloud-Pool, Query-Provider, or Provider-Edge Node
+                </span>
               </div>
               <form
                 onSubmit={(e) => void handleEnrollFleetNode(e)}
@@ -851,23 +903,27 @@ export function ControlTowerView({
                 <label className="bc-field">
                   <span className="bc-field-label">Mode</span>
                   <select
+                    data-testid="ct-enroll-node-mode"
                     className="bc-input mono"
                     value={newNodeMode}
                     onChange={(e) => setNewNodeMode(e.target.value as NodeMode)}
                   >
                     <option value="cloud-pool">cloud-pool</option>
-                    <option value="hospital-edge">hospital-edge</option>
+                    <option value="provider-edge">provider-edge</option>
+                    <option value="query-provider">query-provider</option>
+                    <option value="hospital-edge">hospital-edge (legacy alias)</option>
                   </select>
                 </label>
 
-                {newNodeMode === "hospital-edge" && (
+                {(newNodeMode === "provider-edge" || newNodeMode === "hospital-edge") && (
                   <label className="bc-field">
                     <span className="bc-field-label">Owner Org ID</span>
                     <input
                       type="text"
                       required
+                      data-testid="ct-enroll-node-org-id"
                       className="bc-input mono"
-                      placeholder="hospital-zurich"
+                      placeholder="org-zurich-proteomics"
                       value={newNodeOrgId}
                       onChange={(e) => setNewNodeOrgId(e.target.value)}
                     />
@@ -981,6 +1037,144 @@ export function ControlTowerView({
                 </table>
               </div>
             </div>
+          </div>
+        )}
+
+        {tab === "federation" && (
+          <div className="bc-card" data-testid="ct-federation-peers-panel">
+            <div className="bc-card-header" style={{ marginBottom: 10 }}>
+              <div>
+                <span className="bc-card-title">
+                  Federation Peers ({federationPeers.length})
+                </span>
+                <p className="bc-caption" style={{ marginTop: 2 }}>
+                  Client Cloud hubs register as <code className="mono">pending</code> with BIP340
+                  proof-of-possession and require Platform Administrator approval before exchanging
+                  federated offers or tokens.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="bc-btn bc-btn-sm"
+                disabled={busy}
+                onClick={() => void loadAll()}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {federationPeers.length === 0 ? (
+              <div className="bc-empty-note">No federation peers registered yet.</div>
+            ) : (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Organization / Label</th>
+                      <th>Peer URL</th>
+                      <th>Pubkey</th>
+                      <th>Status</th>
+                      <th>Last Sync</th>
+                      <th style={{ textAlign: "right" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {federationPeers.map((peer) => {
+                      const badgeClass =
+                        peer.status === "approved"
+                          ? "bc-badge-success"
+                          : peer.status === "pending"
+                            ? "bc-badge-warn"
+                            : "bc-badge-danger";
+                      return (
+                        <tr key={peer.id} data-testid={`federation-peer-row-${peer.id}`}>
+                          <td>
+                            <div style={{ fontWeight: 500 }}>
+                              {peer.org_name || peer.label || peer.id}
+                            </div>
+                            <div className="bc-caption mono">
+                              {peer.id} · {peer.role}
+                            </div>
+                          </td>
+                          <td className="mono bc-caption">
+                            <div>{peer.peer_url || peer.origin}</div>
+                            {peer.last_error && (
+                              <div style={{ color: "var(--bc-danger)", marginTop: 2 }}>
+                                {peer.last_error}
+                              </div>
+                            )}
+                          </td>
+                          <td className="mono bc-caption">
+                            {peer.peer_pubkey ? `${peer.peer_pubkey.slice(0, 16)}…` : "—"}
+                          </td>
+                          <td>
+                            <span
+                              className={`bc-badge ${badgeClass}`}
+                              data-testid={`federation-peer-status-${peer.id}`}
+                            >
+                              {peer.status}
+                            </span>
+                          </td>
+                          <td className="mono bc-caption">
+                            {peer.last_sync_at
+                              ? new Date(peer.last_sync_at).toLocaleString()
+                              : "Never"}
+                          </td>
+                          <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                            <div style={{ display: "inline-flex", gap: 6 }}>
+                              {peer.status !== "approved" && (
+                                <button
+                                  type="button"
+                                  data-testid={`federation-approve-${peer.id}`}
+                                  className="bc-btn bc-btn-primary bc-btn-sm"
+                                  disabled={busy}
+                                  onClick={() => void handleFederationAction(peer, "approve")}
+                                >
+                                  Approve
+                                </button>
+                              )}
+                              {peer.status === "pending" && (
+                                <button
+                                  type="button"
+                                  data-testid={`federation-reject-${peer.id}`}
+                                  className="bc-btn bc-btn-sm"
+                                  disabled={busy}
+                                  onClick={() => void handleFederationAction(peer, "reject")}
+                                >
+                                  Reject
+                                </button>
+                              )}
+                              {peer.status === "approved" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    data-testid={`federation-sync-${peer.id}`}
+                                    className="bc-btn bc-btn-sm"
+                                    disabled={busy}
+                                    onClick={() => void handleFederationAction(peer, "sync")}
+                                  >
+                                    Sync
+                                  </button>
+                                  <button
+                                    type="button"
+                                    data-testid={`federation-suspend-${peer.id}`}
+                                    className="bc-btn bc-btn-sm"
+                                    disabled={busy}
+                                    onClick={() => void handleFederationAction(peer, "suspend")}
+                                  >
+                                    Suspend
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 

@@ -117,13 +117,55 @@ impl OperatorAccess {
         Ok(raw)
     }
 
+    fn is_allowed_loopback_host(&self, host: &str) -> bool {
+        if host == self.authority {
+            return true;
+        }
+        if let Some((_, port)) = self.authority.rsplit_once(':') {
+            return host == format!("localhost:{port}")
+                || host == format!("127.0.0.1:{port}")
+                || host == format!("[::1]:{port}");
+        }
+        false
+    }
+
+    fn is_allowed_loopback_origin(&self, origin: &str) -> bool {
+        let Some(rest) = origin.strip_prefix("http://") else {
+            return false;
+        };
+        if self.is_allowed_loopback_host(rest) {
+            return true;
+        }
+        // In dev mode, Vite serves on loopback :5173/:5174 and proxies API calls.
+        let env_dev_cors = std::env::var("BIOCOMPASS_DEV_CORS")
+            .ok()
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+        if env_dev_cors || cfg!(debug_assertions) {
+            for dev_port in [5173_u16, 5174_u16] {
+                if rest == format!("localhost:{dev_port}")
+                    || rest == format!("127.0.0.1:{dev_port}")
+                    || rest == format!("[::1]:{dev_port}")
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn check_origin(&self, headers: &HeaderMap) -> CompassResult<()> {
-        if headers.get(header::HOST).and_then(|h| h.to_str().ok()) != Some(self.authority.as_str())
-        {
+        let host_ok = headers
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|h| self.is_allowed_loopback_host(h));
+        if !host_ok {
             return Err(denied());
         }
         if let Some(origin) = headers.get(header::ORIGIN)
-            && origin.to_str().ok() != Some(&format!("http://{}", self.authority))
+            && !origin
+                .to_str()
+                .ok()
+                .is_some_and(|o| self.is_allowed_loopback_origin(o))
         {
             return Err(denied());
         }
@@ -136,7 +178,7 @@ impl OperatorAccess {
         Ok(())
     }
 
-    pub(super) fn check(&self, headers: &HeaderMap) -> CompassResult<()> {
+    pub(crate) fn check(&self, headers: &HeaderMap) -> CompassResult<()> {
         self.check_origin(headers)?;
         let token = headers
             .get(HEADER)
@@ -155,7 +197,7 @@ impl OperatorAccess {
     }
 }
 
-pub(super) fn authorize(state: &AppState, headers: &HeaderMap) -> CompassResult<()> {
+pub(crate) fn authorize(state: &AppState, headers: &HeaderMap) -> CompassResult<()> {
     state
         .local_owner
         .as_ref()

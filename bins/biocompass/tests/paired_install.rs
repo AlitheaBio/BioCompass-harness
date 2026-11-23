@@ -45,10 +45,31 @@ async fn missing_local_module_resolves_authorized_publication_order_and_pins_dig
     let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
         .await
         .unwrap();
+    let owner_addr: std::net::SocketAddr = "127.0.0.1:18450".parse().unwrap();
+    let owner_link = state.enable_local_owner(owner_addr).unwrap().unwrap();
     state.installed_workspace = Some(Arc::new(
         InstalledWorkspace::open(tmp.path(), &url).unwrap(),
     ));
     let app = build_router(state);
+    let ticket = owner_link.trim().split_once("#local-owner=").unwrap().1;
+    let redeem = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/local/owner-session")
+                .header("host", "127.0.0.1:18450")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "ticket": ticket }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let owner_session = serde_json::from_slice::<serde_json::Value>(
+        &axum::body::to_bytes(redeem.into_body(), 4096).await.unwrap(),
+    )
+    .unwrap()["owner_session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     for (path, body, signed_in, status) in [
         ("demo/arithmetic", "{}", false, StatusCode::UNAUTHORIZED),
         ("demo/arithmetic", "{}", true, StatusCode::CONFLICT),
@@ -61,6 +82,8 @@ async fn missing_local_module_resolves_authorized_publication_order_and_pins_dig
         ("demo/other", "{}", true, StatusCode::NOT_FOUND),
     ] {
         let mut request = Request::post(format!("/api/v1/plugins/{path}/install"))
+            .header("host", "127.0.0.1:18450")
+            .header("x-biocompass-local-owner", &owner_session)
             .header("content-type", "application/json");
         if signed_in {
             request = request.header("authorization", "Bearer qa-native-install");

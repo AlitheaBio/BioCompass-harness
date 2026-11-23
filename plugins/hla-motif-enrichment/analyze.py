@@ -4,21 +4,95 @@
 Contract:
   - Reads /in/params.json and /in/data/cohort.parquet (mounted read-only)
   - Writes /out/result.json and /out/artifacts/allele_binding_summary.csv
+  - Curated `compute_only` privacy boundary (SEC-20): emits ONLY aggregate cohort
+    counts, allele/organ statistics, and positional motif PWM frequencies (never raw
+    peptide rows, peptide IDs, or individual IUPAC sequences).
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import math
 import sys
+from collections import Counter
 from pathlib import Path
 import duckdb
 
+MIN_AGGREGATE_COHORT_SIZE = 5
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
-def main() -> int:
-    params_path = Path("/in/params.json")
-    cohort_path = Path("/in/data/cohort.parquet")
-    out_dir = Path("/out")
+
+def guard_csv_formula(value: object) -> object:
+    """Apply [R7] non-numeric CSV formula guard (SEC-30).
+
+    Prefixes strings starting with spreadsheet formula triggers (=, +, -, @, \\t, \\r)
+    with a leading single quote ONLY when the value does not parse as a finite number.
+    Signed numbers (-0.73, +3, -2e-4) and numeric types pass through byte-for-byte.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if not value.startswith(_FORMULA_PREFIXES):
+        return value
+    try:
+        parsed = float(value.strip())
+        if math.isfinite(parsed):
+            return value
+    except ValueError:
+        pass
+    return f"'{value}"
+
+
+def compute_motif_pwm(sequences: list[str], min_cohort: int = MIN_AGGREGATE_COHORT_SIZE) -> tuple[list[dict[str, object]], int | None]:
+    """Compute aggregate positional amino-acid frequencies for the modal peptide length.
+
+    Returns ([], None) if fewer than `min_cohort` valid IUPAC sequences share the modal
+    length, preventing single-row sequence reconstruction under `compute_only` (SEC-20).
+    """
+    valid = [
+        s.strip().upper()
+        for s in sequences
+        if isinstance(s, str) and len(s.strip()) >= 8 and s.strip() != "***" and s.strip().isalpha()
+    ]
+    if len(valid) < min_cohort:
+        return [], None
+    len_counts = Counter(len(s) for s in valid)
+    # Prefer 9-mers when >= min_cohort, else modal length with >= min_cohort.
+    modal_len: int | None = None
+    if len_counts.get(9, 0) >= min_cohort:
+        modal_len = 9
+    else:
+        for length, cnt in len_counts.most_common():
+            if cnt >= min_cohort:
+                modal_len = length
+                break
+    if modal_len is None:
+        return [], None
+
+    cohort = [s for s in valid if len(s) == modal_len]
+    n = len(cohort)
+    if n < min_cohort:
+        return [], None
+
+    pwm: list[dict[str, object]] = []
+    for pos in range(modal_len):
+        counts = Counter(seq[pos] for seq in cohort)
+        freqs = {aa: round(cnt / n, 4) for aa, cnt in sorted(counts.items())}
+        top_aa, top_cnt = counts.most_common(1)[0]
+        pwm.append(
+            {
+                "position": pos + 1,
+                "length": modal_len,
+                "cohort_size": n,
+                "top_residue": top_aa,
+                "top_frequency": round(top_cnt / n, 4),
+                "frequencies": freqs,
+            }
+        )
+    return pwm, modal_len
+
+
+def run_analysis(params_path: Path, cohort_path: Path, out_dir: Path) -> int:
     artifacts_dir = out_dir / "artifacts"
 
     if not params_path.is_file():
@@ -58,28 +132,27 @@ def main() -> int:
         SELECT
             COUNT(*) AS total_peptides,
             COUNT(*) FILTER (WHERE affinity_nm <= ?) AS strong_binders,
-             COALESCE(ROUND(MEDIAN(affinity_nm), 2), 0.0) AS median_affinity_nm,
-            BOOL_AND(sequence = '***') AS sequences_masked
-        FROM read_parquet('{cohort_path.as_posix()}')
+            COALESCE(ROUND(MEDIAN(affinity_nm), 2), 0.0) AS median_affinity_nm
+        FROM read_parquet(?)
         WHERE {base_filter}
         """,
-        [strong_binder_cutoff_nm, *bind_args],
+        [strong_binder_cutoff_nm, cohort_path.as_posix(), *bind_args],
     ).fetchone()
 
     total_peptides = int(summary_row[0] or 0)
     strong_binders = int(summary_row[1] or 0)
     median_affinity = float(summary_row[2] or 0.0)
-    sequences_masked = bool(summary_row[3]) if total_peptides > 0 else False
 
     length_rows = con.execute(
         f"""
         SELECT peptide_length, COUNT(*) AS n
-        FROM read_parquet('{cohort_path.as_posix()}')
+        FROM read_parquet(?)
         WHERE {base_filter}
         GROUP BY peptide_length
+        HAVING COUNT(*) >= ?
         ORDER BY peptide_length ASC
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args, MIN_AGGREGATE_COHORT_SIZE],
     ).fetchall()
 
     allele_rows = con.execute(
@@ -90,12 +163,13 @@ def main() -> int:
             COUNT(*) FILTER (WHERE affinity_nm <= ?) AS strong_n,
             ROUND(MEDIAN(affinity_nm), 2) AS median_nm,
             ROUND(AVG(ms_intensity_log2), 2) AS mean_intensity_log2
-        FROM read_parquet('{cohort_path.as_posix()}')
+        FROM read_parquet(?)
         WHERE {base_filter}
         GROUP BY hla_allele
+        HAVING COUNT(*) >= ?
         ORDER BY strong_n DESC, total_n DESC, hla_allele ASC
         """,
-        [strong_binder_cutoff_nm, *bind_args],
+        [strong_binder_cutoff_nm, cohort_path.as_posix(), *bind_args, MIN_AGGREGATE_COHORT_SIZE],
     ).fetchall()
 
     organ_rows = con.execute(
@@ -105,59 +179,53 @@ def main() -> int:
             condition,
             COUNT(*) AS peptides,
             ROUND(AVG(ms_intensity_log2), 2) AS mean_intensity_log2,
-            ROUND(MIN(affinity_nm), 2) AS best_affinity_nm
-        FROM read_parquet('{cohort_path.as_posix()}')
+            ROUND(MEDIAN(affinity_nm), 2) AS median_affinity_nm
+        FROM read_parquet(?)
         WHERE {base_filter}
         GROUP BY organ, condition
+        HAVING COUNT(*) >= ?
         ORDER BY peptides DESC, organ ASC
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args, MIN_AGGREGATE_COHORT_SIZE],
     ).fetchall()
 
-    top_rows = con.execute(
+    # SEC-20: Compute aggregate motif PWM strictly in-memory without emitting individual
+    # sequences or row-level candidate records.
+    seq_rows = con.execute(
         f"""
-        SELECT
-            peptide_id,
-            sequence,
-            peptide_length,
-            hla_allele,
-            gene_symbol,
-            organ,
-            condition,
-            affinity_nm,
-            eluted_rank_pct,
-            ms_intensity_log2,
-            donor_count
-        FROM read_parquet('{cohort_path.as_posix()}')
+        SELECT sequence
+        FROM read_parquet(?)
         WHERE {base_filter}
-        ORDER BY affinity_nm ASC, peptide_id ASC
-        LIMIT 15
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args],
     ).fetchall()
+    motif_pwm, motif_length = compute_motif_pwm([str(r[0]) for r in seq_rows if r[0] is not None])
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     csv_path = artifacts_dir / "allele_binding_summary.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(
-            ["hla_allele", "total_peptides", "strong_binders", "median_affinity_nm", "mean_intensity_log2"]
-        )
+        header = [
+            "hla_allele",
+            "total_peptides",
+            "strong_binders",
+            "median_affinity_nm",
+            "mean_intensity_log2",
+        ]
+        writer.writerow([guard_csv_formula(cell) for cell in header])
         for row in allele_rows:
-            writer.writerow(row)
+            writer.writerow([guard_csv_formula(cell) for cell in row])
 
-    result = {
+    result: dict[str, object] = {
         "plugin": "alithea/hla-motif-enrichment",
-        "version": "1.0.0",
-        "sequence_policy": "masked_grant" if sequences_masked else "unmasked_research",
+        "version": "2.0.0",
+        "sequence_policy": "aggregate_compute_only",
+        "min_aggregate_cohort_size": MIN_AGGREGATE_COHORT_SIZE,
         "summary_cards": [
             {"label": "Matched Ligands", "value": total_peptides},
             {"label": "Strong Binders (<=50 nM)", "value": strong_binders},
             {"label": "Median IC50 (nM)", "value": median_affinity},
-            {
-                "label": "Sequence Grant Mode",
-                "value": "Masked ('***')" if sequences_masked else "Full IUPAC",
-            },
+            {"label": "Output Policy", "value": "Aggregate Only (compute_only)"},
         ],
         "length_distribution": [
             {"label": f"{int(r[0])} aa", "length": int(r[0]), "value": int(r[1])}
@@ -179,35 +247,30 @@ def main() -> int:
                 "condition": str(r[1]),
                 "peptides": int(r[2]),
                 "mean_intensity_log2": float(r[3]),
-                "best_affinity_nm": float(r[4]),
+                "median_affinity_nm": float(r[4]),
             }
             for r in organ_rows
         ],
-        "top_candidates": [
-            {
-                "peptide_id": str(r[0]),
-                "sequence": str(r[1]),
-                "peptide_length": int(r[2]),
-                "hla_allele": str(r[3]),
-                "gene_symbol": str(r[4]),
-                "organ": str(r[5]),
-                "condition": str(r[6]),
-                "affinity_nm": float(r[7]),
-                "eluted_rank_pct": float(r[8]),
-                "ms_intensity_log2": float(r[9]),
-                "donor_count": int(r[10]),
-            }
-            for r in top_rows
-        ],
+        "motif_length": motif_length,
+        "motif_position_frequencies": motif_pwm,
     }
+    if not motif_pwm:
+        result["motif_suppressed_reason"] = (
+            f"Cohort has fewer than {MIN_AGGREGATE_COHORT_SIZE} peptides at a common length; "
+            "motif statistics suppressed to preserve compute_only privacy."
+        )
 
     (out_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(
         f"[hla-motif-enrichment] Completed: {total_peptides} matched ligands, "
-        f"{strong_binders} strong binders, masked={sequences_masked}",
+        f"{strong_binders} strong binders, policy=aggregate_compute_only",
         flush=True,
     )
     return 0
+
+
+def main() -> int:
+    return run_analysis(Path("/in/params.json"), Path("/in/data/cohort.parquet"), Path("/out"))
 
 
 if __name__ == "__main__":

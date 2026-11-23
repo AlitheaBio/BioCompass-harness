@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { IconCheck, IconCopy, IconDownload } from "./Icons";
+import { sanitizeSvgForImg } from "../svgSanitize";
 
 let mermaidQueue: Promise<unknown> = Promise.resolve();
 let diagramRenderSeq = 0;
@@ -38,78 +39,16 @@ function useIsDarkTheme(): boolean {
   return dark;
 }
 
-const DISALLOWED_SVG_TAGS = new Set([
-  "script",
-  "foreignobject",
-  "iframe",
-  "object",
-  "embed",
-  "applet",
-]);
-
-export function sanitizeSvgMarkup(
-  rawSvg: string,
-  options?: { allowForeignObject?: boolean },
-): { svg: string | null; error: string | null } {
-  try {
-    const parser = new DOMParser();
-    let doc = parser.parseFromString(rawSvg.trim(), "image/svg+xml");
-    let root: Element | null = doc.querySelector("parsererror")
-      ? null
-      : doc.documentElement;
-
-    // Mermaid can emit HTML fragments (e.g. <br> inside <foreignObject>) that parse cleanly
-    // under HTML5 even when strict XML rejects unclosed tags.
-    if (!root || root.tagName.toLowerCase() !== "svg") {
-      doc = parser.parseFromString(rawSvg.trim(), "text/html");
-      root = doc.body.querySelector("svg");
-    }
-
-    if (!root || root.tagName.toLowerCase() !== "svg") {
-      return { svg: null, error: "Root element must be <svg>." };
-    }
-
-    const walk = (node: Element) => {
-      for (const child of Array.from(node.children)) {
-        const tag = child.tagName.toLowerCase();
-        if (
-          DISALLOWED_SVG_TAGS.has(tag) &&
-          !(options?.allowForeignObject && tag === "foreignobject")
-        ) {
-          child.remove();
-          continue;
-        }
-        walk(child);
-      }
-      for (const attr of Array.from(node.attributes)) {
-        const name = attr.name.toLowerCase();
-        const val = attr.value.trim();
-        if (name.startsWith("on")) {
-          node.removeAttribute(attr.name);
-        } else if (
-          (name === "href" || name === "xlink:href" || name === "src") &&
-          /^(javascript:|vbscript:|data:text\/html)/i.test(val)
-        ) {
-          node.removeAttribute(attr.name);
-        }
-      }
-    };
-
-    walk(root);
-    if (!root.getAttribute("xmlns")) {
-      root.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    }
-    return { svg: new XMLSerializer().serializeToString(root), error: null };
-  } catch (err: unknown) {
-    return {
-      svg: null,
-      error: err instanceof Error ? err.message : "Failed to parse SVG diagram.",
-    };
-  }
+export function sanitizeSvgMarkup(rawSvg: string): {
+  svg: string | null;
+  dataUrl: string | null;
+  error: string | null;
+} {
+  return sanitizeSvgForImg(rawSvg);
 }
 
 function downloadSvg(svgMarkup: string, filenameBase: string) {
-  const blob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
+  const blob = new Blob([svgMarkup], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -135,11 +74,12 @@ export function ChatDiagram({
   const [viewMode, setViewMode] = useState<"preview" | "source">("preview");
   const [copied, setCopied] = useState(false);
   const [renderedSvg, setRenderedSvg] = useState<string | null>(null);
+  const [renderedDataUrl, setRenderedDataUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
   const sanitizedDirectSvg = useMemo(() => {
     if (kind !== "svg" || !closed) return null;
-    return sanitizeSvgMarkup(source);
+    return sanitizeSvgForImg(source);
   }, [kind, source, closed]);
 
   useEffect(() => {
@@ -189,25 +129,27 @@ export function ChatDiagram({
               },
         });
         const { svg } = await mermaid.render(renderId, source.trim());
-        const cleaned = sanitizeSvgMarkup(svg, { allowForeignObject: true });
+        const cleaned = sanitizeSvgForImg(svg);
         if (!cancelled) {
-          if (cleaned.svg) {
+          if (cleaned.svg && cleaned.dataUrl) {
             setRenderedSvg(cleaned.svg);
+            setRenderedDataUrl(cleaned.dataUrl);
             setRenderError(null);
           } else {
             setRenderedSvg(null);
+            setRenderedDataUrl(null);
             setRenderError(cleaned.error ?? "Unable to sanitize diagram output.");
           }
         }
       } catch (err: unknown) {
         if (!cancelled) {
           setRenderedSvg(null);
+          setRenderedDataUrl(null);
           setRenderError(
             err instanceof Error ? err.message : "Mermaid diagram syntax error.",
           );
         }
       } finally {
-        // Mermaid sometimes leaves temporary scratch containers in document.body on error.
         document.getElementById(`d${renderId}`)?.remove();
         document.getElementById(renderId)?.remove();
       }
@@ -222,13 +164,10 @@ export function ChatDiagram({
 
   const effectiveSvg =
     kind === "svg" ? (sanitizedDirectSvg?.svg ?? null) : renderedSvg;
+  const dataUrl =
+    kind === "svg" ? (sanitizedDirectSvg?.dataUrl ?? null) : renderedDataUrl;
   const effectiveError =
     kind === "svg" ? (sanitizedDirectSvg?.error ?? null) : renderError;
-
-  const dataUrl = useMemo(() => {
-    if (!effectiveSvg) return null;
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(effectiveSvg)}`;
-  }, [effectiveSvg]);
 
   return (
     <div
@@ -292,7 +231,7 @@ export function ChatDiagram({
             <code>{source}</code>
           </pre>
         </div>
-      ) : effectiveSvg ? (
+      ) : dataUrl ? (
         <div
           className="bc-md-diagram-canvas"
           onClick={() => {
@@ -301,8 +240,13 @@ export function ChatDiagram({
             }
           }}
           title={onOpenImage ? "Click to zoom diagram" : undefined}
-          dangerouslySetInnerHTML={{ __html: effectiveSvg }}
-        />
+        >
+          <img
+            src={dataUrl}
+            alt={`${kind.toUpperCase()} Diagram`}
+            style={{ maxWidth: "100%", height: "auto", display: "block" }}
+          />
+        </div>
       ) : (
         <div className="bc-md-diagram-status">
           <span className="bc-caption">Preparing diagram...</span>

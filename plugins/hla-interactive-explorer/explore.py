@@ -10,15 +10,30 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 import duckdb
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
-def main() -> int:
-    params_path = Path("/in/params.json")
-    cohort_path = Path("/in/data/cohort.parquet")
-    out_dir = Path("/out")
+
+def guard_csv_formula(value: object) -> object:
+    """Apply [R7] non-numeric CSV formula guard (SEC-30)."""
+    if not isinstance(value, str) or not value:
+        return value
+    if not value.startswith(_FORMULA_PREFIXES):
+        return value
+    try:
+        parsed = float(value.strip())
+        if math.isfinite(parsed):
+            return value
+    except ValueError:
+        pass
+    return f"'{value}"
+
+
+def run_explorer(params_path: Path, cohort_path: Path, out_dir: Path) -> int:
     artifacts_dir = out_dir / "artifacts"
 
     if not params_path.is_file():
@@ -56,18 +71,16 @@ def main() -> int:
         SELECT
             COUNT(*) AS matched_ligands,
             COUNT(DISTINCT gene_symbol) AS distinct_genes,
-            COALESCE(ROUND(MIN(affinity_nm), 2), 0.0) AS best_ic50_nm,
-            BOOL_AND(sequence = '***') AS sequences_masked
-        FROM read_parquet('{cohort_path.as_posix()}')
+            COALESCE(ROUND(MIN(affinity_nm), 2), 0.0) AS best_ic50_nm
+        FROM read_parquet(?)
         WHERE {where_sql}
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args],
     ).fetchone()
 
     matched_ligands = int(summary[0] or 0)
     distinct_genes = int(summary[1] or 0)
     best_ic50_nm = float(summary[2] or 0.0)
-    sequences_masked = bool(summary[3]) if matched_ligands > 0 else False
 
     gene_rows = con.execute(
         f"""
@@ -78,13 +91,13 @@ def main() -> int:
             ROUND(MIN(affinity_nm), 2) AS best_affinity_nm,
             ROUND(AVG(ms_intensity_log2), 2) AS mean_intensity_log2,
             MAX(donor_count) AS max_donors
-        FROM read_parquet('{cohort_path.as_posix()}')
+        FROM read_parquet(?)
         WHERE {where_sql}
         GROUP BY gene_symbol
         ORDER BY strong_binders DESC, ligands DESC, gene_symbol ASC
         LIMIT 12
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args],
     ).fetchall()
 
     tier_rows = con.execute(
@@ -97,44 +110,50 @@ def main() -> int:
                 ELSE 'Weak (>150 nM)'
             END AS tier,
             COUNT(*) AS n
-        FROM read_parquet('{cohort_path.as_posix()}')
+        FROM read_parquet(?)
         WHERE {where_sql}
         GROUP BY 1
         ORDER BY MIN(affinity_nm) ASC
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args],
     ).fetchall()
 
     length_rows = con.execute(
         f"""
         SELECT peptide_length, COUNT(*) AS n
-        FROM read_parquet('{cohort_path.as_posix()}')
+        FROM read_parquet(?)
         WHERE {where_sql}
         GROUP BY 1
         ORDER BY 1 ASC
         """,
-        bind_args,
+        [cohort_path.as_posix(), *bind_args],
     ).fetchall()
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     csv_path = artifacts_dir / "gene_hotspots.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(
-            ["gene_symbol", "ligands", "strong_binders", "best_affinity_nm", "mean_intensity_log2", "max_donors"]
-        )
+        header = [
+            "gene_symbol",
+            "ligands",
+            "strong_binders",
+            "best_affinity_nm",
+            "mean_intensity_log2",
+            "max_donors",
+        ]
+        writer.writerow([guard_csv_formula(cell) for cell in header])
         for row in gene_rows:
-            writer.writerow(row)
+            writer.writerow([guard_csv_formula(cell) for cell in row])
 
     result = {
         "plugin": "alithea/hla-interactive-explorer",
-        "version": "1.0.0",
-        "sequence_policy": "masked_grant" if sequences_masked else "unmasked_research",
+        "version": "2.0.0",
+        "sequence_policy": "scoped_rows_grant",
         "summary_cards": [
             {"label": "Filtered Ligands", "value": matched_ligands},
             {"label": "Source Genes", "value": distinct_genes},
             {"label": "Best IC50 (nM)", "value": best_ic50_nm},
-            {"label": "Grant Mode", "value": "Masked ('***')" if sequences_masked else "Full IUPAC"},
+            {"label": "Grant Mode", "value": "Scoped Rows"},
         ],
         "length_distribution": [
             {"label": f"{int(r[0])} aa", "length": int(r[0]), "value": int(r[1])}
@@ -164,6 +183,10 @@ def main() -> int:
         flush=True,
     )
     return 0
+
+
+def main() -> int:
+    return run_explorer(Path("/in/params.json"), Path("/in/data/cohort.parquet"), Path("/out"))
 
 
 if __name__ == "__main__":

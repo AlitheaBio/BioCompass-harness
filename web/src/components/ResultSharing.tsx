@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   createResultShare, fetchResultShares, formatErrorInline, downloadResultShare, revokeResultShare,
 } from "../api";
+import { safeLaunchUrl } from "../safeUrl";
 import type { ResultShare, RunRecord } from "../types";
 
 export function ShareResultButton({ run }: { run: RunRecord }) {
@@ -142,11 +143,15 @@ function SharedFilesDialog({ orgId, canPublish, onClose }: { orgId: string; canP
       {error && <p role="alert">{error}</p>}
       {!error && !shares && <p role="status">Loading files…</p>}
       {shares?.length === 0 && <p>No files are currently shared with or by this organization on this workspace.</p>}
-      {listing?.providers?.map(provider => (
-        <p key={provider.launch_url}>
-          <a className="bc-btn bc-btn-secondary" href={provider.launch_url}>Open shared files on {provider.label}</a>
-        </p>
-      ))}
+      {listing?.providers?.map(provider => {
+        const safeHref = safeLaunchUrl(provider.launch_url);
+        if (!safeHref) return null;
+        return (
+          <p key={provider.launch_url}>
+            <a className="bc-btn bc-btn-secondary" href={safeHref} rel="noopener noreferrer">Open shared files on {provider.label}</a>
+          </p>
+        );
+      })}
       {shares?.map(share => (
         <article key={share.share_id} data-testid={`shared-file-${share.share_id}`} className="bc-card">
           <strong>{share.filename}</strong>

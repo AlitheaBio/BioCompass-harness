@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchPersonalProfile, formatErrorInline, requestPersonalEmail, savePersonalProfile, type PersonalProfile } from "../api";
+import { isSafeHttpUrl } from "../safeUrl";
 
 export function PersonalAvatar({ name, seed, size = 40 }: { name: string; seed?: string | null; size?: number }) {
   const color = seed ? parseInt(seed.slice(0, 4), 16) % 360 : 0;
@@ -59,7 +60,13 @@ export function PersonalAccountSettings({ onProfileUpdated }: { onProfileUpdated
     setBusy(true);setMessage("");setVerification("");
     try {
       const response=await requestPersonalEmail(email);
-      setProfile(await fetchPersonalProfile());setVerification(response.authorize_url);
+      setProfile(await fetchPersonalProfile());
+      const safeVerify = isSafeHttpUrl(response.authorize_url, { allowRelative: false });
+      if (!safeVerify) {
+        setMessage("Identity provider returned an unsafe verification URL.");
+      } else {
+        setVerification(safeVerify);
+      }
     } catch(e) {setMessage(formatErrorInline(e));} finally {setBusy(false);}
   }
 
@@ -83,7 +90,7 @@ export function PersonalAccountSettings({ onProfileUpdated }: { onProfileUpdated
           <input className="bc-input" type="email" value={email} onChange={e=>{setEmail(e.target.value);setVerification("");}}/>
         </label>
         <button className="bc-btn" type="button" disabled={busy || !email.trim()} onClick={()=>void changeEmail()}>Request verification</button>
-        {verification && <a className="bc-btn" href={verification} target="_blank" rel="noopener noreferrer">Verify with your identity provider</a>}
+        {isSafeHttpUrl(verification, { allowRelative: false }) && <a className="bc-btn" href={isSafeHttpUrl(verification, { allowRelative: false })!} target="_blank" rel="noopener noreferrer">Verify with your identity provider</a>}
         {profile.requested_email && <p>Waiting for your identity provider to verify {profile.requested_email}.</p>}
       </> : <p>Your account needs a linked email-verifying identity provider to change its sign-in email.</p>}
     </div>

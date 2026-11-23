@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ChatDiagram } from "./ChatDiagram";
 import { IconCheck, IconCopy, IconDownload, IconPlus } from "./Icons";
+import { isSafeMarkdownImageUrl, isSafeMarkdownLinkUrl } from "../safeUrl";
 
 type TableAlign = "left" | "center" | "right";
 
@@ -14,12 +15,6 @@ type MdBlock =
   | { type: "list"; ordered: boolean; items: { text: string; checked?: boolean }[] }
   | { type: "hr" }
   | { type: "paragraph"; lines: string[] };
-
-const SAFE_URL_RE = /^(https?:\/\/|data:image\/|\/api\/|\.\/)/i;
-
-function isSafeUrl(url: string): boolean {
-  return SAFE_URL_RE.test(url.trim());
-}
 
 function downloadImage(src: string, alt?: string) {
   const link = document.createElement("a");
@@ -303,7 +298,7 @@ export function ChatMarkdown({
         );
       } else if (tok.startsWith("![")) {
         const imgMatch = tok.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-        if (imgMatch && isSafeUrl(imgMatch[2]!)) {
+        if (imgMatch && isSafeMarkdownImageUrl(imgMatch[2]!)) {
           const alt = imgMatch[1] || "Figure";
           const src = imgMatch[2]!.trim();
           out.push(
@@ -329,11 +324,12 @@ export function ChatMarkdown({
             </figure>,
           );
         } else {
-          out.push(tok);
+          // SEC-27: Block external Markdown <img> URLs (rendered as plain text to prevent egress).
+          out.push(imgMatch ? `[image blocked: ${imgMatch[1] || "external image"}]` : tok);
         }
       } else if (tok.startsWith("[")) {
         const linkMatch = tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-        if (linkMatch && isSafeUrl(linkMatch[2]!)) {
+        if (linkMatch && isSafeMarkdownLinkUrl(linkMatch[2]!)) {
           const label = linkMatch[1]!;
           const href = linkMatch[2]!.trim();
           out.push(

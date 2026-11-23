@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { archiveWorkspaceResult, fetchWorkspaceArchiveTargets, formatErrorInline, type WorkspaceArchive } from "../api";
+import { safeLaunchUrl } from "../safeUrl";
 
 export function ArchiveResult({ runId }: { runId: string }) {
   const [open, setOpen] = useState(false);
@@ -28,14 +29,21 @@ export function ArchiveResult({ runId }: { runId: string }) {
       aria-label="Archive result" onClose={() => setOpen(false)}>
       <h2>Archive result</h2>
       <div className="bc-settings-stack">
-      {receipt ? (
-        <>
-          <p role="status">Archived result · SHA-256 <code style={{ overflowWrap: "anywhere" }}>{receipt.sha256}</code></p>
-          {receipt.sign_in_url && <a href={receipt.sign_in_url} target="_blank" rel="noreferrer">Sign in to archive destination</a>}
-          <a href={receipt.download_url ?? `/api/v1/workspace/archives/${encodeURIComponent(runId)}`}
-            target={receipt.download_url ? "_blank" : undefined} rel="noreferrer">Download archived result</a>
-        </>
-      ) : (
+      {receipt ? (() => {
+        const safeSignIn = receipt.sign_in_url ? safeLaunchUrl(receipt.sign_in_url) : null;
+        const safeDownload =
+          (receipt.download_url ? safeLaunchUrl(receipt.download_url) : null) ??
+          `/api/v1/workspace/archives/${encodeURIComponent(runId)}`;
+        return (
+          <>
+            <p role="status">Archived result · SHA-256 <code style={{ overflowWrap: "anywhere" }}>{receipt.sha256}</code></p>
+            {safeSignIn && <a href={safeSignIn} target="_blank" rel="noopener noreferrer">Sign in to archive destination</a>}
+            <a href={safeDownload}
+              target={receipt.download_url && safeDownload !== `/api/v1/workspace/archives/${encodeURIComponent(runId)}` ? "_blank" : undefined}
+              rel="noopener noreferrer">Download archived result</a>
+          </>
+        );
+      })() : (
         <>
           {targets && targets.length > 0 && <label className="bc-field">Archive destination
             <select className="bc-input" value={target} onChange={(event) => setTarget(event.target.value)}>

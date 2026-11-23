@@ -259,6 +259,7 @@ pub struct AppState {
     pub registry: Arc<dyn WorkspaceRegistryPort>,
     pub installed_workspace: Option<Arc<crate::workspace::InstalledWorkspace>>,
     pub hub_client: Option<Arc<CompassHubClient>>,
+    pub marketplace: Arc<crate::marketplace::MarketplaceClient>,
     pub agent: Arc<AgentRuntime>,
     pub default_catalog_id: CatalogId,
     pub container_engine_label: String,
@@ -289,10 +290,23 @@ impl AppState {
         mode: DeploymentMode,
         allow_local_dev_tags: bool,
     ) -> CompassResult<Self> {
+        let marketplace_cfg = crate::marketplace::MarketplaceConfig::from_env(mode, false);
+        Self::bootstrap_with_marketplace(data_dir, mode, allow_local_dev_tags, marketplace_cfg).await
+    }
+
+    /// Bootstrap stores and execution bindings with an explicit [`crate::marketplace::MarketplaceConfig`].
+    pub async fn bootstrap_with_marketplace(
+        data_dir: impl AsRef<Path>,
+        mode: DeploymentMode,
+        allow_local_dev_tags: bool,
+        marketplace_cfg: crate::marketplace::MarketplaceConfig,
+    ) -> CompassResult<Self> {
         match mode {
-            DeploymentMode::Local => Self::bootstrap_local(data_dir, allow_local_dev_tags).await,
+            DeploymentMode::Local => {
+                Self::bootstrap_local(data_dir, allow_local_dev_tags, marketplace_cfg).await
+            }
             DeploymentMode::CloudWeb => {
-                Self::bootstrap_cloud_web(data_dir, allow_local_dev_tags).await
+                Self::bootstrap_cloud_web(data_dir, allow_local_dev_tags, marketplace_cfg).await
             }
         }
     }
@@ -300,6 +314,7 @@ impl AppState {
     async fn bootstrap_local(
         data_dir: impl AsRef<Path>,
         allow_local_dev_tags: bool,
+        marketplace_cfg: crate::marketplace::MarketplaceConfig,
     ) -> CompassResult<Self> {
         let root = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)
@@ -404,6 +419,11 @@ impl AppState {
                 .await?;
         }
 
+        let marketplace = Arc::new(crate::marketplace::MarketplaceClient::new(
+            &root,
+            marketplace_cfg,
+        )?);
+
         Ok(Self {
             mode: DeploymentMode::Local,
             listen_addr: None,
@@ -422,6 +442,7 @@ impl AppState {
             local_owner: None,
             installed_workspace: None,
             hub_client: None,
+            marketplace,
             agent,
             default_catalog_id,
             container_engine_label,
@@ -433,6 +454,7 @@ impl AppState {
     async fn bootstrap_cloud_web(
         data_dir: impl AsRef<Path>,
         allow_local_dev_tags: bool,
+        marketplace_cfg: crate::marketplace::MarketplaceConfig,
     ) -> CompassResult<Self> {
         let root = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)
@@ -467,12 +489,15 @@ impl AppState {
             scaffold_root_dir: user_plugins_dir.clone(),
             ..default_agent_cfg
         };
-        let agent = Arc::new(AgentRuntime::new(
-            agent_cfg,
-            session_store.clone(),
-            blob_store.clone(),
-            hub.clone(),
-        )?);
+        let agent = Arc::new(
+            AgentRuntime::new(
+                agent_cfg,
+                session_store.clone(),
+                blob_store.clone(),
+                hub.clone(),
+            )?
+            .with_allow_scaffold(false),
+        );
 
         let allowed_origins = std::env::var("COMPASS_ALLOWED_ORIGINS")
             .unwrap_or_default()
@@ -481,6 +506,11 @@ impl AppState {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect();
+
+        let marketplace = Arc::new(crate::marketplace::MarketplaceClient::new(
+            &root,
+            marketplace_cfg,
+        )?);
 
         Ok(Self {
             mode: DeploymentMode::CloudWeb,
@@ -500,6 +530,7 @@ impl AppState {
             local_owner: None,
             installed_workspace: None,
             hub_client: Some(hub),
+            marketplace,
             agent,
             default_catalog_id,
             container_engine_label,

@@ -221,6 +221,128 @@ pub struct OciImageRef {
 }
 
 impl OciImageRef {
+    /// Validate a single OCI Distribution repository path component (`[a-z0-9]+([._-][a-z0-9]+)*`),
+    /// strictly rejecting `.`, `..`, empty segments, control characters, and query/fragment delimiters.
+    fn is_valid_repo_segment(seg: &str) -> bool {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.len() > 128 {
+            return false;
+        }
+        let bytes = seg.as_bytes();
+        let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+        if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+            return false;
+        }
+        bytes.iter().all(|&b| is_alnum(b) || matches!(b, b'.' | b'_' | b'-'))
+    }
+
+    /// Validate an OCI registry authority (`host[:port]`, supporting DNS names, IPv4, and `[IPv6]`)
+    /// with zero userinfo (`@`), path, query, fragment, whitespace, or control characters (`SEC-23`).
+    fn is_valid_registry_host(authority: &str) -> bool {
+        if authority.is_empty() || authority.len() > 255 {
+            return false;
+        }
+        if authority
+            .bytes()
+            .any(|b| b < 0x21 || b == 0x7f || matches!(b, b'@' | b'?' | b'#' | b'/' | b'\\' | b'%'))
+        {
+            return false;
+        }
+        if let Some(rest) = authority.strip_prefix('[') {
+            let Some((ip_part, after_bracket)) = rest.split_once(']') else {
+                return false;
+            };
+            if ip_part.parse::<std::net::Ipv6Addr>().is_err() {
+                return false;
+            }
+            if after_bracket.is_empty() {
+                return true;
+            }
+            let Some(port_str) = after_bracket.strip_prefix(':') else {
+                return false;
+            };
+            return port_str.parse::<u16>().is_ok_and(|p| p > 0);
+        }
+        let (host, port_opt) = match authority.split_once(':') {
+            Some((h, p)) => {
+                if p.contains(':') {
+                    return false;
+                }
+                (h, Some(p))
+            }
+            None => (authority, None),
+        };
+        if let Some(port_str) = port_opt
+            && !port_str.parse::<u16>().is_ok_and(|p| p > 0)
+        {
+            return false;
+        }
+        if host.is_empty() || host == "." || host == ".." || host.contains("..") {
+            return false;
+        }
+        if host.parse::<std::net::Ipv4Addr>().is_ok() {
+            return true;
+        }
+        host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+    }
+
+    /// Validate the repository portion (`[registry_host/]org/image`) per OCI Distribution Spec (`SEC-23`).
+    fn validate_repository(repo: &str) -> CompassResult<()> {
+        if repo.is_empty()
+            || repo.len() > 512
+            || repo.chars().any(|c| c.is_control() || c.is_whitespace())
+            || repo.contains('?')
+            || repo.contains('#')
+            || repo.contains('\\')
+            || repo.contains('%')
+            || repo.contains('@')
+            || repo.contains("://")
+        {
+            return Err(CompassError::Validation(format!(
+                "invalid OCI image repository '{repo}': disallowed characters or syntax"
+            )));
+        }
+        let segments: Vec<&str> = repo.split('/').collect();
+        if segments.len() < 2 || segments.iter().any(|s| s.is_empty()) {
+            return Err(CompassError::Validation(format!(
+                "invalid OCI image repository '{repo}': expected non-empty '/'-separated segments"
+            )));
+        }
+        let first = segments[0];
+        let first_is_registry = first.contains('.') || first.contains(':') || first.eq_ignore_ascii_case("localhost");
+        let path_segments = if first_is_registry {
+            if !Self::is_valid_registry_host(first) {
+                return Err(CompassError::Validation(format!(
+                    "invalid OCI registry host '{first}' in '{repo}'"
+                )));
+            }
+            &segments[1..]
+        } else {
+            &segments[..]
+        };
+        if path_segments.is_empty() || !path_segments.iter().all(|seg| Self::is_valid_repo_segment(seg)) {
+            return Err(CompassError::Validation(format!(
+                "invalid OCI repository path segment in '{repo}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn is_valid_local_tag(tag: &str) -> bool {
+        !tag.is_empty()
+            && tag.len() <= 128
+            && !tag.starts_with('.')
+            && !tag.starts_with('-')
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    }
+
     /// Parse an OCI image reference, requiring `@sha256:<64-hex>` unless `allow_local_tag` is `true`
     /// and the image uses the `local/` namespace.
     pub fn parse(raw: &str, allow_local_tag: bool) -> CompassResult<Self> {
@@ -228,12 +350,22 @@ impl OciImageRef {
         if trimmed.is_empty() {
             return Err(CompassError::Validation("OCI image reference cannot be empty".into()));
         }
+        if trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
+            || trimmed.contains('?')
+            || trimmed.contains('#')
+            || trimmed.contains('\\')
+        {
+            return Err(CompassError::Validation(format!(
+                "OCI image reference '{trimmed}' contains forbidden characters"
+            )));
+        }
         if let Some((repo, digest_part)) = trimmed.split_once("@sha256:") {
             if repo.is_empty() {
                 return Err(CompassError::Validation(
                     "OCI image repository before @sha256: cannot be empty".into(),
                 ));
             }
+            Self::validate_repository(repo)?;
             let is_valid_hex = digest_part.len() == 64
                 && digest_part
                     .bytes()
@@ -252,7 +384,26 @@ impl OciImageRef {
         }
 
         if allow_local_tag && trimmed.starts_with("local/") {
-            let (repo, tag) = trimmed.split_once(':').unwrap_or((trimmed, "dev"));
+            if trimmed.contains('@') {
+                return Err(CompassError::Validation(format!(
+                    "local OCI image '{trimmed}' cannot contain '@'"
+                )));
+            }
+            let (repo, tag) = match trimmed.split_once(':') {
+                Some((r, t)) if !t.contains(':') => (r, t),
+                Some(_) => {
+                    return Err(CompassError::Validation(format!(
+                        "local OCI image '{trimmed}' has malformed tag separator"
+                    )));
+                }
+                None => (trimmed, "dev"),
+            };
+            Self::validate_repository(repo)?;
+            if !Self::is_valid_local_tag(tag) {
+                return Err(CompassError::Validation(format!(
+                    "local OCI image tag '{tag}' is invalid"
+                )));
+            }
             return Ok(Self {
                 raw: trimmed.to_owned(),
                 repository: repo.to_owned(),

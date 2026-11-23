@@ -900,6 +900,7 @@ impl InProcessNodeRuntime {
         quote_doc: Value,
         deal: &SignedArtifact<DealPayload>,
         deal_doc: Value,
+        pinned_snapshot: Option<(u64, String)>,
         revoked: Option<&AtomicBool>,
         queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
     ) -> CompassResult<RunRecord> {
@@ -923,6 +924,7 @@ impl InProcessNodeRuntime {
                 &stage_dir,
                 &in_dir,
                 &out_dir,
+                pinned_snapshot.as_ref(),
                 revoked,
                 queries,
             )
@@ -1080,6 +1082,7 @@ impl InProcessNodeRuntime {
         stage_dir: &Path,
         in_dir: &Path,
         out_dir: &Path,
+        pinned_snapshot: Option<&(u64, String)>,
         revoked: Option<&AtomicBool>,
         queries: Option<Arc<dyn biocompass_oci_runner::LiveQueryResponder>>,
     ) -> Result<StageSuccessOutcome, (String, String, String)> {
@@ -1146,7 +1149,7 @@ impl InProcessNodeRuntime {
                     default_engine_ver.clone(),
                 )
             })?;
-            let filter_query: QueryAst = run
+            let mut filter_query: QueryAst = run
                 .params
                 .get("cohort_filter")
                 .cloned()
@@ -1160,6 +1163,10 @@ impl InProcessNodeRuntime {
                     )
                 })?
                 .unwrap_or_default();
+            // SEC-31: Pin the exact snapshot_id verified at confirm time to eliminate provenance TOCTOU.
+            if let Some((pinned_sid, _)) = pinned_snapshot {
+                filter_query.snapshot_id = Some(*pinned_sid);
+            }
 
             let is_curated = self
                 .is_curated_module_approved(
@@ -1197,6 +1204,18 @@ impl InProcessNodeRuntime {
                         default_engine_ver.clone(),
                     )
                 })?;
+            if let Some((pinned_sid, expected_digest)) = pinned_snapshot
+                && (slice.snapshot_id != *pinned_sid || slice.dataset_digest != *expected_digest)
+            {
+                return Err((
+                    "SNAPSHOT_PROVENANCE_MISMATCH".into(),
+                    format!(
+                        "staged snapshot ({}, {}) diverged from confirmed snapshot ({}, {})",
+                        slice.snapshot_id, slice.dataset_digest, pinned_sid, expected_digest
+                    ),
+                    default_engine_ver.clone(),
+                ));
+            }
             set_world_readable_file(&cohort_parquet).map_err(|e| {
                 (
                     "STAGE_PERMS_ERROR".into(),
@@ -1242,13 +1261,22 @@ impl InProcessNodeRuntime {
 
         let report = self
             .oci_runner
-            .execute_with_queries(&spec, Some(self.log_tx.clone()), revoked, queries)
+            .execute_with_limits(
+                &spec,
+                Some(self.log_tx.clone()),
+                revoked,
+                queries,
+                None,
+                Some(limits.max_output_bytes as u64),
+            )
             .await
             .map_err(|e| {
                 let msg = e.to_string();
                 run.logs.push(format!("[error] {msg}"));
                 let code = if msg.contains("DATASET_ACCESS_REVOKED:") {
                     "DATASET_ACCESS_REVOKED"
+                } else if msg.contains("OUTPUT_QUOTA_EXCEEDED:") {
+                    "OUTPUT_QUOTA_EXCEEDED"
                 } else if msg.contains("CONTAINER_TIMEOUT:") {
                     "CONTAINER_TIMEOUT"
                 } else {
@@ -1672,11 +1700,15 @@ impl RunDispatcher for InProcessNodeRuntime {
             }
             let catalog = self.get_catalog(&grant.catalog_id).await?;
             catalog.verify_integrity()?;
-            let requested_sid = req
+            let filter_query: QueryAst = req
                 .params
                 .get("cohort_filter")
-                .and_then(|v| v.get("snapshot_id"))
-                .and_then(Value::as_u64);
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| CompassError::Validation(format!("invalid cohort_filter: {e}")))?
+                .unwrap_or_default();
+            let requested_sid = filter_query.snapshot_id;
             let sealed = if is_private_catalog(grant) {
                 require_reviewed_hla_module(&plugin, &verified_image, grant)?;
                 let (_, sealed) = private_hla_pin(&catalog, &plugin.manifest.id, &req.params)?;
@@ -2007,14 +2039,19 @@ impl InProcessNodeRuntime {
             )));
         };
 
-        // Recompute canonical workload_hash at confirm time before starting container (B6).
-        let confirm_dataset_digest = if let Some(grant) = &run.grant {
+        // Recompute canonical workload_hash at confirm time before starting container (B6)
+        // and pin `(snapshot_id, dataset_digest)` for staging (`SEC-31`).
+        let confirm_snapshot_pin: Option<(u64, String)> = if let Some(grant) = &run.grant {
             let catalog = self.get_catalog(&grant.catalog_id).await?;
-            let requested_sid = run
+            let filter_query: QueryAst = run
                 .params
                 .get("cohort_filter")
-                .and_then(|v| v.get("snapshot_id"))
-                .and_then(Value::as_u64);
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| CompassError::Validation(format!("invalid cohort_filter: {e}")))?
+                .unwrap_or_default();
+            let requested_sid = filter_query.snapshot_id;
             if is_private_catalog(grant) {
                 require_reviewed_hla_module(&plugin, &verified_image, grant)?;
                 if !self.is_curated_module_approved(
@@ -2025,7 +2062,7 @@ impl InProcessNodeRuntime {
                     ));
                 }
                 let (_, sealed) = private_hla_pin(&catalog, &plugin.manifest.id, &run.params)?;
-                Some(sealed.dataset_digest)
+                Some((sealed.snapshot_id, sealed.dataset_digest))
             } else {
                 if requires_live_queries && !self.is_curated_module_approved(
                     &plugin.manifest.id, &plugin.manifest.version, &verified_image.canonical_module_hash()
@@ -2034,11 +2071,13 @@ impl InProcessNodeRuntime {
                         "reviewed module approval is required for these scoped reads".into(),
                     ));
                 }
-                Some(catalog.load_sealed_snapshot(requested_sid)?.dataset_digest)
+                let sealed = catalog.load_sealed_snapshot(requested_sid)?;
+                Some((sealed.snapshot_id, sealed.dataset_digest))
             }
         } else {
             None
         };
+        let confirm_dataset_digest = confirm_snapshot_pin.as_ref().map(|(_, d)| d.clone());
         let recomputed_wh = compute_canonical_workload_hash(
             &plugin,
             &verified_image,
@@ -2112,10 +2151,158 @@ impl InProcessNodeRuntime {
             quote_doc,
             &signed_deal,
             deal_doc,
+            confirm_snapshot_pin,
             revoked,
             queries,
         )
         .await
     }
 
+}
+
+#[cfg(test)]
+mod sec_31_tests {
+    use super::*;
+    use biocompass_core_traits::{
+        CreditAmountAct, LocalFsBlobStore, OciRegistryClient, OrgId, SqliteActLedger,
+        SqliteSessionStore,
+    };
+    use biocompass_data_engine::seed_demo_hla_catalog;
+    use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
+
+    struct LocalTagRegistry;
+
+    #[async_trait]
+    impl OciRegistryClient for LocalTagRegistry {
+        async fn verify_image(&self, image_raw: &str) -> CompassResult<OciImageRef> {
+            OciImageRef::parse(image_raw, true)
+        }
+    }
+
+    #[tokio::test]
+    async fn sec_31_prepare_validates_cohort_filter_and_stage_pins_confirmed_snapshot_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = NodeKeypairSet::load_or_generate(tmp.path().join("keys")).unwrap();
+        let session_store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+        let blob_store = Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).unwrap());
+        let ledger =
+            Arc::new(SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(100)).unwrap());
+        let fake_docker = tmp.path().join("fake-docker");
+        std::fs::write(&fake_docker, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let oci_runner = Arc::new(OciContainerRunner::from_engine(DetectedEngine {
+            kind: EngineKind::Docker,
+            binary_path: fake_docker,
+            server_version: "test".into(),
+            rootless: false,
+        }));
+        let runtime = InProcessNodeRuntime::new(NodeRuntimeDeps {
+            keys,
+            session_store: session_store.clone(),
+            blob_store,
+            oci_registry: Arc::new(LocalTagRegistry),
+            payment_gateway: ledger,
+            oci_runner,
+            stage_root_dir: tmp.path().join("stages"),
+            allow_local_dev_tags: true,
+        })
+        .unwrap();
+
+        let cat_dir = tmp.path().join("catalog");
+        seed_demo_hla_catalog(&cat_dir).unwrap();
+        let catalog = DuckDbCatalogEngine::open_verified(&cat_dir).unwrap();
+        let catalog_id = catalog.manifest().id.clone();
+        let v1_snap = catalog.load_sealed_snapshot(None).unwrap();
+        runtime.register_catalog(catalog).await.unwrap();
+
+        let plugin_dir = tmp.path().join("plugin");
+        biocompass_plugin_spec::write_template_to_dir(
+            biocompass_plugin_spec::TemplateKind::PythonUv,
+            "alithea/sec31-probe",
+            "SEC31 Probe",
+            false,
+            &plugin_dir,
+        )
+        .unwrap();
+        let loaded = LoadedPlugin::load_from_dir(&plugin_dir, true).unwrap();
+        let plugin_id = loaded.manifest.id.clone();
+        runtime.register_plugin(loaded.clone()).await.unwrap();
+
+        let org_id = OrgId::new("org-sec31").unwrap();
+        let grant = DatasetGrant::scoped_rows_partner(org_id.clone(), catalog_id.clone());
+
+        // 1. Invalid `cohort_filter` MUST fail at `prepare_run` (not deferred to staging).
+        let bad_prep = runtime
+            .prepare_run(PrepareRunRequest {
+                org_id: org_id.clone(),
+                session_id: None,
+                plugin_id: plugin_id.clone(),
+                plugin_version: None,
+                offer_id: None,
+                params: json!({
+                    "alleles": ["HLA-A*02:01"],
+                    "min_length": 8,
+                    "max_length": 11,
+                    "cohort_filter": { "limit": "not-a-number" }
+                }),
+                dataset_grant: Some(grant.clone()),
+            })
+            .await;
+        assert!(bad_prep.is_err(), "SEC-31: malformed cohort_filter must fail in prepare_run");
+
+        // 2. Valid prepare with unpinned `cohort_filter` captures v1 digest; if catalog advances to v2,
+        // `stage_and_run_container` pinned to `(v1_snap.snapshot_id, "wrong-digest")` MUST fail closed!
+        let quote = runtime
+            .prepare_run(PrepareRunRequest {
+                org_id: org_id.clone(),
+                session_id: None,
+                plugin_id: plugin_id.clone(),
+                plugin_version: None,
+                offer_id: None,
+                params: json!({
+                    "alleles": ["HLA-A*02:01"],
+                    "min_length": 8,
+                    "max_length": 11
+                }),
+                dataset_grant: Some(grant.clone()),
+            })
+            .await
+            .unwrap();
+        let mut run = session_store.get_run(&quote.run_id).await.unwrap();
+        let verified_image = OciImageRef::parse(&loaded.manifest.image, true).unwrap();
+        let stage_dir = tmp.path().join("stage-mismatch");
+        let in_dir = stage_dir.join("in");
+        let out_dir = stage_dir.join("out");
+        let limits = ExecutionLimits {
+            max_runtime_ms: 60_000,
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_input_bytes: 1024 * 1024,
+            max_output_bytes: 1024 * 1024,
+            fuel_limit: 0,
+        };
+        let wrong_pin = (v1_snap.snapshot_id, "0".repeat(64));
+        let res = runtime
+            .stage_and_run_container(
+                &mut run,
+                &loaded,
+                &verified_image,
+                &limits,
+                &stage_dir,
+                &in_dir,
+                &out_dir,
+                Some(&wrong_pin),
+                None,
+                None,
+            )
+            .await;
+        let err = match res {
+            Ok(_) => panic!("SEC-31: mismatched pinned snapshot digest must fail closed"),
+            Err(err) => err,
+        };
+        assert_eq!(err.0, "SNAPSHOT_PROVENANCE_MISMATCH");
+    }
 }

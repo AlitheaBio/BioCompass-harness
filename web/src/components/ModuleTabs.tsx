@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cancelRun, confirmRun, formatErrorInline, prepareRun } from "../api";
+import { getExternalProviderConsentInfo } from "../milestoneBPolicy";
 import { IconCheck, IconCopy, IconRuns, IconShield } from "./Icons";
 import { ScientificViews } from "./ScientificViews";
 import {
@@ -274,8 +275,16 @@ export function ModuleApiTab({
   currentReviewInputs.current = reviewInputs;
   const [reviewed, setReviewed] = useState<{ quote: RunQuote; inputs: string } | null>(null);
   const preparedQuote = reviewed?.inputs === reviewInputs ? reviewed.quote : null;
+  const preparedExternalProvider = preparedQuote
+    ? getExternalProviderConsentInfo(preparedQuote)
+    : null;
+  const [externalQuoteConsentAck, setExternalQuoteConsentAck] = useState(false);
   const confirmingQuote = useRef<string | null>(null);
   const [preparingQuote, setPreparingQuote] = useState(false);
+
+  useEffect(() => {
+    setExternalQuoteConsentAck(false);
+  }, [preparedQuote?.run_id]);
 
   const [snippetLang, setSnippetLang] = useState<SnippetLanguage>("curl");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -668,6 +677,41 @@ export function ModuleApiTab({
                 )}
             </div>
 
+            {preparedExternalProvider && (
+              <div
+                data-testid="quote-external-provider-banner"
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: "var(--bc-radius-sm)",
+                  background: "var(--bc-danger-soft)",
+                  border: "1px solid var(--bc-danger)",
+                  fontSize: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>
+                  External Provider Node · {preparedExternalProvider.providerLabel} (
+                  <span className="mono">{preparedExternalProvider.nodeId}</span>)
+                </div>
+                <div>{preparedExternalProvider.notice}</div>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 6, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    data-testid="quote-external-provider-checkbox"
+                    checked={externalQuoteConsentAck}
+                    onChange={(e) => setExternalQuoteConsentAck(e.target.checked)}
+                    disabled={testing}
+                  />
+                  <span>
+                    I consent to sending my parameters/uploads to{" "}
+                    <strong>{preparedExternalProvider.providerLabel}</strong>.
+                  </span>
+                </label>
+              </div>
+            )}
+
             {preparedQuote.execution_notice && (
               <div
                 data-testid="quote-execution-notice"
@@ -697,7 +741,7 @@ export function ModuleApiTab({
                 type="button"
                 data-testid={isFocused ? "confirm-quote-run-btn" : undefined}
                 className="bc-btn bc-btn-primary bc-btn-sm"
-                disabled={testing}
+                disabled={testing || (preparedExternalProvider !== null && !externalQuoteConsentAck)}
                 onClick={() => void handleConfirmPreparedQuote()}
               >
                 {testing ? "Executing Container…" : "Confirm & Execute"}
@@ -1090,20 +1134,49 @@ export function ModuleRunsTab({
               </span>
             </div>
             <div className="bc-artifact-list">
-              {activeRun.artifacts.map((art) => (
-                <a
-                  key={art.name}
-                  className="bc-artifact-chip"
-                  href={`/api/v1/runs/${encodeURIComponent(activeRun.run_id)}/artifacts/${encodeURIComponent(art.name)}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <span className="mono">{art.name}</span>
-                  <span className="bc-caption">
-                    {(art.size_bytes / 1024).toFixed(1)} KB
-                  </span>
-                </a>
-              ))}
+              {activeRun.artifacts.map((art) => {
+                const encodedArtPath = art.name
+                  .split("/")
+                  .map(encodeURIComponent)
+                  .join("/");
+                const artifactUrl = `/api/v1/runs/${encodeURIComponent(activeRun.run_id)}/artifacts/${encodedArtPath}`;
+                const basename = art.name.split("/").pop() || "artifact.bin";
+                return (
+                  <button
+                    key={art.name}
+                    type="button"
+                    className="bc-artifact-chip"
+                    onClick={() => {
+                      // SEC-18: Download artifacts as inert application/octet-stream blobs
+                      // instead of opening container-authored HTML/SVG inline in the Workbench origin.
+                      void fetch(artifactUrl, { credentials: "include" })
+                        .then((r) => {
+                          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                          return r.arrayBuffer();
+                        })
+                        .then((buf) => {
+                          const blob = new Blob([buf], {
+                            type: "application/octet-stream",
+                          });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = basename;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+                        })
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <span className="mono">{art.name}</span>
+                    <span className="bc-caption">
+                      {(art.size_bytes / 1024).toFixed(1)} KB
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

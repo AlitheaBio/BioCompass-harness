@@ -314,16 +314,24 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         "expected container stdout log over broadcast channel, got {streamed_lines:?}"
     );
 
-    // Verify result_json reflects unmasked 3-level partner grant & Lung-only row_scope.
+    // Verify result_json enforces compute_only aggregate-only contract (SEC-20) & Lung-only row_scope.
     let res = run.result_json.as_ref().expect("result.json present");
-    assert_eq!(res["sequence_policy"], json!("unmasked_research"));
-    let top = res["top_candidates"].as_array().expect("top_candidates array");
-    assert!(!top.is_empty());
-    for row in top {
-        let seq = row["sequence"].as_str().expect("sequence string");
-        assert!(seq.len() >= 8 && seq != "***", "expected real IUPAC sequence, got {row}");
+    assert_eq!(res["sequence_policy"], json!("aggregate_compute_only"));
+    assert!(
+        res.get("top_candidates").is_none(),
+        "SEC-20: compute_only module must never emit raw top_candidates rows: {res}"
+    );
+    let organ_rows = res["organ_condition_breakdown"]
+        .as_array()
+        .expect("organ_condition_breakdown array");
+    assert!(!organ_rows.is_empty());
+    for row in organ_rows {
         assert_eq!(row["organ"], json!("Lung"), "leaked non-Lung organ in result: {row}");
     }
+    let pwm = res["motif_position_frequencies"]
+        .as_array()
+        .expect("motif_position_frequencies array");
+    assert!(!pwm.is_empty(), "expected aggregate motif PWM statistics");
 
     // Verify BlobStore persisted result.json, CSV artifact, and froglet_chain.json.
     assert!(

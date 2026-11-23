@@ -15,10 +15,14 @@ export function localOwnerSession(): string | null {
   }
 }
 
+export function localOwnerHeaders(): Record<string, string> {
+  const session = localOwnerSession();
+  return session ? { "X-BioCompass-Local-Owner": session } : {};
+}
+
 // Call only for known local endpoints. Never forward the header across a redirect.
 export function localOwnerRequest() {
-  const session = localOwnerSession();
-  const headers: Record<string, string> = session ? { "X-BioCompass-Local-Owner": session } : {};
+  const headers = localOwnerHeaders();
   return {
     mode: "same-origin" as const,
     redirect: "error" as const,

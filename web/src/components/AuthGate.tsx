@@ -8,6 +8,7 @@ import {
   registerDemoAccount,
 } from "../api";
 import type { AuthPrincipal } from "../types";
+import { isSafeHttpUrl } from "../safeUrl";
 import { CompassMark, IconShield } from "./Icons";
 
 export interface AuthGateProps {
@@ -125,7 +126,13 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
     setBusy(true);
     try {
       const url = await fetchOidcAuthorizeUrl(loginOrgId.trim() || undefined);
-      window.location.assign(url);
+      const safeUrl = isSafeHttpUrl(url, { allowRelative: true });
+      if (!safeUrl) {
+        setError("Identity provider returned an invalid or unsafe redirect URL.");
+        setBusy(false);
+        return;
+      }
+      window.location.assign(safeUrl);
     } catch (err: unknown) {
       if (err instanceof ApiClientError) {
         const message = formatErrorInline(err);

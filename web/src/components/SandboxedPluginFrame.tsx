@@ -7,6 +7,7 @@ import {
   type SdkRunRecord,
 } from "@biocompass/plugin-sdk";
 import { prepareRun, queryCatalog } from "../api";
+import { enforcePluginDownloadPolicy, enforcePluginQueryGrant } from "../pluginBridgePolicy";
 import type { DatasetGrant, PluginSummary, RunQuote, RunRecord } from "../types";
 
 function toSdkRunRecord(run: RunRecord | null): SdkRunRecord | null {
@@ -136,18 +137,14 @@ export function SandboxedPluginFrame({
     const bridge = attachPluginHostBridge(iframe, {
       getContext: () => contextRef.current,
       queryCatalog: async (query) => {
-        if (!grantRef.current) {
-          throw new Error("Select a dataset grant with row access before querying a catalog.");
-        }
-        if (grantRef.current.level !== "rows") {
-          throw new Error(
-            `Grant '${grantRef.current.label}' is '${grantRef.current.level}' — direct catalog row queries require level 'rows'. Run a curated module instead.`,
-          );
-        }
+        const safeQuery = enforcePluginQueryGrant(
+          grantRef.current,
+          query as unknown as Record<string, unknown>,
+        ) as typeof query;
         return queryCatalog(
           contextRef.current.defaultCatalogId,
-          grantRef.current.grant_id,
-          query,
+          grantRef.current!.grant_id,
+          safeQuery,
           contextRef.current.releaseVersion,
         );
       },
@@ -182,6 +179,11 @@ export function SandboxedPluginFrame({
         syncDraftRef.current?.(plugin.manifest.id, params);
       },
       downloadFile: ({ filename, mimeType, content, encoding }) => {
+        const { safeFilename } = enforcePluginDownloadPolicy(grantRef.current, filename);
+        const safeMime =
+          mimeType && !/html|svg|xml|javascript/i.test(mimeType)
+            ? mimeType
+            : "application/octet-stream";
         let blob: Blob;
         if (encoding === "base64") {
           const bin = window.atob(content);
@@ -190,17 +192,17 @@ export function SandboxedPluginFrame({
             bytes[i] = bin.charCodeAt(i);
           }
           blob = new Blob([bytes], {
-            type: mimeType || "application/octet-stream",
+            type: safeMime,
           });
         } else {
           blob = new Blob([content], {
-            type: mimeType || "text/plain;charset=utf-8",
+            type: safeMime === "application/octet-stream" ? "application/octet-stream" : mimeType || "text/plain;charset=utf-8",
           });
         }
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = filename;
+        link.download = safeFilename;
         link.style.display = "none";
         document.body.appendChild(link);
         link.click();
