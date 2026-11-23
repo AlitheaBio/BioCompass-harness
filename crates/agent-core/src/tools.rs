@@ -13,7 +13,9 @@ use biocompass_core_traits::{
 };
 use biocompass_data_engine::{CatalogSummary, QueryTableResult};
 use biocompass_node_runtime::InProcessNodeRuntime;
-use biocompass_plugin_spec::{LoadedPlugin, TemplateKind, write_template_to_dir};
+use biocompass_plugin_spec::{
+    LoadedPlugin, TemplateKind, validate_scaffold_plugin_id, write_template_to_dir,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -85,7 +87,12 @@ impl AgentExecutionPort for InProcessNodeRuntime {
 
 /// Return the exact 8 tools exposed to the LLM (`confirm_run` is strictly excluded).
 pub fn allowed_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    allowed_tool_definitions_for(true)
+}
+
+/// Return allowed tools, hiding `scaffold_plugin` outside local workstation mode (`SEC-24`).
+pub fn allowed_tool_definitions_for(allow_scaffold: bool) -> Vec<ToolDefinition> {
+    let mut tools = vec![
         ToolDefinition {
             name: "list_catalogs".into(),
             description: "List registered DuckLake scientific catalogs, sealed snapshots, facets, and the active DatasetGrant policy.".into(),
@@ -205,7 +212,11 @@ pub fn allowed_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
-    ]
+    ];
+    if !allow_scaffold {
+        tools.retain(|t| t.name != "scaffold_plugin");
+    }
+    tools
 }
 
 /// Spill tool output JSON into `BlobStore` when larger than `threshold_bytes`, returning a `< 2 KB`
@@ -284,6 +295,35 @@ pub async fn execute_agent_tool(
     blob_store: &dyn BlobStore,
     scaffold_root: &Path,
     stream_tx: Option<&mpsc::Sender<AgentStreamEvent>>,
+) -> Value {
+    execute_agent_tool_with_options(
+        call,
+        org_id,
+        session_id,
+        active_grant,
+        port,
+        session_store,
+        blob_store,
+        scaffold_root,
+        stream_tx,
+        true,
+    )
+    .await
+}
+
+/// Execute one validated tool call with explicit local-mode scaffolding policy (`SEC-24`).
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_agent_tool_with_options(
+    call: &LlmToolCall,
+    org_id: &OrgId,
+    session_id: &SessionId,
+    active_grant: Option<&DatasetGrant>,
+    port: &dyn AgentExecutionPort,
+    session_store: &dyn SessionStore,
+    blob_store: &dyn BlobStore,
+    scaffold_root: &Path,
+    stream_tx: Option<&mpsc::Sender<AgentStreamEvent>>,
+    allow_scaffold: bool,
 ) -> Value {
     let outcome: CompassResult<Value> = async {
         match call.name.as_str() {
@@ -600,6 +640,11 @@ pub async fn execute_agent_tool(
                 }))
             }
             "scaffold_plugin" => {
+                if !allow_scaffold {
+                    return Err(CompassError::AccessDenied(
+                        "FORBIDDEN: scaffold_plugin is only available in local workstation mode".into(),
+                    ));
+                }
                 let template_raw = call
                     .arguments
                     .get("template")
@@ -628,19 +673,7 @@ pub async fn execute_agent_tool(
                     .unwrap_or(false);
 
                 let kind = TemplateKind::parse(template_raw)?;
-                let slug = plugin_id
-                    .split('/')
-                    .nth(1)
-                    .filter(|s| {
-                        !s.is_empty()
-                            && s.chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                    })
-                    .ok_or_else(|| {
-                        CompassError::Validation(
-                            "plugin_id slug must contain only [A-Za-z0-9_-]".into(),
-                        )
-                    })?;
+                let (_ns, slug) = validate_scaffold_plugin_id(plugin_id)?;
                 let target_dir = scaffold_root.join(slug);
                 let created =
                     write_template_to_dir(kind, plugin_id, display_name, include_ui, &target_dir)?;

@@ -1,9 +1,84 @@
 //! Clean starter plugin generators for `python-uv`, `r-bioc`, `nextflow`, and `rust-cli`.
 
-use biocompass_core_traits::{CompassError, CompassResult};
+use biocompass_core_traits::{CompassError, CompassResult, PluginId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Strictly validate a 2-segment scaffold `plugin_id` (`<namespace>/<slug>`) where both segments
+/// match `^[a-z0-9][a-z0-9_-]{0,62}$` (`SEC-24`). Returns `(namespace, slug)`.
+pub fn validate_scaffold_plugin_id(plugin_id: &str) -> CompassResult<(&str, &str)> {
+    let trimmed = plugin_id.trim();
+    if trimmed != plugin_id {
+        return Err(CompassError::Validation(
+            "plugin_id must not have leading or trailing whitespace".into(),
+        ));
+    }
+    let _ = PluginId::new(trimmed).map_err(CompassError::Validation)?;
+    let mut parts = trimmed.split('/');
+    let ns = parts.next().unwrap_or("");
+    let slug = parts.next().unwrap_or("");
+    if parts.next().is_some() || !is_strict_segment(ns) || !is_strict_segment(slug) {
+        return Err(CompassError::Validation(
+            "plugin_id must be '<namespace>/<slug>' where each segment matches ^[a-z0-9][a-z0-9_-]{0,62}$".into(),
+        ));
+    }
+    Ok((ns, slug))
+}
+
+fn is_strict_segment(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    is_alnum(bytes[0])
+        && bytes
+            .iter()
+            .all(|&b| is_alnum(b) || matches!(b, b'-' | b'_'))
+}
+
+fn validate_display_name(display_name: &str) -> CompassResult<&str> {
+    let trimmed = display_name.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(CompassError::Validation(
+            "display_name must be between 1 and 128 characters".into(),
+        ));
+    }
+    if display_name.chars().any(char::is_control) {
+        return Err(CompassError::Validation(
+            "display_name must not contain control characters or newlines".into(),
+        ));
+    }
+    Ok(trimmed)
+}
+
+fn toml_quote(raw: &str) -> String {
+    toml::Value::String(raw.to_owned()).to_string()
+}
+
+fn html_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn js_string_literal(raw: &str) -> String {
+    serde_json::to_string(raw)
+        .unwrap_or_else(|_| "\"\"".to_owned())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+}
 
 /// Supported first-party container starter templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,12 +120,17 @@ pub fn render_template_files(
     display_name: &str,
     include_vite_ui: bool,
 ) -> CompassResult<BTreeMap<String, String>> {
-    if !plugin_id.contains('/') {
-        return Err(CompassError::Validation(
-            "plugin_id must follow '<namespace>/<name>' format".into(),
-        ));
-    }
-    let slug = plugin_id.split('/').nth(1).unwrap_or("bio-plugin");
+    let (_ns, slug) = validate_scaffold_plugin_id(plugin_id)?;
+    let clean_name = validate_display_name(display_name)?;
+    let plugin_id_toml = toml_quote(plugin_id);
+    let display_name_toml = toml_quote(clean_name);
+    let image_toml = toml_quote(&format!("local/{slug}:dev"));
+    let skill_desc_yaml = serde_json::to_string(&format!(
+        "Run {clean_name} ({plugin_id}) on scoped Parquet immunopeptidomics cohorts to quantify HLA allele presentation and peptide length distributions."
+    ))
+    .map_err(|e| CompassError::Internal(format!("encode SKILL.md description: {e}")))?;
+    let display_name_html = html_escape(clean_name);
+    let plugin_id_js = js_string_literal(plugin_id);
     let mut files = BTreeMap::new();
 
     let ui_block = if include_vite_ui {
@@ -60,14 +140,14 @@ pub fn render_template_files(
     };
 
     let manifest = format!(
-        r#"id = "{plugin_id}"
-name = "{display_name}"
+        r#"id = {plugin_id_toml}
+name = {display_name_toml}
 version = "0.1.0"
 description = "Cloud-agnostic OCI bio-compute module ({template}) reading /in/params.json + /in/data/*.parquet and emitting /out/result.json."
 category = "Immunopeptidomics"
 execution = "either"
 requires_catalog_level = "compute_only"
-image = "local/{slug}:dev"
+image = {image_toml}
 network = "none"
 price_milli_act = 5000
 
@@ -127,10 +207,10 @@ data_pointer = "/allele_counts"
     let skill_md = format!(
         r#"---
 name: {slug}
-description: Run {display_name} ({plugin_id}) on scoped Parquet immunopeptidomics cohorts to quantify HLA allele presentation and peptide length distributions.
+description: {skill_desc_yaml}
 ---
 
-# {display_name} (`{plugin_id}`)
+# {clean_name} (`{plugin_id}`)
 
 ## When to Invoke
 Invoke `{plugin_id}` when the scientist asks to evaluate HLA class I presentation, filter 8–14mer ligand lengths, or compare organ-specific binder enrichment on a catalog cohort.
@@ -138,7 +218,7 @@ Invoke `{plugin_id}` when the scientist asks to evaluate HLA class I presentatio
 ## Container I/O Contract
 - **Inputs (`/in`, read-only):**
   - `/in/params.json` validated against `[inputs.schema]` in `plugin.toml`
-  - `/in/data/cohort.parquet` materialized by `biocompass-data-engine` with active Grant row scope and `***` sequence masking applied
+  - `/in/data/cohort.parquet` materialized by `biocompass-data-engine` with active Grant row scope
 - **Outputs (`/out`, read-write):**
   - `/out/result.json` structured summary rendered by BioCompass views and hashed into the Froglet BIP340 Schnorr `Receipt`
   - `/out/artifacts/*` supplementary tables or plots
@@ -345,8 +425,8 @@ fn main() {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';" />
-  <title>{display_name} — Sandboxed Vite Plugin View</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" />
+  <title>{display_name_html} — Sandboxed Vite Plugin View</title>
   <style>
     body {{ font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: #faf9fe; color: #1d1936; }}
     .card {{ background: #fff; border: 1px solid #e2ddf5; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }}
@@ -358,26 +438,27 @@ fn main() {
 <body>
   <div class="card">
     <span class="badge">iframe sandbox="allow-scripts" · @biocompass/plugin-sdk</span>
-    <h3 style="margin:8px 0 4px">{display_name}</h3>
+    <h3 style="margin:8px 0 4px">{display_name_html}</h3>
     <p style="margin:0 0 10px;font-size:13px;color:#575279">Zero host cookies or network access. Communicates strictly via typed postMessage JSON-RPC 2.0.</p>
     <button id="invoke-btn">Request Run Quote via Host Bridge</button>
   </div>
   <pre id="out">Waiting for @biocompass/plugin-sdk host handshake...</pre>
   <script>
     const out = document.getElementById('out');
+    const PLUGIN_ID = {plugin_id_js};
     let reqSeq = 1;
     window.addEventListener('message', (ev) => {{
       if (ev.data && ev.data.jsonrpc === '2.0') {{
         out.textContent = JSON.stringify(ev.data, null, 2);
       }}
     }});
-    window.parent.postMessage({{ jsonrpc: '2.0', id: reqSeq++, method: 'plugin.ready', params: {{ pluginId: '{plugin_id}' }} }}, '*');
+    window.parent.postMessage({{ jsonrpc: '2.0', id: reqSeq++, method: 'plugin.ready', params: {{ pluginId: PLUGIN_ID }} }}, '*');
     document.getElementById('invoke-btn').addEventListener('click', () => {{
       window.parent.postMessage({{
         jsonrpc: '2.0',
         id: reqSeq++,
         method: 'froglet.prepareRun',
-        params: {{ pluginId: '{plugin_id}', params: {{ alleles: ['HLA-A*02:01', 'HLA-B*07:02'], min_length: 8, max_length: 11 }} }}
+        params: {{ pluginId: PLUGIN_ID, params: {{ alleles: ['HLA-A*02:01', 'HLA-B*07:02'], min_length: 8, max_length: 11 }} }}
       }}, '*');
     }});
   </script>
@@ -391,7 +472,7 @@ fn main() {
     Ok(files)
 }
 
-/// Write scaffolded plugin files into `target_dir`.
+/// Write scaffolded plugin files into a brand-new `target_dir` (`SEC-24`: refuses to overwrite existing dirs).
 pub fn write_template_to_dir(
     kind: TemplateKind,
     plugin_id: &str,
@@ -400,6 +481,29 @@ pub fn write_template_to_dir(
     target_dir: &Path,
 ) -> CompassResult<Vec<String>> {
     let files = render_template_files(kind, plugin_id, display_name, include_vite_ui)?;
+    if target_dir.exists() {
+        return Err(CompassError::IntegrityViolation(format!(
+            "target plugin directory '{}' already exists; refusing to overwrite",
+            target_dir.display()
+        )));
+    }
+    if let Some(parent) = target_dir.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CompassError::Storage(format!("create {}: {e}", parent.display())))?;
+    }
+    std::fs::create_dir(target_dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            CompassError::IntegrityViolation(format!(
+                "target plugin directory '{}' already exists; refusing to overwrite",
+                target_dir.display()
+            ))
+        } else {
+            CompassError::Storage(format!("create {}: {e}", target_dir.display()))
+        }
+    })?;
+
     let mut written = Vec::with_capacity(files.len());
     for (rel, content) in files {
         let full = target_dir.join(&rel);

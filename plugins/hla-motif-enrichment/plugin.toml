@@ -88,7 +88,7 @@ title = "Strong Binders (<=50 nM) by HLA Allele"
 data_pointer = "/allele_counts"
 
 [[views]]
-id = "top-candidates"
+id = "organ-breakdown"
 kind = "table"
-title = "Top Ranked Candidate Ligands"
-data_pointer = "/top_candidates"
+title = "Aggregate Organ & Condition Summary"
+data_pointer = "/organ_condition_breakdown"

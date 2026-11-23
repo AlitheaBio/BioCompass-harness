@@ -377,22 +377,24 @@ print("AUDIT_OK")
     let result_raw =
         std::fs::read_to_string(bio_out.join("result.json")).expect("read /out/result.json");
     let result_json: Value = serde_json::from_str(&result_raw).expect("parse /out/result.json");
-    assert_eq!(result_json["sequence_policy"], json!("unmasked_research"));
-    let candidates = result_json["top_candidates"]
-        .as_array()
-        .expect("top_candidates array");
-    assert!(!candidates.is_empty());
+    assert_eq!(result_json["sequence_policy"], json!("aggregate_compute_only"));
     assert!(
-        candidates.iter().all(|c| {
-            c["sequence"]
-                .as_str()
-                .is_some_and(|s| s.len() >= 8 && s != "***")
-        }),
-        "every candidate emitted under 3-level rows grant must carry unmasked IUPAC sequence"
+        result_json.get("top_candidates").is_none(),
+        "SEC-20: compute_only module must never emit row-level top_candidates"
+    );
+    let organ_rows = result_json["organ_condition_breakdown"]
+        .as_array()
+        .expect("organ_condition_breakdown array");
+    assert!(!organ_rows.is_empty());
+    assert!(
+        organ_rows.iter().all(|r| r["organ"] == json!("Lung")),
+        "every aggregate breakdown emitted by container must respect Lung row_scope"
     );
     assert!(
-        candidates.iter().all(|c| c["organ"] == json!("Lung")),
-        "every candidate emitted by container must respect Lung row_scope"
+        result_json["motif_position_frequencies"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "expected aggregate motif PWM frequencies"
     );
     assert!(
         bio_out.join("artifacts/allele_binding_summary.csv").is_file(),

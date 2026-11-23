@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub use templates::{TemplateKind, render_template_files, write_template_to_dir};
+pub use templates::{
+    TemplateKind, render_template_files, validate_scaffold_plugin_id, write_template_to_dir,
+};
 
 /// Container network confinement policy declared in `plugin.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,12 +617,13 @@ mod tests {
             TemplateKind::RustCli,
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join("hla-starter");
             let written = write_template_to_dir(
                 kind,
                 "alithea/hla-starter",
                 "HLA Starter Module",
                 true,
-                dir.path(),
+                &target,
             )
             .expect("scaffold template");
             assert!(written.contains(&"plugin.toml".to_string()));
@@ -629,7 +632,7 @@ mod tests {
             assert!(written.contains(&"ui/dist/index.html".to_string()));
 
             let loaded =
-                LoadedPlugin::load_from_dir(dir.path(), true).expect("load scaffolded plugin");
+                LoadedPlugin::load_from_dir(&target, true).expect("load scaffolded plugin");
             assert_eq!(loaded.manifest.id.as_str(), "alithea/hla-starter");
             assert!(loaded.skill.is_some());
 
@@ -739,5 +742,89 @@ image = "local/test:dev"
 dataset_input_contract = "biocompass.toxicity-screening.v1"
 "#;
         assert!(PluginManifest::from_toml_str(wrong_contract, true).is_err());
+    }
+
+    #[test]
+    fn sec_24_scaffold_validates_strict_plugin_id_escapes_templates_and_refuses_overwrite() {
+        for bad_id in [
+            "../evil/slug",
+            "alithea/slug/extra",
+            "alithea/slug'alert(1)",
+            "alithea\"/slug",
+            "Alithea/slug",
+            "alithea/slug\nnetwork = \"all\"",
+            "no-slash",
+        ] {
+            assert!(
+                render_template_files(TemplateKind::PythonUv, bad_id, "Safe Name", true).is_err(),
+                "SEC-24 must reject invalid plugin_id '{bad_id}'"
+            );
+        }
+        assert!(
+            render_template_files(
+                TemplateKind::PythonUv,
+                "alithea/clean-mod",
+                "Bad\nnetwork = \"all\"",
+                true
+            )
+            .is_err()
+        );
+        let tricky_name = r#"HLA "Binder" <script>alert(1)</script> & O'Brien"#;
+        let files = render_template_files(
+            TemplateKind::PythonUv,
+            "alithea/clean-mod",
+            tricky_name,
+            true,
+        )
+        .expect("render with tricky display_name");
+        let parsed: PluginManifest =
+            toml::from_str(&files["plugin.toml"]).expect("plugin.toml must parse cleanly");
+        assert_eq!(parsed.name, tricky_name);
+        let html = &files["ui/dist/index.html"];
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "SEC-24 must HTML-escape display_name in ui/dist/index.html"
+        );
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("clean-mod");
+        write_template_to_dir(
+            TemplateKind::PythonUv,
+            "alithea/clean-mod",
+            "Clean Mod",
+            false,
+            &target,
+        )
+        .expect("first scaffold succeeds");
+        let second = write_template_to_dir(
+            TemplateKind::PythonUv,
+            "alithea/clean-mod",
+            "Overwrite Attempt",
+            false,
+            &target,
+        )
+        .expect_err("SEC-24 must refuse overwriting existing directory");
+        assert!(matches!(second, CompassError::IntegrityViolation(_)));
+    }
+
+    #[test]
+    fn sec_20_and_sec_30_bundled_hla_plugins_python_regression_suite() {
+        let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let test_script = ws_root.join("plugins/test_sec_20_30_bundled_plugins.py");
+        let out = std::process::Command::new("python3")
+            .arg(&test_script)
+            .arg("-v")
+            .output()
+            .expect("run bundled plugin python tests");
+        assert!(
+            out.status.success(),
+            "bundled plugin SEC-20/SEC-30 tests failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

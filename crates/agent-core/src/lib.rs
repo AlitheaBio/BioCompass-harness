@@ -29,8 +29,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tools::{
-    AgentExecutionPort, DEFAULT_SPILL_THRESHOLD_BYTES, allowed_tool_definitions,
-    execute_agent_tool, spill_tool_output_if_needed,
+    AgentExecutionPort, DEFAULT_SPILL_THRESHOLD_BYTES, allowed_tool_definitions_for,
+    execute_agent_tool_with_options, spill_tool_output_if_needed,
 };
 
 /// Real-time SSE events emitted during an agent turn.
@@ -88,6 +88,7 @@ pub struct AgentTurnSummary {
 pub struct AgentRuntime {
     http: Client,
     config: AgentConfig,
+    allow_scaffold: bool,
     llm: Arc<RwLock<Option<LlmProviderConfig>>>,
     session_store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
@@ -105,11 +106,19 @@ impl AgentRuntime {
         Ok(Self {
             http: build_http_client()?,
             config,
+            allow_scaffold: true,
             llm: Arc::new(RwLock::new(initial_llm)),
             session_store,
             blob_store,
             execution_port,
         })
+    }
+
+    /// Enable or disable the local-only `scaffold_plugin` agent tool (`SEC-24`).
+    #[must_use]
+    pub fn with_allow_scaffold(mut self, allow: bool) -> Self {
+        self.allow_scaffold = allow;
+        self
     }
 
     /// Use a capability bound by the caller to this one execution.
@@ -186,7 +195,7 @@ impl AgentRuntime {
         );
 
         if llm_cfg.is_local_cli() {
-            let mcp = ScopedMcpServer::start(
+            let mcp = ScopedMcpServer::start_with_options(
                 session.org_id.clone(),
                 session_id.clone(),
                 active_grant.cloned(),
@@ -196,6 +205,7 @@ impl AgentRuntime {
                 self.config.scaffold_root_dir.clone(),
                 self.config.spill_threshold_bytes,
                 stream_tx.clone(),
+                self.allow_scaffold,
             )
             .await?;
 
@@ -203,6 +213,7 @@ impl AgentRuntime {
                 .config
                 .scaffold_root_dir
                 .parent()
+                .filter(|p| !p.as_os_str().is_empty())
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| self.config.scaffold_root_dir.clone());
             let mcp_url = mcp.url().to_owned();
@@ -249,7 +260,7 @@ impl AgentRuntime {
             });
         }
 
-        let tools = allowed_tool_definitions();
+        let tools = allowed_tool_definitions_for(self.allow_scaffold);
 
         let mut prepared_quotes = Vec::new();
         let mut total_tool_calls = 0usize;
@@ -339,7 +350,7 @@ impl AgentRuntime {
                     json!({"status": "execution_paused", "message": "Waiting for the scientist."})
                 } else {
                     total_tool_calls += 1;
-                    execute_agent_tool(
+                    execute_agent_tool_with_options(
                         tc,
                         &session.org_id,
                         session_id,
@@ -349,6 +360,7 @@ impl AgentRuntime {
                         self.blob_store.as_ref(),
                         &self.config.scaffold_root_dir,
                         stream_tx.as_ref(),
+                        self.allow_scaffold,
                     )
                     .await
                 };
