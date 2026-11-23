@@ -9,10 +9,12 @@ import {
   offeredModuleDownloadUrl,
   publishModuleOffer,
   subscribeModuleOffer,
+  updateModuleOfferPrice,
 } from "../api";
 import { sanitizeFederatedLaunchUrl } from "../safeUrl";
 import { formatFederatedOfferTarget } from "../milestoneBPolicy";
 import {
+  formatMilliAct,
   hasMinOrgRole,
   type AuthPrincipal,
   type FederatedModuleOffer,
@@ -58,6 +60,13 @@ export function ModuleOffersView({
   const [scope, setScope] = useState<ModuleOfferScope>("private");
   const [recipients, setRecipients] = useState("");
   const [requiresApproval, setRequiresApproval] = useState(false);
+  const [manifestOfferId, setManifestOfferId] = useState("standard");
+  const [negotiatedPriceEur, setNegotiatedPriceEur] = useState("");
+  const [negotiatedBaseFeeEur, setNegotiatedBaseFeeEur] = useState("");
+  const [editingPriceOfferId, setEditingPriceOfferId] = useState<string | null>(null);
+  const [editPriceEur, setEditPriceEur] = useState("");
+  const [editBaseFeeEur, setEditBaseFeeEur] = useState("0");
+  const [editManifestOfferId, setEditManifestOfferId] = useState("standard");
 
   const selectedRelease = releases.find((item) => releaseKey(item) === releaseId);
   const canShare = selectedRelease?.visibility === "public_approved";
@@ -106,17 +115,57 @@ export function ModuleOffersView({
     event.preventDefault();
     if (!selectedRelease || !title.trim()) return;
     await perform(async () => {
+      const parsedRecipients = scope === "custom_shared" ? recipients.split(/[\s,]+/).filter(Boolean) : [];
+      const negotiatedPrice =
+        scope === "custom_shared" && negotiatedPriceEur.trim() !== ""
+          ? Math.round(Number(negotiatedPriceEur) * 1000)
+          : undefined;
+      const negotiatedBaseFee =
+        scope === "custom_shared" && negotiatedBaseFeeEur.trim() !== ""
+          ? Math.round(Number(negotiatedBaseFeeEur) * 1000)
+          : undefined;
       await publishModuleOffer({
         plugin_id: selectedRelease.plugin_id,
         version: selectedRelease.version,
         title: title.trim(),
         action,
         scope,
-        allowed_orgs: scope === "custom_shared" ? recipients.split(/[\s,]+/).filter(Boolean) : [],
+        allowed_orgs: parsedRecipients,
         approval_required: scope !== "private" && requiresApproval,
+        ...(negotiatedPrice != null && Number.isFinite(negotiatedPrice)
+          ? {
+              manifest_offer_id: manifestOfferId.trim() || "standard",
+              price_milli_act: negotiatedPrice,
+              base_fee_milli_act:
+                negotiatedBaseFee != null && Number.isFinite(negotiatedBaseFee)
+                  ? negotiatedBaseFee
+                  : 0,
+            }
+          : {}),
       });
       setTitle("");
+      setNegotiatedPriceEur("");
+      setNegotiatedBaseFeeEur("");
       setMessage("Module offer published.");
+      await refresh();
+    });
+  }
+
+  async function saveNegotiatedPrice(offerId: string) {
+    const priceMilli = Math.round(Number(editPriceEur) * 1000);
+    const baseMilli = Math.round((Number(editBaseFeeEur) || 0) * 1000);
+    if (!Number.isFinite(priceMilli) || priceMilli < 0) {
+      setError("Enter a valid non-negative negotiated EUR price.");
+      return;
+    }
+    await perform(async () => {
+      await updateModuleOfferPrice(offerId, {
+        manifest_offer_id: editManifestOfferId.trim() || "standard",
+        price_milli_act: priceMilli,
+        base_fee_milli_act: Math.max(0, baseMilli),
+      });
+      setEditingPriceOfferId(null);
+      setMessage("Negotiated EUR rate updated.");
       await refresh();
     });
   }
@@ -138,7 +187,7 @@ export function ModuleOffersView({
     if (offer.action === "run") {
       return canRequest ? (
         <button type="button" className="bc-btn bc-btn-secondary" disabled={busy}
-          onClick={() => void perform(() => onOpenRun(offer))}>Open run</button>
+          onClick={() => void perform(() => onOpenRun(offer))}>Open</button>
       ) : "Run access granted";
     }
 
@@ -169,7 +218,7 @@ export function ModuleOffersView({
         ) : (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Offer</th><th>Module release</th><th>Scope</th><th>Access</th></tr></thead>
+              <thead><tr><th>Offer</th><th>Module release</th><th>Scope &amp; Rate</th><th>Access</th></tr></thead>
               <tbody>
                 {offers.map((offer) => (
                   <tr key={offer.offer_id} data-testid={`module-offer-${offer.offer_id}`}>
@@ -178,7 +227,72 @@ export function ModuleOffersView({
                       <div className="bc-caption">{offer.action === "run" ? "Hosted run" : "Download"}</div>
                     </th>
                     <td className="mono">{offer.plugin_id} · {offer.version}</td>
-                    <td>{scopeLabels[offer.scope]}</td>
+                    <td>
+                      <div>{scopeLabels[offer.scope]}</div>
+                      {offer.price_milli_act != null && (
+                        <div className="bc-caption mono" data-testid={`module-offer-price-${offer.offer_id}`}>
+                          Negotiated: {formatMilliAct(offer.price_milli_act)}
+                          {offer.base_fee_milli_act ? ` (+${formatMilliAct(offer.base_fee_milli_act)} base)` : ""}
+                        </div>
+                      )}
+                      {canApprove && offer.scope === "custom_shared" && offer.publisher_org_id === principal.org_id && (
+                        editingPriceOfferId === offer.offer_id ? (
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+                            <input
+                              type="text"
+                              className="bc-input mono"
+                              style={{ width: 88 }}
+                              placeholder="standard"
+                              value={editManifestOfferId}
+                              onChange={(e) => setEditManifestOfferId(e.target.value)}
+                            />
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              className="bc-input mono"
+                              style={{ width: 88 }}
+                              placeholder="EUR"
+                              value={editPriceEur}
+                              onChange={(e) => setEditPriceEur(e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              className="bc-btn bc-btn-primary bc-btn-sm"
+                              disabled={busy}
+                              onClick={() => void saveNegotiatedPrice(offer.offer_id)}
+                            >
+                              Save EUR
+                            </button>
+                            <button
+                              type="button"
+                              className="bc-btn bc-btn-ghost bc-btn-sm"
+                              onClick={() => setEditingPriceOfferId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="bc-btn bc-btn-ghost bc-btn-sm"
+                            style={{ marginTop: 4 }}
+                            onClick={() => {
+                              setEditingPriceOfferId(offer.offer_id);
+                              setEditManifestOfferId(offer.manifest_offer_id ?? "standard");
+                              setEditPriceEur(
+                                offer.price_milli_act != null ? (offer.price_milli_act / 1000).toFixed(2) : "",
+                              );
+                              setEditBaseFeeEur(
+                                offer.base_fee_milli_act != null ? (offer.base_fee_milli_act / 1000).toFixed(2) : "0",
+                              );
+                            }}
+                          >
+                            Set Negotiated EUR
+                          </button>
+                        )
+                      )}
+                    </td>
                     <td>{offerControls(offer)}</td>
                   </tr>
                 ))}
@@ -319,11 +433,28 @@ export function ModuleOffersView({
               {selectedRelease && !canShare && <span className="bc-caption">Shared offers require release approval.</span>}
             </label>
             {scope === "custom_shared" && (
-              <label className="bc-field">
-                <span className="bc-field-label">Recipient organization IDs</span>
-                <input className="bc-input" required value={recipients} placeholder="org-a, org-b"
-                  onChange={(event) => setRecipients(event.target.value)} />
-              </label>
+              <>
+                <label className="bc-field">
+                  <span className="bc-field-label">Recipient organization IDs</span>
+                  <input className="bc-input" required value={recipients} placeholder="org-a, org-b"
+                    onChange={(event) => setRecipients(event.target.value)} />
+                </label>
+                <label className="bc-field">
+                  <span className="bc-field-label">Negotiated Offer Tier ID (optional)</span>
+                  <input className="bc-input mono" value={manifestOfferId} placeholder="standard"
+                    onChange={(event) => setManifestOfferId(event.target.value)} />
+                </label>
+                <label className="bc-field">
+                  <span className="bc-field-label">Negotiated Run Price (EUR, optional)</span>
+                  <input type="number" step="0.01" min="0" className="bc-input mono" value={negotiatedPriceEur}
+                    placeholder="e.g. 2.50" onChange={(event) => setNegotiatedPriceEur(event.target.value)} />
+                </label>
+                <label className="bc-field">
+                  <span className="bc-field-label">Negotiated Base Fee (EUR, optional)</span>
+                  <input type="number" step="0.01" min="0" className="bc-input mono" value={negotiatedBaseFeeEur}
+                    placeholder="0.00" onChange={(event) => setNegotiatedBaseFeeEur(event.target.value)} />
+                </label>
+              </>
             )}
             {scope !== "private" && (
               <label className="bc-field">

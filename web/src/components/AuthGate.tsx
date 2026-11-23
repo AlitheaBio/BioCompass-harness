@@ -382,8 +382,8 @@ export function AuthGate({ onAuthenticated }: AuthGateProps) {
                 color: "var(--bc-text-secondary)",
               }}
             >
-              Your demo organization starts with 0 ACT. A platform administrator can add
-              compute credits. When available, you can explore the{" "}
+              Your demo organization starts with €0.00. A platform administrator can add
+              EUR balance. When available, you can explore the{" "}
               <code className="mono">alithea/hla-public-demo-v1</code> catalog.
             </div>
 

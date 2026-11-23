@@ -130,6 +130,10 @@ struct HubPluginDto {
     installed_locally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marketplace_offer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -143,6 +147,9 @@ pub struct HubPluginMeta {
     pub can_install: bool,
     pub installed_locally: bool,
     pub provider_label: Option<String>,
+    pub launch_url: Option<String>,
+    pub marketplace_offer_id: Option<String>,
+    pub hub_origin: Option<String>,
 }
 
 pub struct CompassHubClient {
@@ -157,6 +164,11 @@ pub struct CompassHubClient {
 }
 
 impl CompassHubClient {
+    /// Configured `compass-hub` base URL (without trailing slash).
+    pub fn base_url(&self) -> &str {
+        &self.cfg.base_url
+    }
+
     pub(crate) fn try_prepare_slot(&self) -> CompassResult<SemaphorePermit<'_>> {
         self.prepare_slots.try_acquire().map_err(|_| CompassError::RateLimited(
             "Too many quotes are being prepared. Retry shortly.".into(),
@@ -242,6 +254,9 @@ impl CompassHubClient {
             can_install: dto.can_install,
             installed_locally: dto.installed_locally,
             provider_label: dto.provider_label,
+            launch_url: dto.launch_url,
+            marketplace_offer_id: dto.marketplace_offer_id,
+            hub_origin: Some(self.cfg.base_url.clone()),
         };
         Ok((LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir: None }, meta))
     }
@@ -265,6 +280,9 @@ impl CompassHubClient {
                 can_install: dto.can_install,
                 installed_locally: dto.installed_locally,
                 provider_label: dto.provider_label,
+                launch_url: dto.launch_url,
+                marketplace_offer_id: dto.marketplace_offer_id,
+                hub_origin: Some(self.cfg.base_url.clone()),
             };
             (LoadedPlugin { manifest: dto.manifest, skill: dto.skill, root_dir }, meta)
         }).collect())
@@ -301,7 +319,11 @@ impl CompassHubClient {
             "sec-fetch-dest",
             "content-type",
             "accept",
+            "accept-encoding",
+            "mcp-session-id",
+            "if-none-match",
             "x-mollie-signature",
+            "x-biocompass-signature",
         ] {
             if let Some(val) = incoming_headers.get(name)
                 && let Ok(s) = val.to_str()
@@ -339,11 +361,15 @@ impl CompassHubClient {
         };
         for hdr in [
             header::CONTENT_TYPE,
+            header::CONTENT_ENCODING,
+            header::VARY,
             header::LOCATION,
             header::CONTENT_DISPOSITION,
             header::ETAG,
             axum::http::HeaderName::from_static("x-froglet-file-sha256"),
             axum::http::HeaderName::from_static("x-content-sha256"),
+            axum::http::HeaderName::from_static("x-biocompass-ui-bundle-hash"),
+            axum::http::HeaderName::from_static("mcp-session-id"),
             header::CACHE_CONTROL,
             header::RETRY_AFTER,
             header::REFERRER_POLICY,
@@ -1141,6 +1167,8 @@ impl WorkspaceRegistryPort for CompassHubClient {
                     can_install: false,
                     installed_locally: false,
                     provider_label: None,
+                    launch_url: None,
+                    marketplace_offer_id: None,
                 }),
             "POST /api/v1/plugins",
         )

@@ -5,6 +5,7 @@ import {
   shouldPromptQuoteConsent,
   shouldShowMarketplaceConsentModal,
 } from "./milestoneBPolicy";
+import { isLocalPlayLedgerContext, resolveModuleCardActions } from "./moduleListPolicy";
 import { buildStagedPluginChatDraft } from "./pluginBridgePolicy";
 import { useWorkspaceReadHandle, workspaceReadStorageChanged } from "./workspaceReadSession";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,6 +32,7 @@ import {
   fetchModuleOffers,
   fetchProjects,
   fetchRun,
+  fetchRunProvenance,
   fetchRuns,
   fetchSavedViews,
   fetchSessionEvents,
@@ -49,6 +51,7 @@ import {
   renameSession,
   scaffoldPlugin,
   streamAgentChatTurn,
+  subscribeNetworkOffer,
   followActiveRun,
   updateLlmConfig,
   updateSessionGrant,
@@ -60,6 +63,7 @@ import { PersonalAvatar } from "./components/PersonalAccountSettings";
 import { ShareResultButton, SharedResultFiles } from "./components/ResultSharing";
 import { SavedRunDialog } from "./components/SavedRunDialog";
 import { WorkspaceModuleVersions } from "./components/WorkspaceModuleVersions";
+import { WorkspaceHubChooser } from "./components/WorkspaceHubChooser";
 import { ArchiveResult } from "./components/ArchiveResult";
 import { MarketplaceConsentModal } from "./components/MarketplaceConsentModal";
 import { PaidRunConsent } from "./components/PaidRunConsent";
@@ -108,7 +112,7 @@ import { CapacityRequest } from "./components/ModuleTabs";
 import { OrgAdminView } from "./components/OrgAdminView";
 import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
 import {
-  formatMilliAct,
+  formatWorkspaceAmount,
   runStatusLabel,
   hasMinOrgRole,
   type AuthPrincipal,
@@ -121,8 +125,10 @@ import {
   type HealthStatus,
   type LedgerState,
   type LlmConfigResponse,
+  type MarketplaceOfferSummary,
   type MarketplaceStatus,
   type PeptideRecord,
+  type WorkspaceHubStatus,
   type PluginSummary,
   type ModuleOffer,
   type ProjectRecord,
@@ -1876,6 +1882,75 @@ export function App() {
     });
   }, [plugins, moduleSearch]);
 
+  const localPlayLedger = isLocalPlayLedgerContext(health, ledger);
+
+  const handleWorkspaceHubChanged = useCallback(async (updated: WorkspaceHubStatus) => {
+    setHealth((prev) =>
+      prev
+        ? {
+            ...prev,
+            workspace_hub: updated,
+            workspace_hub_url: updated.hub_url ?? prev.workspace_hub_url,
+          }
+        : prev,
+    );
+    try {
+      const [freshHealth, freshPlugins] = await Promise.all([fetchHealth(), fetchPlugins()]);
+      setHealth(freshHealth);
+      if (freshHealth.marketplace_status) {
+        setMarketplaceStatus(freshHealth.marketplace_status);
+      }
+      setPlugins(freshPlugins);
+    } catch {
+      // Non-fatal refresh error
+    }
+  }, []);
+
+  const handleAddNetworkOffer = useCallback(async (offer: MarketplaceOfferSummary, hubUrl: string) => {
+    const pluginId = offer.plugin_id ?? (offer.title.includes("/") ? offer.title : `network/${offer.id}`);
+    try {
+      await subscribeNetworkOffer({
+        offer_id: offer.id,
+        hub_url: hubUrl,
+        plugin_id: pluginId,
+        version: offer.version ?? "1.0.0",
+        title: offer.title,
+        description: offer.description ?? "",
+        kind: offer.kind,
+        provider_label: offer.provider_org ?? "Network provider",
+        ui_bundle_hash: offer.ui_bundle_hash ?? null,
+        ui_bundle_size_bytes: offer.ui_bundle_size_bytes ?? null,
+        launch_url: offer.launch_url ?? null,
+        price_milli_act: offer.price_milli_act ?? 0,
+      });
+      const freshPlugins = await fetchPlugins();
+      setPlugins(freshPlugins);
+      setModuleUpdate(`Added network module ${offer.title} to this workspace.`);
+    } catch (err: unknown) {
+      setModuleUpdate(formatClientError(err).message);
+    }
+  }, []);
+
+  const handleDownloadRunProvenance = useCallback(async (runId: string) => {
+    try {
+      const bundle = await fetchRunProvenance(runId);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `provenance-${runId.replace(/[^a-zA-Z0-9_-]/g, "_")}.bc.provenance.v1.json`;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err: unknown) {
+      setModuleUpdate(formatClientError(err).message);
+    }
+  }, []);
+
   const moduleRuntimeCounts = useMemo(
     () => ({
       all: searchMatchedPlugins.length,
@@ -3475,7 +3550,10 @@ export function App() {
                                 </div>
                                 {quoteObj && typeof quoteObj.estimated_cost_act === "number" && (
                                   <span className="bc-badge bc-badge-accent mono">
-                                    {formatMilliAct(quoteObj.estimated_cost_act)}
+                                    {formatWorkspaceAmount(
+                                      quoteObj.estimated_cost_act,
+                                      isLocalPlayLedgerContext(health, ledger, quoteObj),
+                                    )}
                                   </span>
                                 )}
                               </div>
@@ -3490,7 +3568,12 @@ export function App() {
                                     disabled={isConfirmingRun}
                                     onClick={() => handleConfirmPendingRun(quoteObj.run_id)}
                                   >
-                                    {isConfirmingRun ? "Running…" : `Approve ${formatMilliAct(quoteObj.estimated_cost_act)} run`}
+                                    {isConfirmingRun
+                                      ? "Running…"
+                                      : `Approve ${formatWorkspaceAmount(
+                                          quoteObj.estimated_cost_act,
+                                          isLocalPlayLedgerContext(health, ledger, quoteObj),
+                                        )} run`}
                                   </button>
                                 )}
                                 {isPending && quoteObj && requiresExternalProviderConsent(quoteObj) && (
@@ -3779,6 +3862,7 @@ export function App() {
                     isConfirmingRun &&
                     pendingQuote?.plugin_id === dockedPlugin.manifest.id && pendingQuote.plugin_version === dockedPlugin.manifest.version
                   }
+                  isLocalPlayLedger={localPlayLedger}
                   liveLogs={liveLogs}
                   verifyReport={verifyReport}
                   onFocus={() => handleFocusWindow(dockedWindow.id)}
@@ -3853,6 +3937,14 @@ export function App() {
                 </div>
               </div>
 
+              {health?.mode === "local" && (
+                <WorkspaceHubChooser
+                  compact
+                  initialStatus={health.workspace_hub ?? null}
+                  onHubChanged={handleWorkspaceHubChanged}
+                />
+              )}
+
               {health?.workspace_hub_url && (
                 <WorkspaceModuleDownloads hub={health.workspace_hub_url} bearer={workspaceBearer}
                   onBearer={setWorkspaceBearer} onInstalled={openInstalledRelease} />
@@ -3925,14 +4017,16 @@ export function App() {
                 <div className="bc-modules-grid">
                 {filteredPlugins.map((p) => {
                   const isInstalling = installingPluginId === p.manifest.id;
+                  const actions = resolveModuleCardActions(p, health?.mode === "local");
                   const runtimeIcon =
-                    p.execution_target === "alithea_cloud" ? (
+                    actions.runsIn === "cloud" ? (
                       <IconAlitheaCloud size={15} />
-                    ) : p.execution_target === "froglet_node" ? (
+                    ) : actions.runsIn === "network_provider" || actions.runsIn === "provider_edge" ? (
                       <IconFrogletNode size={13} />
                     ) : (
                       <IconLaptop size={13} />
                     );
+                  const useLocalCredits = localPlayLedger && actions.runsIn === "local";
 
                   return (
                     <article
@@ -3940,25 +4034,32 @@ export function App() {
                       data-testid={`plugin-card-${p.manifest.id}`}
                       className="bc-module-card"
                       onClick={() => {
-                        if (p.installed) {
+                        if (actions.canOpen) {
                           openOrFocusModuleWindow(p, p.has_custom_ui ? "ui" : "run");
-                        } else if (!p.detached_versions?.length) {
+                        } else if (actions.canInstall) {
                           void handleInstallPlugin(p);
                         }
                       }}
                     >
                       <div>
-                        <div className="bc-module-card-top">
-                          <span className="bc-badge bc-badge-neutral">
-                            {p.manifest.category}
+                        <div className="bc-module-card-top" style={{ gap: 6, flexWrap: "wrap" }}>
+                          <span
+                            className="bc-badge bc-badge-neutral"
+                            data-testid={`module-source-badge-${p.manifest.id}`}
+                            data-source={actions.source}
+                            title={`Source: ${actions.sourceLabel}`}
+                          >
+                            {actions.sourceLabel}
                           </span>
                           <span
                             className="bc-module-runtime-pill"
+                            data-testid={`module-runs-in-badge-${p.manifest.id}`}
+                            data-runs-in={actions.runsIn}
                             data-target={p.execution_target}
-                            title={`Runs on ${p.execution_label}`}
+                            title={`Runs in: ${actions.runsInLabel}`}
                           >
                             {runtimeIcon}
-                            <span>{p.execution_label}</span>
+                            <span>{actions.runsInLabel}</span>
                           </span>
                         </div>
 
@@ -3975,7 +4076,9 @@ export function App() {
                             <div className="bc-module-author">
                               By <strong>{p.author}</strong>{" "}
                               <span aria-hidden="true">·</span>{" "}
-                              <span className="mono">v{p.manifest.version}</span>
+                              <span className="mono">v{p.manifest.version}</span>{" "}
+                              <span aria-hidden="true">·</span>{" "}
+                              <span>{p.manifest.category}</span>
                             </div>
                           </div>
                         </div>
@@ -3985,56 +4088,142 @@ export function App() {
 
                       <div className="bc-module-card-footer">
                         <span className="bc-caption mono">
-                          {formatMilliAct(p.manifest.price_milli_act)} / run
+                          {formatWorkspaceAmount(p.manifest.price_milli_act, useLocalCredits)} / run
                         </span>
-                        {health?.mode === "local" && (
-                          <WorkspaceModuleVersions plugin={p} bearer={workspaceBearer} onRemoved={afterModuleRemoval}
-                            onRestored={(restored) => {
-                              setModuleUpdate(`Restored ${restored.manifest.id} v${restored.manifest.version} from local files.`);
-                              openInstalledRelease(restored);
-                            }} />
-                        )}
-                        {p.installed ? (
-                          <button
-                            type="button"
-                            className="bc-btn bc-btn-secondary"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openOrFocusModuleWindow(p, p.has_custom_ui ? "ui" : "run");
-                            }}
-                          >
-                            <span>Open</span>
-                            <IconWindowOpen size={14} />
-                          </button>
-                        ) : p.detached_versions?.length ? null : (
-                          <button
-                            type="button"
-                            className="bc-btn bc-btn-primary"
-                            disabled={Boolean(installingPluginId)}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleInstallPlugin(p);
-                            }}
-                          >
-                            {isInstalling ? (
-                              <>
-                                <RunningCompass size={14} />
-                                <span>Installing...</span>
-                              </>
-                            ) : (
-                              <>
-                                <IconDownload size={14} />
-                                <span>Install</span>
-                              </>
-                            )}
-                          </button>
-                        )}
+                        <div
+                          style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {health?.mode === "local" && (
+                            <WorkspaceModuleVersions plugin={p} bearer={workspaceBearer} onRemoved={afterModuleRemoval}
+                              onRestored={(restored) => {
+                                setModuleUpdate(`Restored ${restored.manifest.id} v${restored.manifest.version} from local files.`);
+                                openInstalledRelease(restored);
+                              }} />
+                          )}
+                          {actions.canInstall && (
+                            <button
+                              type="button"
+                              className="bc-btn bc-btn-primary"
+                              data-testid={`module-install-btn-${p.manifest.id}`}
+                              disabled={Boolean(installingPluginId)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleInstallPlugin(p);
+                              }}
+                            >
+                              {isInstalling ? (
+                                <>
+                                  <RunningCompass size={14} />
+                                  <span>Installing...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <IconDownload size={14} />
+                                  <span>Install</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                          {actions.canOpen && (
+                            <button
+                              type="button"
+                              className="bc-btn bc-btn-secondary"
+                              data-testid={`module-open-btn-${p.manifest.id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openOrFocusModuleWindow(p, p.has_custom_ui ? "ui" : "run");
+                              }}
+                            >
+                              <span>Open</span>
+                              <IconWindowOpen size={14} />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </article>
                   );
                 })}
                 </div>
               )}
+
+              {health?.mode === "local" &&
+                effectiveMarketplaceStatus?.consent === "accepted" &&
+                (effectiveMarketplaceStatus.offers_preview?.filter(
+                  (offer) =>
+                    (offer.kind === "run" || offer.kind === "download") &&
+                    !plugins.some(
+                      (p) =>
+                        p.marketplace_offer_id === offer.id ||
+                        (offer.plugin_id && p.manifest.id === offer.plugin_id),
+                    ),
+                ).length ?? 0) > 0 && (
+                  <section
+                    className="bc-card"
+                    style={{ marginTop: 18 }}
+                    data-testid="network-offers-discovery-section"
+                  >
+                    <div className="bc-card-header">
+                      <div>
+                        <div className="bc-card-title">Network Provider Offers</div>
+                        <p className="bc-caption" style={{ marginTop: 2, marginBottom: 0 }}>
+                          Click <strong>Add</strong> to subscribe to a network offer and open its verified UI in this workspace.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="table-scroll" style={{ marginTop: 10 }}>
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Offer</th>
+                            <th>Provider</th>
+                            <th>Type</th>
+                            <th>Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(effectiveMarketplaceStatus.offers_preview ?? [])
+                            .filter(
+                              (offer) =>
+                                (offer.kind === "run" || offer.kind === "download") &&
+                                !plugins.some(
+                                  (p) =>
+                                    p.marketplace_offer_id === offer.id ||
+                                    (offer.plugin_id && p.manifest.id === offer.plugin_id),
+                                ),
+                            )
+                            .map((offer) => (
+                              <tr key={offer.id} data-testid={`network-offer-row-${offer.id}`}>
+                                <td>
+                                  <strong>{offer.title}</strong>
+                                  {offer.version && (
+                                    <span className="bc-caption mono"> · v{offer.version}</span>
+                                  )}
+                                </td>
+                                <td>{offer.provider_org ?? "Network provider"}</td>
+                                <td className="mono">{offer.kind === "download" ? "Downloadable" : `Runs at ${offer.provider_org ?? "provider"}`}</td>
+                                <td>
+                                  <button
+                                    type="button"
+                                    className="bc-btn bc-btn-primary bc-btn-sm"
+                                    data-testid={`network-offer-add-btn-${offer.id}`}
+                                    onClick={() =>
+                                      void handleAddNetworkOffer(
+                                        offer,
+                                        effectiveMarketplaceStatus.hub_url,
+                                      )
+                                    }
+                                  >
+                                    Add
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
             </div>
           </div>
         )}
@@ -4127,7 +4316,7 @@ export function App() {
                           <div className="bc-caption mono" style={{ marginTop: 4 }}>
                             {r.run_id.slice(0, 16)} ·{" "}
                             {new Date(r.created_at).toLocaleString()} ·{" "}
-                            Quoted {formatMilliAct(r.quote.estimated_cost_act)} ·{" "}
+                            Quoted {formatWorkspaceAmount(r.quote.estimated_cost_act, isLocalPlayLedgerContext(health, ledger, r.quote))} ·{" "}
                             {r.artifacts.length} output file(s)
                           </div>
                           <CapacityRequest run={r} onUpdate={updateRun} />
@@ -4146,6 +4335,17 @@ export function App() {
                           )}
                         </div>
                         <div className="bc-run-summary-actions">
+                            {r.froglet_chain.length > 0 && (
+                              <button
+                                type="button"
+                                className="bc-btn bc-btn-ghost"
+                                data-testid={`download-provenance-${r.run_id}`}
+                                onClick={() => void handleDownloadRunProvenance(r.run_id)}
+                              >
+                                <IconDownload size={13} />
+                                <span>Provenance</span>
+                              </button>
+                            )}
                             {isCloudMode && principal && r.org_id === principal.org_id
                               && hasMinOrgRole(principal.role, "admin") && r.status === "succeeded" && r.receipt_verified && (
                               <ShareResultButton key={approvalScope} run={r} />
@@ -4324,6 +4524,7 @@ export function App() {
         pendingQuote={pendingQuote}
         pendingQuoteParams={pendingQuoteParams}
         isConfirmingRun={isConfirmingRun}
+        isLocalPlayLedger={localPlayLedger}
         liveLogs={liveLogs}
         verifyReport={verifyReport}
         onFocusWindow={handleFocusWindow}
@@ -4388,6 +4589,7 @@ export function App() {
               : prev,
           );
         }}
+        onWorkspaceHubChanged={handleWorkspaceHubChanged}
         onClose={() => setSettingsOpen(false)}
       />
 
@@ -4413,6 +4615,7 @@ export function App() {
 
       {pendingQuote && <PaidRunConsent key={pendingQuote.run_id} quote={pendingQuote}
         params={pendingQuoteParams} busy={isConfirmingRun} error={paidQuotes[0]?.error}
+        isLocalPlayLedger={isLocalPlayLedgerContext(health, ledger, pendingQuote)}
         onApprove={handleConfirmPendingRun} onDismiss={declinePaidRun} />}
 
       {lightboxImage && (

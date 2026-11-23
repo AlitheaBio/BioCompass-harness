@@ -3,15 +3,22 @@ import { setWorkspaceReadHandle, workspaceReadGeneration, workspaceReadHandle } 
 import { compileSdkCatalogQuery } from "@biocompass/plugin-sdk";
 import { localOwnerHeaders, localOwnerRequest } from "./localOwner";
 import type {
+  AgentCredentialRecord,
   ApiKeyRecord,
   AuditLogRecord,
   AuthPrincipal,
+  BillingStatement,
+  CatalogDataPlacement,
   CatalogManifest,
   CatalogQuery,
   CatalogQueryResult,
+  ClientCloudImportResult,
+  CreateAgentCredentialInput,
+  CreatedAgentCredential,
   CreatedApiKey,
   CreatedNodeEnrollment,
   CreatedOrgInvitation,
+  CreatedWebhookEndpoint,
   CuratedModuleApprovalRecord,
   DatasetGrant,
   DatasetHostingMode,
@@ -32,21 +39,28 @@ import type {
   LedgerState,
   LedgerTx,
   LlmConfigResponse,
+  MarketplaceOfferSummary,
   MarketplaceStatus,
+  ModuleDocumentDetail,
+  ModuleDocumentRecord,
+  ModuleDocumentVersionRecord,
   ModuleDownload,
   ModuleOffer,
   FederatedModuleOffer,
   ModuleOfferRequest,
+  NegotiatedModuleOfferPrice,
   NodeMode,
   NodeSummaryRecord,
   OrgInvitationRecord,
   OrgMemberRecord,
   OrgRole,
+  OutboundRegistrationResult,
   PeptideRecord,
   PluginSummary,
   PluginVersionRecord,
   PluginVisibility,
   PresignedPartSpec,
+  ProvenanceBundle,
   QuarantineCompletedPart,
   ProjectRecord,
   QuarantineUploadRecord,
@@ -60,12 +74,17 @@ import type {
   ScaffoldResult,
   SessionEvent,
   SessionRecord,
+  SubscribedNetworkOffer,
   TestLlmConnectionResponse,
   ResultShare,
   TierDefinitionRecord,
   TotpEnrollment,
   UpdateLlmConfigRequest,
   UpdateTierInput,
+  WebhookDeliveryRecord,
+  WebhookEndpointRecord,
+  WorkspaceHubMode,
+  WorkspaceHubStatus,
 } from "./types";
 
 export interface ParsedErrorDisplay {
@@ -1646,9 +1665,28 @@ export async function fetchModuleOfferRequests(): Promise<ModuleOfferRequest[]> 
 
 export function publishModuleOffer(payload: Pick<ModuleOffer,
   "plugin_id" | "version" | "action" | "title" | "scope" | "approval_required"
-> & { allowed_orgs: string[] }) {
+> & {
+  allowed_orgs: string[];
+  manifest_offer_id?: string;
+  price_milli_act?: number;
+  base_fee_milli_act?: number;
+}) {
   return apiFetch<{ offer_id: string }>("/api/v1/module-offers", {
     method: "POST", body: JSON.stringify(payload),
+  });
+}
+
+export function fetchModuleOfferPrice(offerId: string): Promise<NegotiatedModuleOfferPrice | null> {
+  return apiFetch<NegotiatedModuleOfferPrice | null>(`${moduleOfferPath(offerId)}/price`);
+}
+
+export function updateModuleOfferPrice(
+  offerId: string,
+  payload: { manifest_offer_id: string; price_milli_act: number; base_fee_milli_act: number },
+): Promise<NegotiatedModuleOfferPrice> {
+  return apiFetch<NegotiatedModuleOfferPrice>(`${moduleOfferPath(offerId)}/price`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1952,4 +1990,305 @@ export async function syncAdminFederationPeer(
       body: JSON.stringify({}),
     },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Track U3 / U2 — Local Client Workspace Hub Chooser & Network Subscriptions
+// ---------------------------------------------------------------------------
+
+export async function fetchWorkspaceHub(): Promise<WorkspaceHubStatus> {
+  return apiFetch<WorkspaceHubStatus>("/api/v1/workspace/hub");
+}
+
+export async function updateWorkspaceHub(payload: {
+  mode: WorkspaceHubMode;
+  hub_url?: string;
+  auth_bearer?: string;
+}): Promise<WorkspaceHubStatus> {
+  return apiFetch<WorkspaceHubStatus>("/api/v1/workspace/hub", {
+    method: "PUT",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function loginWorkspaceHubClient(payload: {
+  email: string;
+  password: string;
+  org_id?: string;
+  totp_code?: string;
+}): Promise<WorkspaceHubStatus> {
+  return apiFetch<WorkspaceHubStatus>("/api/v1/workspace/hub/login", {
+    method: "POST",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function logoutWorkspaceHubClient(): Promise<WorkspaceHubStatus> {
+  return apiFetch<WorkspaceHubStatus>("/api/v1/workspace/hub/logout", {
+    method: "POST",
+    headers: localOwnerHeaders(),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchSubscribedNetworkOffers(): Promise<{
+  subscribed: SubscribedNetworkOffer[];
+  available: MarketplaceOfferSummary[];
+  hub_url: string;
+}> {
+  return apiFetch<{
+    subscribed: SubscribedNetworkOffer[];
+    available: MarketplaceOfferSummary[];
+    hub_url: string;
+  }>("/api/v1/workspace/network-offers");
+}
+
+export async function subscribeNetworkOffer(
+  offer: SubscribedNetworkOffer,
+): Promise<SubscribedNetworkOffer[]> {
+  const res = await apiFetch<{ subscribed: SubscribedNetworkOffer[] }>(
+    "/api/v1/workspace/network-offers",
+    {
+      method: "POST",
+      headers: localOwnerHeaders(),
+      body: JSON.stringify(offer),
+    },
+  );
+  return res.subscribed;
+}
+
+export async function unsubscribeNetworkOffer(offerId: string): Promise<SubscribedNetworkOffer[]> {
+  const res = await apiFetch<{ subscribed: SubscribedNetworkOffer[] }>(
+    `/api/v1/workspace/network-offers/${encodeURIComponent(offerId)}`,
+    {
+      method: "DELETE",
+      headers: localOwnerHeaders(),
+    },
+  );
+  return res.subscribed;
+}
+
+// ---------------------------------------------------------------------------
+// Milestone C1 — H1 Agent Credentials
+// ---------------------------------------------------------------------------
+
+export async function fetchAgentCredentials(): Promise<AgentCredentialRecord[]> {
+  const data = await apiFetch<{ credentials: AgentCredentialRecord[] }>(
+    "/api/v1/agent-credentials",
+  );
+  return data.credentials ?? [];
+}
+
+export async function createAgentCredential(
+  input: CreateAgentCredentialInput,
+): Promise<CreatedAgentCredential> {
+  return apiFetch<CreatedAgentCredential>("/api/v1/agent-credentials", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function revokeAgentCredential(
+  credentialId: string,
+): Promise<{ revoked: boolean; credential_id: string }> {
+  return apiFetch<{ revoked: boolean; credential_id: string }>(
+    `/api/v1/agent-credentials/${encodeURIComponent(credentialId)}`,
+    { method: "DELETE" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Milestone C1 — H4 Billing Statements & Outbound Webhooks
+// ---------------------------------------------------------------------------
+
+export async function fetchBillingStatement(params?: {
+  from?: string;
+  to?: string;
+  credential_id?: string;
+}): Promise<BillingStatement> {
+  const qs = new URLSearchParams();
+  if (params?.from) qs.set("from", params.from);
+  if (params?.to) qs.set("to", params.to);
+  if (params?.credential_id) qs.set("credential_id", params.credential_id);
+  const query = qs.toString();
+  return apiFetch<BillingStatement>(
+    `/api/v1/billing/statement${query ? `?${query}` : ""}`,
+  );
+}
+
+export async function fetchWebhooks(): Promise<WebhookEndpointRecord[]> {
+  const data = await apiFetch<{ endpoints?: WebhookEndpointRecord[]; webhooks?: WebhookEndpointRecord[] }>(
+    "/api/v1/webhooks",
+  );
+  return data.endpoints ?? data.webhooks ?? [];
+}
+
+export async function createWebhook(payload: {
+  label: string;
+  url: string;
+  event_types: string[];
+}): Promise<CreatedWebhookEndpoint> {
+  return apiFetch<CreatedWebhookEndpoint>("/api/v1/webhooks", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateWebhook(
+  endpointId: string,
+  payload: { label?: string; url?: string; event_types?: string[]; enabled?: boolean },
+): Promise<WebhookEndpointRecord> {
+  const data = await apiFetch<{ endpoint?: WebhookEndpointRecord } & Partial<WebhookEndpointRecord>>(
+    `/api/v1/webhooks/${encodeURIComponent(endpointId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
+  return (data.endpoint ?? data) as WebhookEndpointRecord;
+}
+
+export async function deleteWebhook(endpointId: string): Promise<void> {
+  await apiFetch(`/api/v1/webhooks/${encodeURIComponent(endpointId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchWebhookDeliveries(
+  endpointId: string,
+): Promise<WebhookDeliveryRecord[]> {
+  const data = await apiFetch<{ deliveries: WebhookDeliveryRecord[] }>(
+    `/api/v1/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
+  );
+  return data.deliveries ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Milestone C1 — H5 Stored Documents & Provenance Export (`bc.provenance.v1`)
+// ---------------------------------------------------------------------------
+
+export async function fetchDocuments(params?: {
+  project_id?: string;
+  plugin_id?: string;
+}): Promise<ModuleDocumentRecord[]> {
+  const qs = new URLSearchParams();
+  if (params?.project_id) qs.set("project_id", params.project_id);
+  if (params?.plugin_id) qs.set("plugin_id", params.plugin_id);
+  const query = qs.toString();
+  const data = await apiFetch<{ documents: ModuleDocumentRecord[] }>(
+    `/api/v1/documents${query ? `?${query}` : ""}`,
+  );
+  return data.documents ?? [];
+}
+
+export async function createDocument(payload: {
+  plugin_id: string;
+  title: string;
+  content: Record<string, unknown>;
+  project_id?: string | null;
+}): Promise<ModuleDocumentDetail> {
+  return apiFetch<ModuleDocumentDetail>("/api/v1/documents", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchDocument(
+  docId: string,
+  version?: number,
+): Promise<ModuleDocumentDetail> {
+  const qs = version != null ? `?version=${encodeURIComponent(String(version))}` : "";
+  return apiFetch<ModuleDocumentDetail>(
+    `/api/v1/documents/${encodeURIComponent(docId)}${qs}`,
+  );
+}
+
+export async function updateDocument(
+  docId: string,
+  payload: { base_version: number; content: Record<string, unknown>; title?: string },
+): Promise<ModuleDocumentDetail> {
+  return apiFetch<ModuleDocumentDetail>(
+    `/api/v1/documents/${encodeURIComponent(docId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export async function deleteDocument(docId: string): Promise<void> {
+  await apiFetch(`/api/v1/documents/${encodeURIComponent(docId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchDocumentVersions(
+  docId: string,
+): Promise<ModuleDocumentVersionRecord[]> {
+  const data = await apiFetch<{ versions: ModuleDocumentVersionRecord[] }>(
+    `/api/v1/documents/${encodeURIComponent(docId)}/versions`,
+  );
+  return data.versions ?? [];
+}
+
+export async function fetchRunProvenance(runId: string): Promise<ProvenanceBundle> {
+  return apiFetch<ProvenanceBundle>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/provenance`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Milestone C1 — U4 Client Cloud Registration, Placement & Import
+// ---------------------------------------------------------------------------
+
+export async function registerClientCloudOutbound(payload?: {
+  hub_url?: string;
+  org_name?: string;
+}): Promise<OutboundRegistrationResult> {
+  return apiFetch<OutboundRegistrationResult>("/api/v1/admin/federation/register-outbound", {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export async function importFederatedModule(payload: {
+  peer_id?: string;
+  hub_url?: string;
+  offer_id: string;
+  plugin_id: string;
+  version: string;
+}): Promise<ClientCloudImportResult> {
+  return apiFetch<ClientCloudImportResult>("/api/v1/admin/federation/import-module", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateCatalogDataPlacement(
+  catalogId: string,
+  dataPlacement: CatalogDataPlacement,
+): Promise<{ catalog_id: string; data_placement: CatalogDataPlacement }> {
+  const [ns, ...rest] = catalogId.split("/");
+  const name = rest.join("/");
+  return apiFetch<{ catalog_id: string; data_placement: CatalogDataPlacement }>(
+    `/api/v1/catalogs/${encodeURIComponent(ns ?? "")}/${encodeURIComponent(name)}/placement`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ data_placement: dataPlacement }),
+    },
+  );
+}
+
+export async function importFederatedCatalog(payload: {
+  peer_id?: string;
+  hub_url?: string;
+  offer_id: string;
+  catalog_id: string;
+}): Promise<ClientCloudImportResult> {
+  return apiFetch<ClientCloudImportResult>("/api/v1/admin/federation/import-catalog", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

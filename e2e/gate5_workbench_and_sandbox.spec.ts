@@ -231,7 +231,7 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await page
       .getByTestId("quick-prepare-btn-alithea/hla-motif-enrichment")
       .click();
-    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 ACT");
+    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 credits");
     await page.getByTestId("approve-paid-run").click();
 
     await expect(
@@ -510,7 +510,7 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await frameLocator.getByTestId("sdk-prepare-btn").click();
     await expect(frameLocator.getByTestId("sdk-quote-banner")).toBeVisible();
 
-    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 ACT");
+    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 credits");
     await page.getByTestId("approve-paid-run").click();
     const hotspotRows = frameLocator
       .getByTestId("sdk-hotspots-table")

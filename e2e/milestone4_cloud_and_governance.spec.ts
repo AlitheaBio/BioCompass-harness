@@ -158,7 +158,7 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
 
     const consentCard = page.getByTestId("quote-consent-card");
     await expect(consentCard).toBeVisible();
-    await expect(consentCard).toContainText("5.00 ACT");
+    await expect(consentCard).toContainText("5.00 credits");
     await expect(consentCard).toContainText(/workload sha256:[0-9a-f]+/i);
     await expect(consentCard).toContainText("Enforced Input Limit");
     await expect(consentCard).toContainText("Enforced Output Limit");
@@ -252,9 +252,9 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
       const demoLedger = await ledgerResponse.json();
       expect(demoLedger.available_milli_act).toBe(0);
       expect(demoLedger.transactions).toEqual([]);
-      await expect(page.getByTestId("org-available-act")).toHaveText("0.00 ACT");
+      await expect(page.getByTestId("org-available-act")).toHaveText("€0.00");
       await expect(page.getByTestId("org-act-left-today")).toContainText(
-        "10.00 ACT",
+        "€10.00",
       );
       await expect(page.getByTestId("org-grant-budget-list")).toBeVisible();
 

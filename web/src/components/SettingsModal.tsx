@@ -2,7 +2,9 @@ import { AppDistributionSettings } from "./AppDistributionSettings";
 import { MarketplaceSyncCard } from "./MarketplaceSyncCard";
 import { PersonalAccountSettings } from "./PersonalAccountSettings";
 import React, { useEffect, useState } from "react";
+import { WorkspaceHubChooser } from "./WorkspaceHubChooser";
 import { WorkspaceSettings } from "./WorkspaceSettings";
+import { isLocalPlayLedgerContext } from "../moduleListPolicy";
 import {
   IconCheck,
   IconClose,
@@ -28,7 +30,7 @@ import {
   updateLlmConfig,
 } from "../api";
 import {
-  formatMilliAct,
+  formatWorkspaceAmount,
   type DatasetGrant,
   type DiscoveredLlmBackend,
   type HealthStatus,
@@ -42,6 +44,7 @@ import {
   type ScaffoldResult,
   type TestLlmConnectionResponse,
   type UpdateLlmConfigRequest,
+  type WorkspaceHubStatus,
 } from "../types";
 
 const PREFERRED_IDE_STORAGE_KEY = "biocompass.preferred_ide";
@@ -77,6 +80,7 @@ export function SettingsModal({
   onLlmConfigChanged,
   marketplaceStatus,
   onMarketplaceStatusChanged,
+  onWorkspaceHubChanged,
   onClose,
 }: {
   open: boolean;
@@ -106,8 +110,11 @@ export function SettingsModal({
   onLlmConfigChanged?: (updated?: LlmConfigResponse) => Promise<void> | void;
   marketplaceStatus?: MarketplaceStatus | null;
   onMarketplaceStatusChanged?: (updated: MarketplaceStatus) => void;
+  onWorkspaceHubChanged?: (updated: WorkspaceHubStatus) => Promise<void> | void;
   onClose: () => void;
 }) {
+  const localPlayLedger = isLocalPlayLedgerContext(health, ledger);
+  const zeroDisplay = formatWorkspaceAmount(0, localPlayLedger);
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [studioTemplate, setStudioTemplate] = useState<string>("python-uv");
   const [studioPluginId, setStudioPluginId] = useState<string>(
@@ -600,7 +607,7 @@ export function SettingsModal({
             <IconShield size={15} />
             <span style={{ flex: 1, textAlign: "left" }}>Usage</span>
             <span className="bc-settings-tab-count mono" data-testid="settings-usage-count">
-              {ledger?.available_display ?? "0.00 ACT"}
+              {ledger?.available_display ?? zeroDisplay}
             </span>
           </button>
           <button
@@ -641,8 +648,21 @@ export function SettingsModal({
           </div>
 
           <div className="bc-settings-scroll">
-            {section === "workspace" && <WorkspaceSettings hub={health?.workspace_hub_url}
-              bearer={workspaceBearer} onBearer={onWorkspaceBearer} />}
+            {section === "workspace" && (
+              <div className="bc-settings-stack">
+                {health?.mode === "local" && (
+                  <WorkspaceHubChooser
+                    initialStatus={health.workspace_hub ?? null}
+                    onHubChanged={onWorkspaceHubChanged}
+                  />
+                )}
+                <WorkspaceSettings
+                  hub={health?.workspace_hub_url}
+                  bearer={workspaceBearer}
+                  onBearer={onWorkspaceBearer}
+                />
+              </div>
+            )}
             {section === "general" && (
               <div className="bc-settings-stack">
                 <MarketplaceSyncCard
@@ -1180,19 +1200,23 @@ export function SettingsModal({
                 <div className="bc-settings-stack">
                   <div className="bc-meta-grid">
                     <div className="bc-meta-item">
-                      <span className="bc-caption">Available Credits</span>
+                      <span className="bc-caption">
+                        {localPlayLedger ? "Local Play Credits" : "Available Balance (EUR)"}
+                      </span>
                       <strong
                         style={{ fontSize: 18, color: "var(--bc-accent)" }}
                         className="mono"
                         data-testid="usage-available-credits"
                       >
-                        {ledger?.available_display ?? "0.00 ACT"}
+                        {ledger?.available_display ?? zeroDisplay}
                       </strong>
                     </div>
                     <div className="bc-meta-item">
-                      <span className="bc-caption">Credits Used</span>
+                      <span className="bc-caption">
+                        {localPlayLedger ? "Play Credits Used" : "EUR Spent"}
+                      </span>
                       <strong style={{ fontSize: 16 }} className="mono">
-                        {formatMilliAct(totalSpentMilli)}
+                        {formatWorkspaceAmount(totalSpentMilli, localPlayLedger)}
                       </strong>
                     </div>
                     <div className="bc-meta-item">
@@ -1241,10 +1265,10 @@ export function SettingsModal({
                                   {tx.reference}
                                 </td>
                                 <td className="mono" style={{ textAlign: "right" }}>
-                                  {formatMilliAct(tx.delta_act)}
+                                  {formatWorkspaceAmount(tx.delta_act, localPlayLedger)}
                                 </td>
                                 <td className="mono" style={{ textAlign: "right" }}>
-                                  {formatMilliAct(tx.balance_after_act)}
+                                  {formatWorkspaceAmount(tx.balance_after_act, localPlayLedger)}
                                 </td>
                               </tr>
                             ))}
