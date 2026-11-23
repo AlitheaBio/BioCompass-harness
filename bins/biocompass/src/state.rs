@@ -243,6 +243,8 @@ impl WorkspaceRegistryPort for InProcessNodeRuntime {
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) local_owner: Option<Arc<crate::native_import::operator::OperatorAccess>>,
+    pub listen_addr: Option<std::net::SocketAddr>,
+    pub allowed_origins: Vec<String>,
     pub mode: DeploymentMode,
     pub default_org_id: OrgId,
     pub data_dir: PathBuf,
@@ -265,8 +267,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Record the bound socket address so CORS can allowlist the active loopback port.
+    pub fn set_listen_addr(&mut self, addr: std::net::SocketAddr) {
+        self.listen_addr = Some(addr);
+    }
+
     /// Called only after the personal workbench has bound its listening socket.
     pub fn enable_local_owner(&mut self, addr: std::net::SocketAddr) -> CompassResult<Option<String>> {
+        self.listen_addr = Some(addr);
         if self.mode != DeploymentMode::Local || !addr.ip().is_loopback() {
             return Ok(None);
         }
@@ -398,6 +406,8 @@ impl AppState {
 
         Ok(Self {
             mode: DeploymentMode::Local,
+            listen_addr: None,
+            allowed_origins: Vec::new(),
             default_org_id,
             data_dir: root,
             user_plugins_dir,
@@ -464,8 +474,18 @@ impl AppState {
             hub.clone(),
         )?);
 
+        let allowed_origins = std::env::var("COMPASS_ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+
         Ok(Self {
             mode: DeploymentMode::CloudWeb,
+            listen_addr: None,
+            allowed_origins,
             default_org_id,
             data_dir: root,
             user_plugins_dir,

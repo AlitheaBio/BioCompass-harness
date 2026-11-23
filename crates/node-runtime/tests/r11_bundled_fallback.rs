@@ -236,13 +236,12 @@ image = "127.0.0.1:1/customer/unbundled@sha256:{}"
         "unexpected fallback image_ref: {}",
         quote.image_ref
     );
-    let quote_json = serde_json::to_value(&quote).unwrap();
-    let notice = quote_json["execution_notice"]
-        .as_str()
-        .expect("expected execution_notice on RunQuote when built locally");
+    let notice = quote
+        .local_bundled_fallback_notice()
+        .expect("expected local_bundled_fallback_notice on RunQuote when built locally");
     assert!(
         notice.contains("Dockerfile"),
-        "expected execution_notice to mention bundled Dockerfile fallback, got: {notice}"
+        "expected notice to mention bundled Dockerfile fallback, got: {notice}"
     );
 
     let completed = runtime

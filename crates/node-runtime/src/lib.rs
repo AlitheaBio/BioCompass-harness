@@ -1841,7 +1841,6 @@ impl RunDispatcher for InProcessNodeRuntime {
             max_memory_mb: selected_offer.max_memory_mb,
             workload_hash,
             dataset_grant_summary: grant_summary,
-            execution_notice: execution_notice.clone(),
             froglet_quote: quote_json.clone(),
             expires_at,
         };

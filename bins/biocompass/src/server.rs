@@ -39,7 +39,7 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 #[derive(RustEmbed)]
@@ -70,8 +70,87 @@ async fn caller_auth_middleware(req: Request, next: Next) -> Response {
     CALLER_AUTH.scope(auth, next.run(req)).await
 }
 
+fn build_cors_layer(state: &AppState) -> CorsLayer {
+    let methods = AllowMethods::list([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+        Method::HEAD,
+    ]);
+    let headers = AllowHeaders::list([
+        header::CONTENT_TYPE,
+        header::AUTHORIZATION,
+        header::ACCEPT,
+        axum::http::HeaderName::from_static("x-api-key"),
+        axum::http::HeaderName::from_static("x-workspace-read"),
+        axum::http::HeaderName::from_static("x-biocompass-local-owner"),
+    ]);
+
+    match state.mode {
+        DeploymentMode::Local => {
+            let port = state.listen_addr.map_or(8080, |a| a.port());
+            let is_loopback = state.listen_addr.is_none_or(|a| a.ip().is_loopback());
+            let env_dev_cors = std::env::var("BIOCOMPASS_DEV_CORS")
+                .ok()
+                .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+            let mut origins = Vec::new();
+            if is_loopback {
+                for host in ["127.0.0.1", "localhost", "[::1]"] {
+                    if let Ok(hv) = HeaderValue::from_str(&format!("http://{host}:{port}")) {
+                        origins.push(hv);
+                    }
+                }
+                if env_dev_cors || state.allow_local_dev_tags || cfg!(debug_assertions) {
+                    for dev_port in [5173_u16, 5174_u16] {
+                        for host in ["127.0.0.1", "localhost", "[::1]"] {
+                            if let Ok(hv) = HeaderValue::from_str(&format!("http://{host}:{dev_port}")) {
+                                origins.push(hv);
+                            }
+                        }
+                    }
+                }
+            }
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(methods)
+                .allow_headers(headers)
+        }
+        DeploymentMode::CloudWeb => {
+            let mut origins: Vec<HeaderValue> = state
+                .allowed_origins
+                .iter()
+                .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
+                .collect();
+            if origins.is_empty()
+                && let Ok(env_raw) = std::env::var("COMPASS_ALLOWED_ORIGINS")
+            {
+                origins.extend(
+                    env_raw
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|o| HeaderValue::from_str(o).ok()),
+                );
+            }
+            let has_explicit = !origins.is_empty();
+            let layer = CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(methods)
+                .allow_headers(headers);
+            if has_explicit {
+                layer.allow_credentials(true)
+            } else {
+                layer
+            }
+        }
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
-    let cors = CorsLayer::permissive();
+    let cors = build_cors_layer(&state);
     let prepare = post(prepare_run_handler);
     let (prepare, run_events) = if let Some(hub) = &state.hub_client {
         (
@@ -1522,7 +1601,13 @@ async fn prepare_run_handler(
         };
         return Ok(with_retry_after(response, retry_after));
     }
-    Ok(Json(state.dispatcher.prepare_run(request).await?).into_response())
+    let quote = state.dispatcher.prepare_run(request).await?;
+    let mut payload = serde_json::to_value(&quote)
+        .map_err(|e| CompassError::Internal(format!("encode RunQuote: {e}")))?;
+    if let Some(notice) = quote.local_bundled_fallback_notice() {
+        payload["execution_notice"] = json!(notice);
+    }
+    Ok(Json(payload).into_response())
 }
 
 fn with_retry_after(mut response: Response, retry_after: Option<HeaderValue>) -> Response {
@@ -2759,4 +2844,120 @@ async fn import_local_catalog_handler(
         })),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod sec_06_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    async fn get_health_cors(app: &Router, origin: &str) -> Option<String> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/health")
+            .header(header::ORIGIN, origin)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn sec_06_local_cors_allows_active_loopback_port_and_blocks_external_origins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let _ = state.enable_local_owner("127.0.0.1:18421".parse().unwrap());
+        let app = build_router(state);
+
+        assert_eq!(
+            get_health_cors(&app, "https://evil.example").await,
+            None,
+            "external origin must never be allowed by local CORS"
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:9999").await,
+            None,
+            "unrelated local port must not be allowed by local CORS"
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:18421").await.as_deref(),
+            Some("http://127.0.0.1:18421")
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://localhost:18421").await.as_deref(),
+            Some("http://localhost:18421")
+        );
+        assert_eq!(
+            get_health_cors(&app, "http://127.0.0.1:5173").await.as_deref(),
+            Some("http://127.0.0.1:5173")
+        );
+    }
+
+    #[tokio::test]
+    async fn sec_06_cloud_web_cors_defaults_same_origin_and_honours_allowed_origins() {
+        let mock_hub = Router::new().route(
+            "/api/v1/health",
+            get(|| async {
+                Json(json!({
+                    "status": "ok",
+                    "node_id": "froglet-node-mockhub00001",
+                    "provider_id": "0".repeat(64),
+                    "requester_id": "1".repeat(64),
+                    "container_engine": "docker 29.10.0"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_addr = listener.local_addr().unwrap();
+        let _hub_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_hub).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub_cfg = crate::cloud_client::CompassHubConfig {
+            base_url: format!("http://{hub_addr}"),
+            bundled_plugins_dir: tmp.path().join("bundled-plugins"),
+        };
+        let (hub_client, default_org_id, engine_label) =
+            CompassHubClient::connect(hub_cfg, std::collections::HashMap::new())
+                .await
+                .unwrap();
+        let hub = Arc::new(hub_client);
+        let base_local = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        let mut cloud_state = base_local;
+        cloud_state.mode = DeploymentMode::CloudWeb;
+        cloud_state.default_org_id = default_org_id;
+        cloud_state.container_engine_label = engine_label;
+        cloud_state.hub_client = Some(hub);
+
+        // 1. Default (unset/empty) -> strict same-origin (no Access-Control-Allow-Origin emitted).
+        let default_app = build_router(cloud_state.clone());
+        assert_eq!(
+            get_health_cors(&default_app, "https://app.biocompass.example").await,
+            None
+        );
+
+        // 2. Explicit COMPASS_ALLOWED_ORIGINS allowlists only configured origins.
+        cloud_state.allowed_origins = vec!["https://app.biocompass.example".into()];
+        let allowlisted_app = build_router(cloud_state);
+        assert_eq!(
+            get_health_cors(&allowlisted_app, "https://app.biocompass.example")
+                .await
+                .as_deref(),
+            Some("https://app.biocompass.example")
+        );
+        assert_eq!(
+            get_health_cors(&allowlisted_app, "https://evil.example").await,
+            None
+        );
+    }
 }

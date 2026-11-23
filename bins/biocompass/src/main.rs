@@ -260,6 +260,7 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
             );
 
             let bound = listener.local_addr().map_err(|e| CompassError::Storage(e.to_string()))?;
+            state.set_listen_addr(bound);
             if let Some(link) = state.enable_local_owner(bound)? {
                 use std::io::IsTerminal;
                 if std::io::stderr().is_terminal() {
