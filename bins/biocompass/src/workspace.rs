@@ -6,9 +6,9 @@ use crate::server::ApiResult;
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, delete, get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use biocompass_core_traits::local_delivery::{
     DeliveryFile, DeliveryScope, LocalDelivery, LocalDeliveryStore, PendingDelivery,
@@ -578,9 +578,6 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/api/v1/workspace/settings", get(settings).put(settings))
         .route("/api/v1/workspace/pair", post(pair))
         .route("/api/v1/workspace/sync-session", delete(end_sync_session))
-        .route("/api/v1/workspace/archives/:id", any(workspace_archive))
-        .route("/api/v1/workspace/archive-targets", get(archive_targets))
-        .route("/api/v1/workspace/archive-copies/:id", get(archive_copy))
         .route("/api/v1/workspace/identity", get(identity))
         .route("/api/v1/workspace/modules", get(module_downloads))
         .route("/api/v1/workspace/auth/login", post(login_for_downloads))
@@ -644,46 +641,6 @@ async fn end_sync_session(State(state): State<AppState>, headers: HeaderMap) -> 
     let w = connected(&state)?;
     w.forget_browser_session(&headers, true).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn workspace_archive(
-    State(state): State<AppState>, Path(id): Path<String>,
-    method: axum::http::Method, uri: Uri, headers: HeaderMap, body: Bytes,
-) -> ApiResult<Response> {
-    if method != Method::GET && method != Method::POST {
-        return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
-    }
-    if let Some(hub) = state.hub_client.as_ref() {
-        return Ok(hub.proxy_raw(method, uri.path(), &headers, body.to_vec()).await?);
-    }
-    let w = connected(&state)?;
-    let request = w.request(method, &["workspace", "archives", &id]);
-    let request = if body.is_empty() { request } else {
-        request.header(header::CONTENT_TYPE, "application/json").body(body)
-    };
-    let reply = w.send(request).await?;
-    let headers = reply.headers().clone();
-    let mut response = reply.bytes().await.map_err(|e| CompassError::Storage(e.to_string()))?.into_response();
-    for header in [header::CACHE_CONTROL, header::CONTENT_TYPE, header::CONTENT_DISPOSITION, header::X_CONTENT_TYPE_OPTIONS] {
-        if let Some(value) = headers.get(&header) {
-            response.headers_mut().insert(header, value.clone());
-        }
-    }
-    Ok(response)
-}
-
-async fn archive_targets(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
-    if let Some(hub) = state.hub_client.as_ref() {
-        return Ok(hub.proxy_raw(Method::GET, "/api/v1/workspace/archive-targets", &headers, Vec::new()).await?);
-    }
-    let w = connected(&state)?;
-    let targets: Value = w.json(w.request(Method::GET, &["workspace","archive-targets"])).await?;
-    Ok(([(header::CACHE_CONTROL,"no-store")], Json(targets)).into_response())
-}
-
-async fn archive_copy(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
-    let hub = state.hub_client.as_ref().ok_or_else(|| CompassError::NotFound("archive".into()))?;
-    Ok(hub.proxy_raw(Method::GET, uri.path(), &headers, Vec::new()).await?)
 }
 
 #[derive(Deserialize, Serialize)]

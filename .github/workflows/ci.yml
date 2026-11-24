@@ -70,8 +70,8 @@ jobs:
       - name: Assert zero references to deleted Stage 1 concepts
         run: |
           set -euo pipefail
-          PATTERN='milli_act|PaymentGateway|play_ledger|ResultSharing|ArchiveResult|ConfirmTierChange|private_edge|provider_edge|hospital_edge|query_provider|module_offer_requests|dataset_offer_requests|module_offer_prices|tier_definitions|result_shares|legacy_settlement|CreditAmountAct|SqliteActLedger|estimated_cost_act|base_fee_act|delta_act|balance_after_act|daily_act_breaker|DailyActBreaker|formatMilliAct|formatLocalPlayCredits|isLocalPlayLedger|is_local_play_ledger|federation/peers|federation/offers|federation/launch|federation/register-outbound|/v1/registrations|/api/v1/result-shares'
-          if grep -rnE --exclude-dir=dist --exclude-dir=node_modules --exclude-dir=target "$PATTERN" crates/ bins/ packages/ web/src/ plugins/; then
+          PATTERN='milli_act|PaymentGateway|play_ledger|ResultSharing|ArchiveResult|ConfirmTierChange|private_edge|provider_edge|hospital_edge|query_provider|module_offer_requests|dataset_offer_requests|module_offer_prices|tier_definitions|result_shares|legacy_settlement|CreditAmountAct|SqliteActLedger|estimated_cost_act|base_fee_act|delta_act|balance_after_act|daily_act_breaker|DailyActBreaker|formatMilliAct|formatLocalPlayCredits|isLocalPlayLedger|is_local_play_ledger|federation/peers|federation/offers|federation/launch|federation/register-outbound|/v1/registrations|/api/v1/result-shares|archive-targets|archive-copies|workspace/archives'
+          if grep -rnE --exclude-dir=dist --exclude-dir=node_modules --exclude-dir=target "$PATTERN" crates/ bins/ packages/ web/src/ web/tests/ plugins/ e2e/ AGENTS.md README.md; then
             echo "::error::Found forbidden Stage 1 deleted concept reference(s) above!"
             exit 1
           fi

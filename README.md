@@ -10,7 +10,7 @@ Every scientific module or pipeline in BioCompass is **one standard OCI containe
 BioCompass-harness/
 ├── Cargo.toml                  # Rust 2024 workspace
 ├── crates/
-│   ├── core-traits/            # 5 cloud-agnostic traits (SessionStore, BlobStore, OciRegistryClient, RunDispatcher, PaymentGateway) + SQLite & POSIX impls
+│   ├── core-traits/            # 5 cloud-agnostic traits (SessionStore, BlobStore, OciRegistryClient, RunDispatcher, Ledger) + SQLite & POSIX impls
 │   ├── plugin-spec/            # plugin.toml manifest parser, SKILL.md loader, JSON Schema validator, 4 starter generators
 │   ├── data-engine/            # Embedded DuckDB over immutable Parquet + catalog.json SHA-256 + Grant row/*** sequence masking SQL views
 │   ├── oci-runner/             # Rootless Podman (Linux) & Docker/Podman VM (macOS/Windows) hardened /in:ro -> /out:rw supervisor
@@ -70,7 +70,7 @@ biocompass workspace --data-dir "$DATA_DIR" --hub-url "$HUB_ORIGIN" \
 
 ## Cloud-Agnostic Deployment
 
-Domain crates depend exclusively on the 5 traits in `biocompass-core-traits` (`SessionStore`, `BlobStore`, `OciRegistryClient`, `RunDispatcher`, `PaymentGateway`) and speak 100% standard open protocols:
+Domain crates depend exclusively on the 5 traits in `biocompass-core-traits` (`SessionStore`, `BlobStore`, `OciRegistryClient`, `RunDispatcher`, `Ledger`) and speak 100% standard open protocols:
 - **Local Mode (`biocompass up`):** SQLite WAL (`state.sqlite`), POSIX filesystem (`~/.biocompass/store`), local Podman/Docker, and embedded in-process `NodeRuntime`.
 - **Cloud Mode (`biocompass --mode cloud-web` + `compass-hub`):** PostgreSQL 16, S3 REST v4 (MinIO, Ceph, Scaleway, Exoscale, Hetzner, OVH), OCI Distribution v1.1 (`/v2/`), and remote rootless Podman `froglet-node` pools.
 
@@ -92,4 +92,4 @@ To publish a release:
 
 “Download verified update” saves a file. To use a portable archive, extract it, stop the running app and start the new binary with the original `--data-dir`. An OS package uses its normal installer. Workspace and account files are separate from the release artifact. The gateway does not replace or execute installed binaries. A failed or canceled download can be retried. Ports, signing keys, release storage and installers for real platforms are deployment inputs.
 
-A channel can also provide a compatible customer worker. Add a separate entry to the signed `platforms` map named `froglet-node-<platform>`, such as `froglet-node-darwin-aarch64`. Include its own stable `version`, exact `url`, artifact `signature` and optional worker `notes`. This entry contains the BioCompass-compatible `froglet-node` binary and can have a different version from the local app. The authenticated customer hub checks the user's role for discovery and download. Organization owners and admins can download the worker and see connection guidance. Keep the generated node key and persistent state on the customer machine. A site operator enrolls compute-pool workers; an organization administrator can enroll a private-data worker with its real signing public key.
+A channel can also provide a compatible customer worker. Add a separate entry to the signed `platforms` map named `froglet-node-<platform>`, such as `froglet-node-darwin-aarch64`. Include its own stable `version`, exact `url`, artifact `signature` and optional worker `notes`. This entry contains the BioCompass-compatible `froglet-node` binary and can have a different version from the local app. The authenticated customer hub checks the user's role for discovery and download. Organization owners and admins can download the worker and see connection guidance. Keep the generated node key and persistent state on the customer machine. A site operator enrolls compute-pool workers.
