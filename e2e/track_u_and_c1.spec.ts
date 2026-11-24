@@ -239,21 +239,22 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
 
       // 2. Measure local bundled module click-to-usable UI (< 1000 ms).
       const localCard = page.getByTestId("plugin-card-alithea/hla-interactive-explorer");
-      if (await localCard.isVisible().catch(() => false)) {
-        await expect(
-          page.getByTestId("module-source-badge-alithea/hla-interactive-explorer"),
-        ).toHaveText("This workspace");
-        await expect(
-          page.getByTestId("module-runs-in-badge-alithea/hla-interactive-explorer"),
-        ).toHaveText("Local");
-        const localStart = performance.now();
-        await page.getByTestId("module-open-btn-alithea/hla-interactive-explorer").click();
-        const localWin = page.getByTestId("module-window-alithea/hla-interactive-explorer");
-        await expect(localWin.locator("iframe")).toBeVisible();
-        await expect(localWin.frameLocator("iframe").locator("body")).not.toBeEmpty();
-        expect(performance.now() - localStart).toBeLessThan(1000);
-        await localWin.getByRole("button", { name: /close/i }).first().click();
-      }
+      await expect(localCard).toBeVisible({ timeout: 5_000 });
+      await expect(
+        page.getByTestId("module-source-badge-alithea/hla-interactive-explorer"),
+      ).toHaveText("This workspace");
+      await expect(
+        page.getByTestId("module-runs-in-badge-alithea/hla-interactive-explorer"),
+      ).toHaveText("Local");
+      const localStart = performance.now();
+      await page.getByTestId("module-open-btn-alithea/hla-interactive-explorer").click();
+      const localWin = page.getByTestId("module-window-alithea/hla-interactive-explorer");
+      await expect(localWin.locator("iframe")).toBeVisible();
+      await expect(localWin.frameLocator("iframe").locator("body")).not.toBeEmpty();
+      const localElapsedMs = performance.now() - localStart;
+      console.log(`[U1 timing] local bundled module click-to-usable: ${localElapsedMs.toFixed(1)} ms`);
+      expect(localElapsedMs).toBeLessThan(1000);
+      await localWin.getByRole("button", { name: /close/i }).first().click();
 
       // 3. U3: Switch to Hub A in-app via WorkspaceHubChooser!
       await page.getByTestId("workspace-hub-mode-select").selectOption("custom_cloud");
@@ -279,7 +280,9 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       await expect(
         modAWin.frameLocator("iframe").getByTestId("u1-ui-ready"),
       ).toHaveText("Hub A Verified UI Loaded");
-      expect(performance.now() - cloudOpenStart).toBeLessThan(1000);
+      const cloudOpenMs = performance.now() - cloudOpenStart;
+      console.log(`[U1 timing] Hub A cloud module cold/prefetched click-to-usable: ${cloudOpenMs.toFixed(1)} ms`);
+      expect(cloudOpenMs).toBeLessThan(1000);
       await modAWin.getByRole("button", { name: /close/i }).first().click();
 
       // U1 Warm Open (< 1000 ms, 0 extra archive fetches!)
@@ -289,7 +292,9 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       await expect(
         modAWin.frameLocator("iframe").getByTestId("u1-ui-ready"),
       ).toHaveText("Hub A Verified UI Loaded");
-      expect(performance.now() - warmStart).toBeLessThan(1000);
+      const warmMs = performance.now() - warmStart;
+      console.log(`[U1 timing] Hub A cloud module warm click-to-usable: ${warmMs.toFixed(1)} ms (extra archive hits: ${hubA.archiveHits() - hitsBeforeWarm})`);
+      expect(warmMs).toBeLessThan(1000);
       expect(hubA.archiveHits()).toBe(hitsBeforeWarm);
       await modAWin.getByRole("button", { name: /close/i }).first().click();
 
@@ -318,7 +323,9 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       await expect(
         netWin.frameLocator("iframe").getByTestId("u1-net-ready"),
       ).toHaveText("Zurich Network UI Loaded");
-      expect(performance.now() - netStart).toBeLessThan(1000);
+      const netMs = performance.now() - netStart;
+      console.log(`[U1 timing] network provider module click-to-usable: ${netMs.toFixed(1)} ms`);
+      expect(netMs).toBeLessThan(1000);
       await netWin.getByRole("button", { name: /close/i }).first().click();
 
       // 4. U3: Switch in-app to Hub B -> Hub A module disappears, Hub B module appears and opens in < 1000 ms!
@@ -335,7 +342,9 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       await expect(
         modBWin.frameLocator("iframe").getByTestId("u1-hub-b-ready"),
       ).toHaveText("Hub B Verified UI Loaded");
-      expect(performance.now() - hubBStart).toBeLessThan(1000);
+      const hubBMs = performance.now() - hubBStart;
+      console.log(`[U1 timing] Hub B cloud module after U3 switch click-to-usable: ${hubBMs.toFixed(1)} ms`);
+      expect(hubBMs).toBeLessThan(1000);
     } finally {
       await hubA.close();
       await hubB.close();
