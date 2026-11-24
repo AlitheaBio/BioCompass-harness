@@ -754,25 +754,25 @@ jobs:
           PY
       - name: Verify both linux/amd64 and linux/arm64 are pullable by @sha256 digest
         env:
+          IMAGE_NAME: ${{ inputs.image_name }}
           PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+          ARM64_DIGEST: ${{ steps.multiarch.outputs.linux_arm64 }}
         run: |
           for plat in linux/amd64 linux/arm64; do
             docker pull --platform "$plat" "$PINNED_IMAGE"
-            actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$PINNED_IMAGE")"
+            actual="$(docker image inspect --platform "$plat" --format '{{.Os}}/{{.Architecture}}' "$PINNED_IMAGE")"
             if [ "$actual" != "$plat" ]; then
               echo "::error::Expected pulled platform $plat for $PINNED_IMAGE, got $actual" >&2
               exit 1
             fi
             echo "VERIFIED pullable by digest: $PINNED_IMAGE ($actual)"
-            if [ "$plat" = "linux/amd64" ]; then
-              docker rmi -f "$PINNED_IMAGE" >/dev/null
-            fi
           done
+          docker pull "${IMAGE_NAME}@${ARM64_DIGEST}"
       - name: Vulnerability gate on pushed linux/arm64 image (Trivy)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ needs.build-and-publish.outputs.pinned_image }}
+          image-ref: ${{ inputs.image_name }}@${{ steps.multiarch.outputs.linux_arm64 }}
           format: table
           exit-code: "1"
           ignore-unfixed: ${{ inputs.trivy_ignore_unfixed }}
@@ -821,7 +821,10 @@ jobs:
           matched = False
           for line in lines:
               envelope = json.loads(line)
-              payload = json.loads(base64.b64decode(envelope["payload"]).decode("utf-8"))
+              raw_payload = envelope.get("payload") or (envelope.get("dsseEnvelope") or {}).get("payload")
+              if not raw_payload:
+                  continue
+              payload = json.loads(base64.b64decode(raw_payload).decode("utf-8"))
               pred = payload.get("predicate", {})
               if pred.get("image_digest") == expected_digest:
                   matched = True
