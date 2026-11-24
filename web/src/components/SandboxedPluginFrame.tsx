@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   attachPluginHostBridge,
   type PluginHostBridge,
@@ -7,6 +7,7 @@ import {
   type SdkRunRecord,
 } from "@biocompass/plugin-sdk";
 import { prepareRun, queryCatalog } from "../api";
+import { networkRunHandoff } from "../moduleListPolicy";
 import { enforcePluginDownloadPolicy, enforcePluginQueryGrant } from "../pluginBridgePolicy";
 import type { DatasetGrant, PluginSummary, RunQuote, RunRecord } from "../types";
 
@@ -130,6 +131,12 @@ export function SandboxedPluginFrame({
   const syncDraftRef = useRef(onSyncDraftParams);
   syncDraftRef.current = onSyncDraftParams;
 
+  // U-4: a network run-only module's UI opens here, but its runs execute at the provider.
+  const handoff = networkRunHandoff(plugin);
+  const handoffRef = useRef(handoff);
+  handoffRef.current = handoff;
+  const [blockedRunNotice, setBlockedRunNotice] = useState<string | null>(null);
+
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
@@ -149,6 +156,12 @@ export function SandboxedPluginFrame({
         );
       },
       prepareRun: async (params) => {
+        const runHandoff = handoffRef.current;
+        if (runHandoff) {
+          // Intercept and explain instead of letting the request fail silently.
+          setBlockedRunNotice(runHandoff.message);
+          throw new Error(`RUN_AT_PROVIDER: ${runHandoff.message}`);
+        }
         const quote = await prepareRun({
           plugin_id: contextRef.current.pluginId,
           plugin_version: contextRef.current.pluginVersion,
@@ -228,6 +241,26 @@ export function SandboxedPluginFrame({
 
   return (
     <div className="sandbox-frame-shell">
+      {handoff && (
+        <div
+          role={blockedRunNotice ? "alert" : "note"}
+          className="bc-caption"
+          data-testid="network-run-handoff-notice"
+          style={{ padding: "6px 10px" }}
+        >
+          {blockedRunNotice ?? handoff.message}{" "}
+          {handoff.handoffUrl && (
+            <a
+              href={handoff.handoffUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="network-run-handoff-link"
+            >
+              Run at provider
+            </a>
+          )}
+        </div>
+      )}
       <iframe
         ref={iframeRef}
         data-testid={

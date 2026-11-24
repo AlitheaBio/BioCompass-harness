@@ -16,7 +16,7 @@ use biocompass_core_traits::local_delivery::{
 use biocompass_core_traits::{
     CatalogId, CompassError, CompassResult, OrgId, PluginId, RunId, RunQuote, RunRecord, RunStatus,
 };
-use biocompass_node_runtime::{verify_released_artifact, verify_released_result};
+use biocompass_node_runtime::verify_released_artifact;
 use chrono::Utc;
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
@@ -386,7 +386,20 @@ impl InstalledWorkspace {
                 result_cap,
             )
             .await?;
-        verify_released_result(run, &result, primary)?;
+        // W6-2: compare signed parent/child links with what the hub brokered, not with themselves.
+        let links = if biocompass_node_runtime::BrokeredRunLinks::required_for(run) {
+            let bundle: Value = self
+                .json(self.request(Method::GET, &["runs", run_id.as_str(), "provenance"]))
+                .await?;
+            biocompass_node_runtime::BrokeredRunLinks::from_provenance_bundle(
+                &bundle,
+                run_id.as_str(),
+                run.parent_run_id.as_deref(),
+            )
+        } else {
+            biocompass_node_runtime::BrokeredRunLinks::default()
+        };
+        biocompass_node_runtime::verify_released_result_with_links(run, &result, primary, &links)?;
         let mut files = Vec::with_capacity(run.artifacts.len());
         for (index, artifact) in run.artifacts.iter().enumerate() {
             let index = index.to_string();

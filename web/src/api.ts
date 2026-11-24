@@ -715,8 +715,14 @@ export async function restoreModuleSource(id: string, version: string, bearer?: 
   return response.plugin;
 }
 
+/**
+ * Install copies the module's container into this workspace. For a module listed by the
+ * connected hub, the workspace installs it from that hub's download offer (verifying the image
+ * digest and the signed UI attestation); it is refused when the offer does not allow download.
+ */
 export async function installPlugin(
   pluginId: string,
+  pluginVersion?: string,
 ): Promise<{ plugin_id: string; installed: boolean }> {
   const parts = pluginId.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
@@ -725,7 +731,11 @@ export async function installPlugin(
   const [ns, slug] = parts;
   return apiFetch<{ plugin_id: string; installed: boolean }>(
     `/api/v1/plugins/${encodeURIComponent(ns)}/${encodeURIComponent(slug)}/install`,
-    { method: "POST", headers: localOwnerHeaders(), body: JSON.stringify({}) },
+    {
+      method: "POST",
+      headers: localOwnerHeaders(),
+      body: JSON.stringify(pluginVersion ? { plugin_version: pluginVersion, source: "connected_hub" } : {}),
+    },
   );
 }
 
@@ -2014,6 +2024,8 @@ export async function updateWorkspaceHub(payload: {
   mode: WorkspaceHubMode;
   hub_url?: string;
   auth_bearer?: string;
+  /** Pin (or re-trust) this hub signing key (64 hex). */
+  hub_key?: string;
 }): Promise<WorkspaceHubStatus> {
   return apiFetch<WorkspaceHubStatus>("/api/v1/workspace/hub", {
     method: "PUT",
@@ -2125,11 +2137,15 @@ export async function fetchBillingStatement(params?: {
   from?: string;
   to?: string;
   credential_id?: string;
+  cursor?: string;
+  limit?: number;
 }): Promise<BillingStatement> {
   const qs = new URLSearchParams();
   if (params?.from?.trim()) qs.set("from", toRfc3339StatementBound(params.from, "start"));
   if (params?.to?.trim()) qs.set("to", toRfc3339StatementBound(params.to, "end"));
   if (params?.credential_id?.trim()) qs.set("credential_id", params.credential_id.trim());
+  if (params?.cursor?.trim()) qs.set("cursor", params.cursor.trim());
+  if (params?.limit) qs.set("limit", String(params.limit));
   const query = qs.toString();
   return apiFetch<BillingStatement>(
     `/api/v1/billing/statement${query ? `?${query}` : ""}`,
@@ -2182,6 +2198,14 @@ export async function fetchWebhookDeliveries(
     `/api/v1/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
   );
   return data.deliveries ?? [];
+}
+
+/** Re-queue a dead-lettered webhook delivery (org admin only). */
+export async function redeliverWebhookDelivery(endpointId: string, deliveryId: string): Promise<void> {
+  await apiFetch(
+    `/api/v1/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
+    { method: "POST", body: "{}" },
+  );
 }
 
 // ---------------------------------------------------------------------------

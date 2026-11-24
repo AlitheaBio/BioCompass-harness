@@ -134,6 +134,8 @@ struct HubPluginDto {
     launch_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     marketplace_offer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module_attestation: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,6 +152,8 @@ pub struct HubPluginMeta {
     pub launch_url: Option<String>,
     pub marketplace_offer_id: Option<String>,
     pub hub_origin: Option<String>,
+    /// Verified hub attestation of the UI bundle (`U-1`); a remote UI is opened only with one.
+    pub ui_attestation: Option<crate::ui_cache::VerifiedUiAttestation>,
 }
 
 pub struct CompassHubClient {
@@ -161,9 +165,57 @@ pub struct CompassHubClient {
     requester_id: String,
     local_ui_roots: RwLock<HashMap<PluginId, PathBuf>>,
     log_tx: broadcast::Sender<RunLogEvent>,
+    /// Pinned signing key of this workbench's hub (`U-1`): `COMPASS_HUB_KEY`, else learned once.
+    hub_key: RwLock<Option<String>>,
 }
 
 impl CompassHubClient {
+    /// The hub key module attestations must be signed with (`U-1`). Pinned from
+    /// `COMPASS_HUB_KEY` when set, otherwise from `/v1/hub-identity` on first use; a later
+    /// change is refused for the life of the process.
+    pub async fn pinned_hub_key(&self) -> CompassResult<String> {
+        if let Some(key) = self.hub_key.read().await.clone() {
+            return Ok(key);
+        }
+        let mut slot = self.hub_key.write().await;
+        if let Some(key) = slot.clone() {
+            return Ok(key);
+        }
+        #[derive(Deserialize)]
+        struct Identity {
+            hub_key: String,
+        }
+        let id: Identity = get_json(&self.http, &self.cfg, "/v1/hub-identity").await?;
+        let key = id.hub_key.trim().to_ascii_lowercase();
+        if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CompassError::Protocol("hub identity has no valid hub_key".into()));
+        }
+        *slot = Some(key.clone());
+        Ok(key)
+    }
+
+    async fn verify_listing_attestation(
+        &self,
+        dto: &HubPluginDto,
+    ) -> Option<crate::ui_cache::VerifiedUiAttestation> {
+        let hash = dto.ui_bundle_hash.as_deref()?;
+        let doc = dto.module_attestation.as_ref()?;
+        let key = self.pinned_hub_key().await.ok()?;
+        match crate::ui_cache::VerifiedUiAttestation::verify(
+            doc,
+            &key,
+            dto.manifest.id.as_str(),
+            &dto.manifest.version,
+            None,
+        ) {
+            Ok(a) if a.ui_bundle_hash == hash => Some(a),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(plugin = %dto.manifest.id, %error, "refusing unattested module UI");
+                None
+            }
+        }
+    }
     /// Configured `compass-hub` base URL (without trailing slash).
     pub fn base_url(&self) -> &str {
         &self.cfg.base_url
@@ -221,6 +273,12 @@ impl CompassHubClient {
             requester_id: health.requester_id,
             local_ui_roots: RwLock::new(bundled_ui_roots),
             log_tx,
+            hub_key: RwLock::new(
+                std::env::var("COMPASS_HUB_KEY")
+                    .ok()
+                    .map(|k| k.trim().to_ascii_lowercase())
+                    .filter(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit())),
+            ),
         };
         Ok((client, placeholder_org, engine_label))
     }
@@ -244,7 +302,9 @@ impl CompassHubClient {
         let dto: HubPluginDto = get_json(
             &self.http, &self.cfg, &format!("/api/v1/module-offers/{offer_id}/run-module"),
         ).await?;
+        let ui_attestation = self.verify_listing_attestation(&dto).await;
         let meta = HubPluginMeta {
+            ui_attestation,
             has_ui_bundle: dto.has_ui_bundle,
             has_remote_icon: dto.icon_url.is_some(),
             source: dto.source,
@@ -267,10 +327,15 @@ impl CompassHubClient {
             plugins: Vec<HubPluginDto>,
         }
         let r: Resp = get_json(&self.http, &self.cfg, "/api/v1/plugins").await?;
+        let mut attestations = Vec::with_capacity(r.plugins.len());
+        for dto in &r.plugins {
+            attestations.push(self.verify_listing_attestation(dto).await);
+        }
         let roots = self.local_ui_roots.read().await;
-        Ok(r.plugins.into_iter().map(|dto| {
+        Ok(r.plugins.into_iter().zip(attestations).map(|(dto, ui_attestation)| {
             let root_dir = roots.get(&dto.manifest.id).cloned();
             let meta = HubPluginMeta {
+                ui_attestation,
                 has_ui_bundle: dto.has_ui_bundle,
                 has_remote_icon: dto.icon_url.is_some(),
                 source: dto.source,
@@ -1169,6 +1234,7 @@ impl WorkspaceRegistryPort for CompassHubClient {
                     provider_label: None,
                     launch_url: None,
                     marketplace_offer_id: None,
+                    module_attestation: None,
                 }),
             "POST /api/v1/plugins",
         )

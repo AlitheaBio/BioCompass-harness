@@ -463,4 +463,20 @@ mod tests {
         assert!(parse_extension_ref("bc.input.v1:not-hex:also-bad").is_err());
         assert!(parse_extension_ref("bc.unknown.v1:abcd").is_err());
     }
+
+    #[test]
+    fn run_inputs_whose_stage_paths_collide_case_insensitively_are_rejected() {
+        let mk = |alias: &str, name: &str| crate::RunInput {
+            alias: alias.into(),
+            source_run_id: "run-src".into(),
+            name: name.into(),
+            sha256: "ab".repeat(32),
+            size_bytes: 1,
+            source_receipt_hash: "cd".repeat(32),
+        };
+        let err = crate::canonicalize_run_inputs(&[mk("a", "x.csv"), mk("A", "X.csv")]).unwrap_err();
+        assert!(err.to_string().contains("case-insensitively"), "{err}");
+        assert!(crate::canonicalize_run_inputs(&[mk("a", "x.csv"), mk("a", "X.CSV")]).is_err());
+        crate::canonicalize_run_inputs(&[mk("a", "x.csv"), mk("b", "x.csv")]).unwrap();
+    }
 }

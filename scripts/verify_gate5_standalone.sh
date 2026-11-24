@@ -144,7 +144,8 @@ for run in runs:
         print(f"  ✓ [external froglet-verify] {run_id} ({plugin_id}) -> valid=True, 5/5 artifacts verified")
     else:
         proc = subprocess.run(
-            [str(biocompass_bin), "verify-receipt", str(chain_path)],
+            # W6-1: this gate checks chain integrity only; signer trust is not part of it.
+            [str(biocompass_bin), "verify-receipt", "--no-trust-anchor", str(chain_path)],
             capture_output=True,
             text=True,
             check=True,

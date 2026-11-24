@@ -8,6 +8,7 @@ import {
   formatModuleRunsInLabel,
   formatModuleSourceLabel,
   isLocalPlayLedgerContext,
+  networkRunHandoff,
   resolveModuleCardActions,
 } from "../src/moduleListPolicy.ts";
 import {
@@ -221,4 +222,57 @@ test("[C1/U3/U4] API client and Enterprise UI panels wire every Milestone C1 rou
   assert.match(appSrc, /WorkspaceHubChooser/);
   assert.match(appSrc, /resolveModuleCardActions/);
   assert.match(appSrc, /network-offers-discovery-section/);
+});
+
+test("[U-4] an Added network module offers Remove (unsubscribe) and only for subscribed offers", () => {
+  const networkModule = {
+    source: "network_provider" as const,
+    runs_in: "network_provider" as const,
+    execution_target: "froglet_node",
+    provider_label: "Provider B",
+    can_install: false,
+    installed_locally: false,
+    installed: true,
+    removable_versions: [],
+    detached_versions: [],
+    launch_url: "https://hub-b.example/module-offers/mo-1",
+    marketplace_offer_id: "mo-1",
+  };
+  const subscribed = resolveModuleCardActions(networkModule, true, new Set(["mo-1"]));
+  assert.equal(subscribed.canUnsubscribe, true);
+  assert.equal(subscribed.subscriptionId, "mo-1");
+  assert.equal(resolveModuleCardActions(networkModule, true, new Set()).canUnsubscribe, false);
+  assert.equal(resolveModuleCardActions(networkModule, false, new Set(["mo-1"])).canUnsubscribe, false);
+});
+
+test("[U-4] a network run-only module's in-iframe run is intercepted with an explanation and handoff", () => {
+  const runOnly = {
+    source: "network_provider" as const,
+    runs_in: "network_provider" as const,
+    execution_target: "froglet_node",
+    provider_label: "Provider B",
+    can_install: false,
+    installed_locally: false,
+    installed: true,
+    launch_url: "https://hub-b.example/module-offers/mo-1",
+  };
+  const handoff = networkRunHandoff(runOnly);
+  assert.ok(handoff);
+  assert.match(handoff.message, /runs at Provider B/);
+  assert.equal(handoff.handoffUrl, "https://hub-b.example/module-offers/mo-1");
+  assert.equal(networkRunHandoff({ ...runOnly, launch_url: "javascript:alert(1)" })?.handoffUrl, null);
+  // A module that runs here (or was installed locally) is not intercepted.
+  assert.equal(networkRunHandoff({ ...runOnly, source: "org_cloud", runs_in: "cloud" }), null);
+  assert.equal(networkRunHandoff({ ...runOnly, installed_locally: true }), null);
+  // The sandbox bridge must route prepareRun through the interception.
+  const frame = readSrc("components/SandboxedPluginFrame.tsx");
+  assert.match(frame, /networkRunHandoff\(plugin\)/);
+  assert.match(frame, /RUN_AT_PROVIDER/);
+});
+
+test("[U-1] the hub chooser shows the pinned hub key and can trust a key explicitly", () => {
+  const chooser = readSrc("components/WorkspaceHubChooser.tsx");
+  assert.match(chooser, /workspace-hub-key-pinned/);
+  assert.match(chooser, /workspace-hub-key-trust-btn/);
+  assert.match(chooser, /hub_key: hubKey/);
 });

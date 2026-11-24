@@ -6,15 +6,19 @@
 //! RFC 8785 JCS + `secp256k1` BIP340 Schnorr 5-artifact (`Descriptor -> Offer -> Quote -> Deal -> Receipt`)
 //! chain signing & verification via `froglet-protocol` and `froglet-verify`.
 
+pub mod module_attestation;
 mod native_recovery;
 mod recovered_result;
 mod released_result;
 mod run_lock;
 mod target_validation;
 pub use released_result::{
-    verify_released_artifact, verify_released_result, verify_released_result_commitment,
+    BrokeredRunLinks, verify_released_artifact, verify_released_result,
+    verify_released_result_commitment, verify_released_result_commitment_with_links,
+    verify_released_result_with_links,
 };
 mod live_query;
+mod local_child;
 pub use live_query::{LiveQueryAuthority, LiveQueryBinding, LiveQuerySession};
 pub use target_validation::{
     NamedReadPage, RuntimeReadParams, direct_named_read_page, is_runtime_read, named_read as private_named_read,
@@ -217,10 +221,13 @@ pub fn release_terms_hash(plugin: &LoadedPlugin) -> CompassResult<String> {
         terms["runtime_join_queries"] = json!(m.runtime_join_queries);
     }
     if !m.child_modules.is_empty() {
-        terms["child_modules"] = json!(m.child_modules);
+        terms["child_modules"] = m.child_modules.to_json();
     }
     if let Some(wait_sec) = m.max_child_wait_sec {
         terms["max_child_wait_sec"] = json!(wait_sec);
+    }
+    if let Some(cap) = m.max_child_spend_milli_act {
+        terms["max_child_spend_milli_act"] = json!(cap);
     }
     let bytes = canonical_json::to_vec(&terms)
         .map_err(|e| CompassError::Protocol(format!("canonicalize native module terms: {e}")))?;
@@ -299,6 +306,8 @@ pub struct InProcessNodeRuntime {
     allow_local_dev_tags: bool,
     log_tx: broadcast::Sender<RunLogEvent>,
     terminal_tx: broadcast::Sender<biocompass_core_traits::run_events::TerminalNotice>,
+    /// Set by [`Self::enable_local_child_runs`]: lets confirmed parents broker local child runs.
+    child_runtime: std::sync::OnceLock<std::sync::Weak<InProcessNodeRuntime>>,
 }
 
 impl InProcessNodeRuntime {
@@ -331,7 +340,35 @@ impl InProcessNodeRuntime {
             allow_local_dev_tags: deps.allow_local_dev_tags,
             log_tx,
             terminal_tx: broadcast::channel(256).0,
+            child_runtime: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Enable laptop child runs (`W7`): a confirmed parent declaring `child_modules` gets an
+    /// in-process broker that prepares and confirms each child locally as the local user,
+    /// reserving from the local play ledger and bounded by the parent's signed child spend cap.
+    pub fn enable_local_child_runs(self: &Arc<Self>) {
+        let _ = self.child_runtime.set(Arc::downgrade(self));
+    }
+
+    fn local_child_broker(
+        &self,
+        plugin: &LoadedPlugin,
+        run: &RunRecord,
+    ) -> Option<Arc<dyn ChildRunBroker>> {
+        if run.parent_run_id.is_some() {
+            return None;
+        }
+        let cap = plugin.manifest.effective_max_child_spend_milli_act()?;
+        let runtime = self.child_runtime.get()?.clone();
+        Some(Arc::new(local_child::LocalChildBroker {
+            runtime,
+            org_id: run.org_id.clone(),
+            session_id: run.session_id.clone(),
+            parent_run_id: run.run_id.clone(),
+            spend_cap_milli: cap,
+            spent_milli: std::sync::atomic::AtomicI64::new(0),
+        }))
     }
 
     pub fn subscribe_terminal(&self) -> broadcast::Receiver<biocompass_core_traits::run_events::TerminalNotice> {
@@ -1028,6 +1065,11 @@ impl InProcessNodeRuntime {
 
     /// Fetch, verify via `verify_released_artifact`, and stage upstream `RunInput` artifacts into
     /// `<in_dir>/artifacts/<alias>/<name>`, enforcing `already_staged_bytes + sum(inputs) <= max_input_bytes`.
+    ///
+    /// Artifacts are streamed from the blob store to disk (never buffered whole) and hashed from
+    /// the staged file; the declared size is checked against the cap before any byte is copied.
+    /// Stage paths that collide case-insensitively are refused, since `/in` may be on a
+    /// case-insensitive filesystem (macOS, Windows).
     async fn stage_run_inputs(
         &self,
         inputs: &[RunInput],
@@ -1035,23 +1077,19 @@ impl InProcessNodeRuntime {
         already_staged_bytes: u64,
         max_input_bytes: u64,
     ) -> CompassResult<u64> {
-        let mut cumulative = already_staged_bytes;
+        let mut folded_paths = HashSet::new();
         for input in inputs {
             input.validate()?;
-            let blob_key = format!("runs/{}/artifacts/{}", input.source_run_id, input.name);
-            let bytes = self.blob_store.get_bytes(&blob_key).await?;
-            let measured_sha256 = sha256_hex(&bytes);
-            let measured_size = bytes.len() as u64;
-            let expected_ref = ArtifactRef {
-                name: input.name.clone(),
-                blob_key,
-                media_type: String::new(),
-                size_bytes: input.size_bytes,
-                sha256: input.sha256.clone(),
-            };
-            verify_released_artifact(&expected_ref, &measured_sha256, measured_size)?;
-
-            cumulative = cumulative.checked_add(measured_size).ok_or_else(|| {
+            if !folded_paths.insert(input.stage_relative_path().to_lowercase()) {
+                return Err(CompassError::Validation(format!(
+                    "run input stage path '/in/artifacts/{}' collides case-insensitively with another input",
+                    input.stage_relative_path()
+                )));
+            }
+        }
+        let mut cumulative = already_staged_bytes;
+        for input in inputs {
+            cumulative = cumulative.checked_add(input.size_bytes).ok_or_else(|| {
                 CompassError::input_limit_exceeded("staged input byte count overflowed u64")
             })?;
             if cumulative > max_input_bytes {
@@ -1060,6 +1098,7 @@ impl InProcessNodeRuntime {
                 )));
             }
 
+            let blob_key = format!("runs/{}/artifacts/{}", input.source_run_id, input.name);
             let rel_path = input.stage_relative_path();
             let dest = in_dir.join("artifacts").join(&rel_path);
             let parent = dest.parent().ok_or_else(|| {
@@ -1083,9 +1122,24 @@ impl InProcessNodeRuntime {
                     }
                 }
             }
-            std::fs::write(&dest, &bytes).map_err(|e| {
-                CompassError::Storage(format!("write staged input {}: {e}", dest.display()))
-            })?;
+            if dest.exists() {
+                return Err(CompassError::Validation(format!(
+                    "run input stage path '/in/artifacts/{rel_path}' already exists"
+                )));
+            }
+            self.blob_store.materialize_to_path(&blob_key, &dest).await?;
+            let (measured_sha256, measured_size) = sha256_file_streaming(&dest).await?;
+            let expected_ref = ArtifactRef {
+                name: input.name.clone(),
+                blob_key,
+                media_type: String::new(),
+                size_bytes: input.size_bytes,
+                sha256: input.sha256.clone(),
+            };
+            if let Err(e) = verify_released_artifact(&expected_ref, &measured_sha256, measured_size) {
+                let _ = std::fs::remove_file(&dest);
+                return Err(e);
+            }
             set_world_readable_file(&dest)?;
         }
         Ok(cumulative)
@@ -1555,6 +1609,7 @@ impl InProcessNodeRuntime {
                 child_broker,
                 allowed_child_modules: plugin.manifest.child_modules.clone(),
                 max_child_wait_sec: plugin.manifest.max_child_wait_sec,
+                max_child_artifact_bytes: Some(limits.max_input_bytes as u64),
                 max_output_bytes: Some(limits.max_output_bytes as u64),
                 ..SuperviseOptions::default()
             },
@@ -2243,7 +2298,7 @@ impl RunDispatcher for InProcessNodeRuntime {
                     &format!(
                         "Prepared plugin '{}' ({}) — awaiting explicit user confirmation.",
                         plugin.manifest.id,
-                        estimated_cost_act.display_act()
+                        estimated_cost_act.display_local_credits()
                     ),
                     json!({
                         "run_id": run_id,
@@ -2510,6 +2565,7 @@ impl InProcessNodeRuntime {
         run.froglet_chain.push(deal_doc.clone());
         self.session_store.save_run(&run).await?;
 
+        let child_broker = child_broker.or_else(|| self.local_child_broker(&plugin, &run));
         self.execute_confirmed_deal(
             run,
             &plugin,
@@ -2528,6 +2584,30 @@ impl InProcessNodeRuntime {
         .await
     }
 
+}
+
+/// SHA-256 and length of a file, read in bounded chunks.
+async fn sha256_file_streaming(path: &Path) -> CompassResult<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| CompassError::Storage(format!("open {}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| CompassError::Storage(format!("read {}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((hex::encode(hasher.finalize()), total))
 }
 
 #[cfg(test)]
@@ -2687,5 +2767,103 @@ mod sec_31_tests {
             Err(err) => err,
         };
         assert_eq!(err.0, "SNAPSHOT_PROVENANCE_MISMATCH");
+    }
+}
+
+#[cfg(test)]
+mod stage_inputs_tests {
+    use super::*;
+    use biocompass_core_traits::{
+        CreditAmountAct, LocalFsBlobStore, SqliteActLedger, SqliteSessionStore,
+        StandardOciPolicyVerifier,
+    };
+    use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
+
+    fn runtime(tmp: &Path) -> (InProcessNodeRuntime, Arc<LocalFsBlobStore>) {
+        let blobs = Arc::new(LocalFsBlobStore::new(tmp.join("blobs")).unwrap());
+        let rt = InProcessNodeRuntime::new(NodeRuntimeDeps {
+            keys: NodeKeypairSet::load_or_generate(tmp.join("keys")).unwrap(),
+            session_store: Arc::new(SqliteSessionStore::in_memory().unwrap()),
+            blob_store: blobs.clone(),
+            oci_registry: Arc::new(StandardOciPolicyVerifier::strict_pinned()),
+            payment_gateway: Arc::new(
+                SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(0)).unwrap(),
+            ),
+            oci_runner: Arc::new(OciContainerRunner::from_engine(DetectedEngine {
+                kind: EngineKind::Podman,
+                binary_path: PathBuf::new(),
+                server_version: "offline".into(),
+                rootless: true,
+            })),
+            stage_root_dir: tmp.join("stage"),
+            allow_local_dev_tags: false,
+        })
+        .unwrap();
+        (rt, blobs)
+    }
+
+    fn input(alias: &str, name: &str, bytes: &[u8]) -> RunInput {
+        RunInput {
+            alias: alias.into(),
+            source_run_id: "run-src".into(),
+            name: name.into(),
+            sha256: sha256_hex(bytes),
+            size_bytes: bytes.len() as u64,
+            source_receipt_hash: "ab".repeat(32),
+        }
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_stage_path_collisions_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, blobs) = runtime(tmp.path());
+        blobs.put_bytes("runs/run-src/artifacts/a.csv", b"1").await.unwrap();
+        blobs.put_bytes("runs/run-src/artifacts/A.csv", b"2").await.unwrap();
+        let in_dir = tmp.path().join("in");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        let err = rt
+            .stage_run_inputs(
+                &[input("x", "a.csv", b"1"), input("X", "A.csv", b"2")],
+                &in_dir,
+                0,
+                1024,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("case-insensitively"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn staged_inputs_stream_to_disk_and_are_verified_and_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, blobs) = runtime(tmp.path());
+        let body = vec![7u8; 200_000];
+        blobs.put_bytes("runs/run-src/artifacts/big.bin", &body).await.unwrap();
+        let in_dir = tmp.path().join("in");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        // Over the cap: refused before any byte is staged.
+        let err = rt
+            .stage_run_inputs(&[input("x", "big.bin", &body)], &in_dir, 10, 200_000)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("max_input_bytes"), "{err}");
+        assert!(!in_dir.join("artifacts/x/big.bin").exists());
+        // Within the cap: staged and hash-verified.
+        let total = rt
+            .stage_run_inputs(&[input("x", "big.bin", &body)], &in_dir, 10, 300_000)
+            .await
+            .unwrap();
+        assert_eq!(total, 200_010);
+        assert_eq!(std::fs::read(in_dir.join("artifacts/x/big.bin")).unwrap(), body);
+        // A tampered blob fails its digest check and leaves nothing staged.
+        let in2 = tmp.path().join("in2");
+        std::fs::create_dir_all(&in2).unwrap();
+        blobs.put_bytes("runs/run-src/artifacts/big.bin", &vec![8u8; 200_000]).await.unwrap();
+        assert!(
+            rt.stage_run_inputs(&[input("x", "big.bin", &body)], &in2, 0, 300_000)
+                .await
+                .is_err()
+        );
+        assert!(!in2.join("artifacts/x/big.bin").exists());
     }
 }

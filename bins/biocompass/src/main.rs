@@ -124,19 +124,64 @@ enum Commands {
         receipt_out: Option<PathBuf>,
     },
     /// Offline-verify a signed `froglet/v1` artifact chain or `bc.provenance.v1` bundle without network or node access.
+    ///
+    /// Signatures alone prove nothing about who signed: pass the hub and node public keys you
+    /// trust with `--trusted-key`/`--trusted-keys`. Every run's signer keys are always printed.
+    /// Exits non-zero on untrusted signers, unresolved ancestors (unless `--allow-incomplete`),
+    /// or when no trust anchor is given (unless `--no-trust-anchor`).
     VerifyReceipt {
         /// Path to the Froglet chain JSON file or `bc.provenance.v1` provenance bundle.
         file: PathBuf,
         #[arg(long)]
         now: Option<i64>,
-        /// Fail with non-zero exit code if a `bc.provenance.v1` bundle has any `unresolved_ancestors`.
+        /// Trusted signer public key (64 hex, BIP340 x-only); repeat for hub and node keys.
+        #[arg(long = "trusted-key")]
+        trusted_key: Vec<String>,
+        /// File of trusted keys: one per line (`#` comments) or a JSON array.
+        #[arg(long = "trusted-keys")]
+        trusted_keys: Option<PathBuf>,
+        /// Accept a result verified only for internal consistency (no trust anchor).
         #[arg(long, default_value_t = false)]
+        no_trust_anchor: bool,
+        /// Accept a `bc.provenance.v1` bundle with unresolved ancestors.
+        #[arg(long, default_value_t = false)]
+        allow_incomplete: bool,
+        /// Deprecated: incomplete bundles now fail by default.
+        #[arg(long, default_value_t = false, hide = true)]
         strict: bool,
+    },
+    /// Export `bc.provenance.v1` bundles for offline verification.
+    Provenance {
+        #[command(subcommand)]
+        action: ProvenanceCommands,
     },
     /// Scientific DuckLake catalog management (`import` for Parquet/CSV/TSV locally or via cloud S3 quarantine, §7.2).
     Catalog {
         #[command(subcommand)]
         action: CatalogCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProvenanceCommands {
+    /// Export the provenance bundle of `<run_id>` from the local store, or from a hub with `--hub-url`.
+    Export {
+        run_id: String,
+        /// Write the bundle here instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Local data directory (`~/.biocompass`) used when `--hub-url` is omitted.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Compass Hub URL; exports through `GET /api/v1/runs/<run_id>/provenance`.
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Hub API key (`bc_live_...`), also read from `COMPASS_API_KEY`.
+        #[arg(long, env = "COMPASS_API_KEY", hide_env_values = true)]
+        api_key: Option<String>,
+        /// Hub bearer token (`bc_agent_...` or session token), also read from `COMPASS_BEARER_TOKEN`.
+        #[arg(long, env = "COMPASS_BEARER_TOKEN", hide_env_values = true)]
+        bearer_token: Option<String>,
     },
 }
 
@@ -193,6 +238,56 @@ enum CatalogCommands {
         #[arg(long, default_value_t = 8)]
         part_size_mb: u64,
     },
+}
+
+/// Fetch `bc.provenance.v1` for `run_id` from a Compass Hub (`W6`).
+async fn export_hub_provenance(
+    hub_url: &str,
+    run_id: &str,
+    api_key: Option<&str>,
+    bearer_token: Option<&str>,
+) -> CompassResult<Value> {
+    let run = biocompass_core_traits::RunId::new(run_id.to_owned()).map_err(CompassError::Validation)?;
+    let mut url = reqwest::Url::parse(hub_url)
+        .map_err(|e| CompassError::Validation(format!("invalid --hub-url: {e}")))?;
+    url.path_segments_mut()
+        .map_err(|_| CompassError::Validation("--hub-url cannot be a base URL".into()))?
+        .pop_if_empty()
+        .extend(["api", "v1", "runs", run.as_str(), "provenance"]);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| CompassError::Internal(format!("http client: {e}")))?;
+    let mut req = client.get(url);
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        req = req.header("X-API-Key", key);
+    }
+    if let Some(token) = bearer_token.filter(|k| !k.is_empty()) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CompassError::Storage(format!("hub provenance request failed: {e}")))?;
+    let status = resp.status();
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| CompassError::Storage(format!("read hub provenance: {e}")))?;
+    if !status.is_success() {
+        return Err(CompassError::Storage(format!(
+            "hub returned {status} for provenance export: {}",
+            String::from_utf8_lossy(&body[..body.len().min(512)])
+        )));
+    }
+    let val: Value = serde_json::from_slice(&body)
+        .map_err(|e| CompassError::Validation(format!("hub provenance is not JSON: {e}")))?;
+    if !provenance::is_provenance_bundle_json(&val) {
+        return Err(CompassError::Validation(
+            "hub response is not a bc.provenance bundle".into(),
+        ));
+    }
+    Ok(val)
 }
 
 fn default_data_dir() -> PathBuf {
@@ -429,38 +524,141 @@ async fn run_cli(cli: Cli) -> CompassResult<ExitCode> {
                 Ok(ExitCode::from(1))
             }
         }
-        Commands::VerifyReceipt { file, now, strict } => {
+        Commands::VerifyReceipt {
+            file,
+            now,
+            trusted_key,
+            trusted_keys,
+            no_trust_anchor,
+            allow_incomplete,
+            strict: _,
+        } => {
             let raw = std::fs::read_to_string(&file).map_err(|e| {
                 CompassError::Storage(format!("read {}: {e}", file.display()))
             })?;
             let val: Value = serde_json::from_str(&raw)
                 .map_err(|e| CompassError::Validation(format!("invalid JSON: {e}")))?;
-            if provenance::is_provenance_bundle_json(&val) {
-                let report = provenance::verify_provenance_bundle(&val, now);
+            let mut anchors =
+                provenance::TrustAnchors::from_keys(&trusted_key).map_err(CompassError::Validation)?;
+            if let Some(path) = &trusted_keys {
+                let contents = std::fs::read_to_string(path).map_err(|e| {
+                    CompassError::Storage(format!("read {}: {e}", path.display()))
+                })?;
+                let keys = provenance::TrustAnchors::parse_file_contents(&contents)
+                    .map_err(CompassError::Validation)?;
+                anchors.extend(
+                    provenance::TrustAnchors::from_keys(keys).map_err(CompassError::Validation)?,
+                );
+                if anchors.is_empty() {
+                    return Err(CompassError::Validation(format!(
+                        "{} contains no trusted keys",
+                        path.display()
+                    )));
+                }
+            }
+            let policy = provenance::ExitPolicy {
+                no_trust_anchor,
+                allow_incomplete,
+            };
+            let (valid, complete, trust, run_signers) = if provenance::is_provenance_bundle_json(&val) {
+                let report = provenance::verify_provenance_bundle_with_anchors(&val, now, &anchors);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&report).unwrap_or_default()
                 );
-                let ok = report.valid && (!strict || report.complete);
-                if ok {
-                    Ok(ExitCode::SUCCESS)
-                } else {
-                    Ok(ExitCode::from(1))
-                }
+                let signers: Vec<(String, provenance::RunSigners)> = report
+                    .runs
+                    .iter()
+                    .map(|r| (r.run_id.clone(), r.signers.clone()))
+                    .collect();
+                (report.valid, report.complete, report.trust, signers)
             } else {
                 let docs = extract_documents(&val).map_err(CompassError::Protocol)?;
                 let report = validate_chain_documents(&docs, now);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                let (signers, signer_errors) = provenance::chain_signers(&docs, &anchors);
+                let trust = provenance::TrustReport::evaluate(&[&signers], &anchors);
+                let mut out = serde_json::to_value(&report).unwrap_or_default();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("signers".into(), json!(signers));
+                    obj.insert("trust".into(), json!(trust));
+                    if !signer_errors.is_empty() {
+                        obj.insert("signer_errors".into(), json!(signer_errors));
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                (
+                    report.valid && signer_errors.is_empty(),
+                    true,
+                    trust,
+                    vec![("chain".to_owned(), signers)],
+                )
+            };
+            for (run_id, s) in &run_signers {
+                eprintln!(
+                    "signers {run_id}: provider={} ({}) requester={} ({})",
+                    s.provider_key.as_deref().unwrap_or("<none>"),
+                    if s.provider_trusted { "trusted" } else { "untrusted" },
+                    s.requester_key.as_deref().unwrap_or("<none>"),
+                    if s.requester_trusted { "trusted" } else { "untrusted" },
                 );
-                if report.valid {
-                    Ok(ExitCode::SUCCESS)
-                } else {
+            }
+            eprintln!("trust: {}", trust.statement);
+            match provenance::exit_verdict(valid, complete, &trust, policy) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(reasons) => {
+                    for reason in reasons {
+                        eprintln!("verify-receipt: {reason}");
+                    }
                     Ok(ExitCode::from(1))
                 }
             }
         }
+        Commands::Provenance { action } => match action {
+            ProvenanceCommands::Export {
+                run_id,
+                out,
+                data_dir,
+                hub_url,
+                api_key,
+                bearer_token,
+            } => {
+                let bundle = match hub_url {
+                    Some(hub) => {
+                        export_hub_provenance(&hub, &run_id, api_key.as_deref(), bearer_token.as_deref())
+                            .await?
+                    }
+                    None => {
+                        let dir = data_dir.unwrap_or_else(default_data_dir);
+                        let state = AppState::bootstrap(&dir, DeploymentMode::Local, false).await?;
+                        let root = biocompass_core_traits::RunId::new(run_id)
+                            .map_err(CompassError::Validation)?;
+                        let bundle = biocompass::server::export_local_provenance_bundle(
+                            &state,
+                            &root,
+                            &state.default_org_id,
+                        )
+                        .await?;
+                        if let Some(runtime) = &state.local_runtime {
+                            eprintln!(
+                                "local signer keys (pass to verify-receipt --trusted-key): provider={} requester={}",
+                                runtime.provider_id(),
+                                runtime.requester_id()
+                            );
+                        }
+                        bundle
+                    }
+                };
+                let text = serde_json::to_string_pretty(&bundle)
+                    .map_err(|e| CompassError::Internal(format!("serialize bundle: {e}")))?;
+                match out {
+                    Some(path) => std::fs::write(&path, text).map_err(|e| {
+                        CompassError::Storage(format!("write {}: {e}", path.display()))
+                    })?,
+                    None => println!("{text}"),
+                }
+                Ok(ExitCode::SUCCESS)
+            }
+        },
         Commands::Catalog { action } => match action {
             CatalogCommands::Import {
                 file,

@@ -813,7 +813,7 @@ async fn update_marketplace_consent_handler(
         .marketplace
         .set_consent(req.decision, req.hub_url, req.sync_now)
         .await?;
-    prefetch_offers_ui_bundles(&ui_cache, &snapshot.hub_url, &snapshot.offers_preview).await;
+    prefetch_offers_ui_bundles(&state, &ui_cache).await;
     Ok(Json(snapshot).into_response())
 }
 
@@ -829,38 +829,57 @@ async fn sync_marketplace_handler(
         crate::native_import::operator::authorize(&state, &headers)?;
     }
     let snapshot = state.marketplace.sync_now().await?;
-    prefetch_offers_ui_bundles(&ui_cache, &snapshot.hub_url, &snapshot.offers_preview).await;
+    prefetch_offers_ui_bundles(&state, &ui_cache).await;
     Ok(Json(snapshot).into_response())
 }
 
-async fn prefetch_offers_ui_bundles(
-    ui_cache: &Arc<UiBundleCache>,
-    hub_url: &str,
-    offers: &[crate::marketplace::MarketplaceOfferSummary],
-) {
-    if hub_url.trim().is_empty() {
+/// Register and pre-fetch the UI bundles of the connected hub's modules (`U1`): only modules
+/// whose attestation verified against the pinned hub key (`U-1`) are registered.
+async fn prefetch_offers_ui_bundles(state: &AppState, ui_cache: &Arc<UiBundleCache>) {
+    if state.marketplace.active_hub_origin_and_auth().await.is_none() {
         return;
     }
-    for offer in offers {
-        if let Some(hash) = offer.ui_bundle_hash.as_deref() {
-            if let (Some(plugin_id), Some(version)) =
-                (offer.plugin_id.as_deref(), offer.version.as_deref())
-            {
-                ui_cache
-                    .register_remote_ui(
-                        "local",
-                        plugin_id,
-                        version,
-                        RemoteUiSource {
-                            hub_origin: hub_url.to_owned(),
-                            ui_bundle_hash: hash.to_owned(),
-                            entry: "index.html".to_owned(),
-                        },
-                    )
-                    .await;
-            }
-            ui_cache.prefetch_background(hash.to_owned(), hub_url.to_owned(), None);
-        }
+    // Use the modules the last refresh fetched; never add another outbound round trip here.
+    let remote_modules = state.marketplace.cached_remote_modules().await;
+    register_remote_modules_ui(state, ui_cache, &remote_modules).await;
+}
+
+async fn register_remote_modules_ui(
+    state: &AppState,
+    ui_cache: &Arc<UiBundleCache>,
+    remote_modules: &[crate::marketplace::RemoteHubModule],
+) {
+    let active = state.marketplace.active_hub_origin_and_auth().await;
+    for m in remote_modules {
+        let Some(attestation) = m.ui_attestation.clone() else {
+            continue;
+        };
+        let entry = m
+            .manifest
+            .ui
+            .as_ref()
+            .and_then(|u| Path::new(&u.entry).file_name()?.to_str())
+            .unwrap_or("index.html")
+            .to_owned();
+        // The stored hub token only ever goes to the hub it belongs to (`U-2`).
+        let same_hub_auth = active
+            .as_ref()
+            .and_then(|(origin, auth)| (*origin == m.ui_fetch_origin).then(|| auth.clone()))
+            .flatten();
+        ui_cache
+            .register_remote_ui(
+                "local",
+                m.manifest.id.as_str(),
+                &m.manifest.version,
+                RemoteUiSource {
+                    hub_origin: m.ui_fetch_origin.clone(),
+                    ui_bundle_hash: attestation.ui_bundle_hash.clone(),
+                    entry,
+                    attestation: attestation.clone(),
+                },
+            )
+            .await;
+        ui_cache.prefetch_background(attestation, m.ui_fetch_origin.clone(), same_hub_auth);
     }
 }
 
@@ -878,6 +897,9 @@ struct UpdateWorkspaceHubRequest {
     hub_url: Option<String>,
     #[serde(default)]
     auth_bearer: Option<String>,
+    /// Hub signing key to pin (explicit entry, or re-trust after a key change; `U-1`).
+    #[serde(default)]
+    hub_key: Option<String>,
 }
 
 async fn update_workspace_hub_handler(
@@ -894,48 +916,12 @@ async fn update_workspace_hub_handler(
     }
     let status = state
         .marketplace
-        .set_workspace_hub(req.mode, req.hub_url, req.auth_bearer)
+        .set_workspace_hub(req.mode, req.hub_url, req.auth_bearer, req.hub_key)
         .await?;
     // Drop stale module UI pointers from the previous hub so switched-away modules cannot
     // resolve via cached `(plugin_id, version)` lookups.
     ui_cache.clear_remote_ui_scope("local").await;
-    if let Some((hub_origin, auth)) = state.marketplace.active_hub_origin_and_auth().await {
-        let remote_modules = state
-            .marketplace
-            .list_remote_and_subscribed_modules(auth.as_ref())
-            .await;
-        for m in &remote_modules {
-            if let Some(hash) = m.ui_bundle_hash.as_deref() {
-                let entry = m
-                    .manifest
-                    .ui
-                    .as_ref()
-                    .and_then(|u| Path::new(&u.entry).file_name()?.to_str())
-                    .unwrap_or("index.html")
-                    .to_owned();
-                let same_hub_auth = (m.hub_origin == hub_origin)
-                    .then(|| auth.clone())
-                    .flatten();
-                ui_cache
-                    .register_remote_ui(
-                        "local",
-                        m.manifest.id.as_str(),
-                        &m.manifest.version,
-                        RemoteUiSource {
-                            hub_origin: m.hub_origin.clone(),
-                            ui_bundle_hash: hash.to_owned(),
-                            entry,
-                        },
-                    )
-                    .await;
-                ui_cache.prefetch_background(
-                    hash.to_owned(),
-                    m.hub_origin.clone(),
-                    same_hub_auth,
-                );
-            }
-        }
-    }
+    prefetch_offers_ui_bundles(&state, &ui_cache).await;
     Ok(Json(status).into_response())
 }
 
@@ -987,27 +973,10 @@ async fn subscribe_network_offer_handler(
     if state.mode == DeploymentMode::Local {
         crate::native_import::operator::authorize(&state, &headers)?;
     }
-    let validated_hub = offer.hub_url.clone();
-    let validated_plugin_id = offer.plugin_id.clone();
-    let validated_version = offer.version.clone();
-    let validated_hash = offer.ui_bundle_hash.clone();
-    // Validate SSRF/airgap/plugin_id/version/hash BEFORE touching cache or launching prefetch.
+    // Validate consent/mode/SSRF/airgap/plugin_id/version/hash BEFORE touching the cache. The
+    // offer's own UI hash is never trusted: only an attested listing is registered (`U-1`).
     let subscribed = state.marketplace.subscribe_network_offer(offer).await?;
-    if let Some(hash) = validated_hash {
-        ui_cache
-            .register_remote_ui(
-                "local",
-                &validated_plugin_id,
-                &validated_version,
-                RemoteUiSource {
-                    hub_origin: validated_hub.clone(),
-                    ui_bundle_hash: hash.clone(),
-                    entry: "index.html".to_owned(),
-                },
-            )
-            .await;
-        ui_cache.prefetch_background(hash, validated_hub, None);
-    }
+    prefetch_offers_ui_bundles(&state, &ui_cache).await;
     Ok(Json(json!({ "subscribed": subscribed })).into_response())
 }
 
@@ -1373,8 +1342,13 @@ async fn to_plugin_dto(
 ) -> PluginSummaryDto {
     let mut ui_bundle_hash = hub_meta.ui_bundle_hash.take();
     let mut ui_bundle_size_bytes = hub_meta.ui_bundle_size_bytes.take();
+    let ui_attestation = hub_meta.ui_attestation.take();
     if let Some(cache) = ui_cache {
-        if let (Some(hash), Some(origin)) = (ui_bundle_hash.as_deref(), hub_meta.hub_origin.as_deref())
+        if let (Some(hash), Some(origin), Some(attestation)) = (
+            ui_bundle_hash.as_deref(),
+            hub_meta.hub_origin.as_deref(),
+            ui_attestation.filter(|a| ui_bundle_hash.as_deref() == Some(a.ui_bundle_hash.as_str())),
+        )
         {
             let entry = plugin
                 .manifest
@@ -1404,10 +1378,11 @@ async fn to_plugin_dto(
                         hub_origin: origin.to_owned(),
                         ui_bundle_hash: hash.to_owned(),
                         entry,
+                        attestation: attestation.clone(),
                     },
                 )
                 .await;
-            cache.prefetch_background(hash.to_owned(), origin.to_owned(), auth);
+            cache.prefetch_background(attestation, origin.to_owned(), auth);
         } else if ui_bundle_hash.is_none()
             && let Some((ui, root)) = plugin.manifest.ui.as_ref().zip(plugin.root_dir.as_ref())
         {
@@ -1578,11 +1553,7 @@ async fn list_plugins_handler(
     // U3 / U2: When local mode is connected to a cloud hub (or has subscribed network offers),
     // merge remote hub modules and pre-fetch their verified U1 UI bundles.
     if state.mode == DeploymentMode::Local {
-        let caller = current_caller_auth();
-        let remote_modules = state
-            .marketplace
-            .list_remote_and_subscribed_modules(Some(&caller))
-            .await;
+        let remote_modules = state.marketplace.list_remote_and_subscribed_modules().await;
         for remote in remote_modules {
             let id_key = remote.manifest.id.as_str().to_owned();
             if let Some(existing) = by_id.get_mut(&id_key) {
@@ -1606,7 +1577,8 @@ async fn list_plugins_handler(
                 provider_label: remote.provider_label,
                 launch_url: remote.launch_url,
                 marketplace_offer_id: remote.offer_id,
-                hub_origin: Some(remote.hub_origin),
+                hub_origin: Some(remote.ui_fetch_origin),
+                ui_attestation: remote.ui_attestation,
             };
             let loaded = LoadedPlugin {
                 manifest: remote.manifest,
@@ -1662,6 +1634,78 @@ struct InstallPluginRequest {
 #[serde(rename_all = "snake_case")]
 enum InstallSource {
     Workspace,
+    /// Install from the in-app connected hub's download offer (`U-4`).
+    ConnectedHub,
+}
+
+/// `U-4` Install for a module listed by the in-app connected hub: copy it from that hub's
+/// download offer using only the stored hub session (`U-2`), let `package_install` verify the
+/// package against the offer's image digest and import the image, then check the installed UI
+/// against the hub-signed attestation (`U-1`), undoing the install on mismatch.
+/// Returns `Ok(None)` when the module is not a connected-hub module.
+async fn install_from_connected_hub(
+    state: &AppState,
+    ui_cache: &Arc<UiBundleCache>,
+    plugin_id: &PluginId,
+    version: Option<&str>,
+) -> biocompass_core_traits::CompassResult<Option<LoadedPlugin>> {
+    if state.mode != DeploymentMode::Local || state.installed_workspace.is_some() {
+        return Ok(None);
+    }
+    let Some((hub_url, auth)) = state.marketplace.active_hub_origin_and_auth().await else {
+        return Ok(None);
+    };
+    let Some(remote) = state
+        .marketplace
+        .list_remote_and_subscribed_modules()
+        .await
+        .into_iter()
+        .find(|m| m.manifest.id == *plugin_id && version.is_none_or(|v| v == m.manifest.version))
+    else {
+        return Ok(None);
+    };
+    if !remote.can_install {
+        return Err(CompassError::AccessDenied(format!(
+            "INSTALL_NOT_OFFERED: {plugin_id} is not offered for download; it runs at {}",
+            remote.provider_label.as_deref().unwrap_or("its provider")
+        )));
+    }
+    let auth = auth.ok_or_else(|| {
+        CompassError::AccessDenied(format!("sign in to {hub_url} to install {plugin_id}"))
+    })?;
+    let workspace = Arc::new(crate::workspace::InstalledWorkspace::open(&state.data_dir, &hub_url)?);
+    let mut scoped = state.clone();
+    scoped.installed_workspace = Some(workspace);
+    let plugin = CALLER_AUTH
+        .scope(auth, crate::package_install::install_latest(&scoped, plugin_id))
+        .await?;
+    if let Some(attestation) = remote
+        .ui_attestation
+        .as_ref()
+        .filter(|a| a.version == plugin.manifest.version)
+    {
+        let installed_hash = match plugin.manifest.ui.as_ref().zip(plugin.root_dir.as_ref()) {
+            Some((ui, root)) => {
+                let entry = Path::new(&ui.entry);
+                let dir = entry.parent().map_or_else(|| root.clone(), |p| root.join(p));
+                let name = entry.file_name().and_then(|n| n.to_str()).unwrap_or("index.html");
+                Some(ui_cache.load_local_dir(&dir, name).await?.ui_bundle_hash.clone())
+            }
+            None => None,
+        };
+        if installed_hash.as_deref() != Some(attestation.ui_bundle_hash.as_str()) {
+            let _ = crate::package_install::removal::remove(
+                state,
+                plugin_id,
+                &plugin.manifest.version,
+            )
+            .await;
+            return Err(CompassError::ui_bundle_tampered(
+                "installed module UI differs from the hub-attested UI bundle; install undone",
+            ));
+        }
+    }
+    Ok(Some(plugin))
 }
 
 async fn remove_plugin_handler(
@@ -1681,6 +1725,7 @@ async fn remove_plugin_handler(
 
 async fn install_plugin_handler(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
     AxumPath((ns, slug)): AxumPath<(String, String)>,
     body: Bytes,
@@ -1698,7 +1743,23 @@ async fn install_plugin_handler(
             .map_err(|e| CompassError::Validation(format!("invalid install request: {e}")))?
     };
     let plugin_id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
-    let plugin = if matches!(request.source, Some(InstallSource::Workspace)) {
+    let from_hub = if matches!(request.source, Some(InstallSource::ConnectedHub))
+        || (request.source.is_none() && state.registry.get_plugin(&plugin_id).await.is_err())
+    {
+        install_from_connected_hub(&state, &ui_cache, &plugin_id, request.plugin_version.as_deref())
+            .await?
+    } else {
+        None
+    };
+    if from_hub.is_none() && matches!(request.source, Some(InstallSource::ConnectedHub)) {
+        return Err(CompassError::NotFound(format!(
+            "{plugin_id} is not listed by the connected hub"
+        ))
+        .into());
+    }
+    let plugin = if let Some(plugin) = from_hub {
+        plugin
+    } else if matches!(request.source, Some(InstallSource::Workspace)) {
         let version = request.plugin_version.as_deref().ok_or_else(|| {
             CompassError::Validation(
                 "restoring a workspace source requires an exact version".into(),
@@ -2692,11 +2753,33 @@ async fn get_run_provenance_handler(
             .await;
     }
     let root_run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
-    // Ensure the requested root run exists before assembling the provenance graph.
-    let root_run = state.session_store.get_run(&root_run_id).await?;
+    let bundle = export_local_provenance_bundle(&state, &root_run_id, &state.default_org_id).await?;
+    let mut resp = Json(bundle).into_response();
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(resp)
+}
+
+/// Assemble a `bc.provenance.v1` bundle for `root_run_id` from the local session store (`W6`).
+///
+/// Only runs owned by `org_id` are included: an input source, parent or child that belongs to
+/// another organization (or is missing) is listed under `unresolved_ancestors` instead of being
+/// exported. Runs never include `params`.
+pub async fn export_local_provenance_bundle(
+    state: &AppState,
+    root_run_id: &RunId,
+    org_id: &biocompass_core_traits::OrgId,
+) -> biocompass_core_traits::CompassResult<Value> {
+    // Ensure the requested root run exists and belongs to the caller before assembling the graph.
+    let root_run = state.session_store.get_run(root_run_id).await?;
+    if root_run.org_id != *org_id {
+        return Err(CompassError::NotFound(format!("run '{}'", root_run_id.as_str())));
+    }
     let all_local_runs = state
         .session_store
-        .list_runs(&root_run.org_id)
+        .list_runs(org_id)
         .await
         .unwrap_or_default();
 
@@ -2712,9 +2795,13 @@ async fn get_run_provenance_handler(
         if !visited.insert(current_id.as_str().to_owned()) {
             continue;
         }
-        let Ok(run) = state.session_store.get_run(&current_id).await else {
-            unresolved.push(current_id.as_str().to_owned());
-            continue;
+        let run = match state.session_store.get_run(&current_id).await {
+            Ok(run) if run.org_id == *org_id => run,
+            // Another organization's run (or a missing one) is never exported.
+            _ => {
+                unresolved.push(current_id.as_str().to_owned());
+                continue;
+            }
         };
 
         let receipt_payload = run
@@ -2828,20 +2915,14 @@ async fn get_run_provenance_handler(
         }));
     }
 
-    let bundle = json!({
+    Ok(json!({
         "schema": "bc.provenance.v1",
         "exported_at": chrono::Utc::now(),
         "root_run_id": root_run_id,
         "runs": runs_out,
         "edges": edges_out,
         "unresolved_ancestors": unresolved,
-    });
-    let mut resp = Json(bundle).into_response();
-    resp.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    Ok(resp)
+    }))
 }
 
 async fn get_run_artifact_handler(
@@ -3354,11 +3435,22 @@ async fn serve_plugin_asset(
             let resolved_hash = header_hash.or_else(|| known_source.as_ref().map(|s| s.ui_bundle_hash.clone()));
 
             if let Some(hash) = resolved_hash {
+                // U-1: trust the listing's verified attestation, or verify the one embedded in
+                // the archive against this workbench's pinned hub key.
+                let trust = match known_source.filter(|s| s.ui_bundle_hash == hash) {
+                    Some(source) => crate::ui_cache::UiTrust::Verified(source.attestation),
+                    None => crate::ui_cache::UiTrust::Embedded {
+                        pinned_hub_key: hub.pinned_hub_key().await?,
+                        plugin_id: plugin_id.as_str().to_owned(),
+                        version: version.to_owned(),
+                    },
+                };
                 let bundle = ui_cache
-                    .get_or_fetch(&hash, hub.base_url(), Some(&caller))
+                    .get_or_fetch(&hash, hub.base_url(), Some(&caller), &trust)
                     .await?;
                 let ticket = ui_cache
                     .issue_open_ticket(UiOpenGrant {
+                        tenant_scope: scope.clone(),
                         org_id: None,
                         session_sha256: extract_browser_session_sha256(headers),
                         plugin_id: plugin_id.as_str().to_owned(),
@@ -3411,16 +3503,13 @@ async fn serve_plugin_asset(
             Some(found) => Some(found),
             None => {
                 // Cold lookup if the module was opened directly before `GET /api/v1/plugins`.
-                let caller = current_caller_auth();
-                let remotes = state
-                    .marketplace
-                    .list_remote_and_subscribed_modules(Some(&caller))
-                    .await;
+                let remotes = state.marketplace.list_remote_and_subscribed_modules().await;
                 remotes
                     .into_iter()
                     .find(|m| m.manifest.id == plugin_id && m.manifest.version == ver)
                     .and_then(|m| {
-                        let hash = m.ui_bundle_hash?;
+                        let attestation = m.ui_attestation?;
+                        let hash = attestation.ui_bundle_hash.clone();
                         let entry = m
                             .manifest
                             .ui
@@ -3429,9 +3518,10 @@ async fn serve_plugin_asset(
                             .unwrap_or("index.html")
                             .to_owned();
                         Some(RemoteUiSource {
-                            hub_origin: m.hub_origin,
+                            hub_origin: m.ui_fetch_origin,
                             ui_bundle_hash: hash,
                             entry,
+                            attestation,
                         })
                     })
             }
@@ -3443,12 +3533,14 @@ async fn serve_plugin_asset(
                 .await
                 .and_then(|(origin, a)| (origin == source.hub_origin).then_some(a))
                 .flatten();
+            let trust = crate::ui_cache::UiTrust::Verified(source.attestation.clone());
             let bundle = ui_cache
-                .get_or_fetch(&source.ui_bundle_hash, &source.hub_origin, active_auth.as_ref())
+                .get_or_fetch(&source.ui_bundle_hash, &source.hub_origin, active_auth.as_ref(), &trust)
                 .await?;
             let ticket = ui_cache
                 .issue_open_ticket(UiOpenGrant {
-                    org_id: None,
+                    tenant_scope: "local".to_owned(),
+                    org_id: Some(state.default_org_id.as_str().to_owned()),
                     session_sha256: extract_browser_session_sha256(headers),
                     plugin_id: plugin_id.as_str().to_owned(),
                     version: ver.to_owned(),
@@ -5769,6 +5861,34 @@ mod milestone_c_track_u_tests {
     use std::time::Instant;
     use tower::ServiceExt;
 
+    /// Sign a `bc.module_attestation.v1` like compass-hub does (`U-1`).
+    fn mock_attestation(
+        key: &biocompass_node_runtime::froglet_protocol::crypto::NodeSigningKey,
+        plugin_id: &str,
+        hash: &str,
+    ) -> Value {
+        biocompass_node_runtime::module_attestation::sign_module_attestation(
+            key,
+            biocompass_node_runtime::module_attestation::ModuleAttestationPayload {
+                plugin_id: plugin_id.to_owned(),
+                version: "1.0.0".into(),
+                ui_bundle_hash: Some(hash.to_owned()),
+                ui_bundle_size_bytes: None,
+                image_digest: None,
+                hub_key: String::new(),
+                issued_at: 1_760_000_000,
+                provider: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn embed_attestation(archive: &[u8], doc: Value) -> Vec<u8> {
+        let mut v: Value = serde_json::from_slice(archive).unwrap();
+        v["module_attestation"] = doc;
+        serde_json::to_vec(&v).unwrap()
+    }
+
     #[derive(Default)]
     struct MockHubCounters {
         plugins_list: AtomicUsize,
@@ -5786,8 +5906,21 @@ mod milestone_c_track_u_tests {
     ) -> (String, Arc<MockHubCounters>) {
         let counters = Arc::new(MockHubCounters::default());
         let counters_bg = Arc::clone(&counters);
+        let hub_key = biocompass_node_runtime::froglet_protocol::crypto::generate_signing_key();
+        let hub_key_hex = biocompass_node_runtime::froglet_protocol::crypto::public_key_hex(&hub_key);
+        let valid_attestation = mock_attestation(&hub_key, "org-alpha/fast-ui", &valid_hash);
+        let tampered_attestation = mock_attestation(&hub_key, "org-alpha/tampered-ui", &tampered_hash);
+        let valid_archive = embed_attestation(&valid_archive, valid_attestation.clone());
+        let tampered_archive = embed_attestation(&tampered_archive, tampered_attestation.clone());
 
         let router = Router::new()
+            .route(
+                "/v1/hub-identity",
+                get(move || {
+                    let k = hub_key_hex.clone();
+                    async move { Json(json!({ "hub_key": k })) }
+                }),
+            )
             .route(
                 "/api/v1/health",
                 get(|| async {
@@ -5805,10 +5938,14 @@ mod milestone_c_track_u_tests {
                     let c = Arc::clone(&counters_bg);
                     let valid_hash = valid_hash.clone();
                     let tampered_hash = tampered_hash.clone();
+                    let valid_attestation = valid_attestation.clone();
+                    let tampered_attestation = tampered_attestation.clone();
                     move || {
                         let c = Arc::clone(&c);
                         let valid_hash = valid_hash.clone();
                         let tampered_hash = tampered_hash.clone();
+                        let valid_attestation = valid_attestation.clone();
+                        let tampered_attestation = tampered_attestation.clone();
                         async move {
                             c.plugins_list.fetch_add(1, Ordering::SeqCst);
                             Json(json!({
@@ -5832,7 +5969,8 @@ mod milestone_c_track_u_tests {
                                         "ui_bundle_hash": valid_hash,
                                         "ui_bundle_size_bytes": 512,
                                         "can_install": false,
-                                        "installed_locally": false
+                                        "installed_locally": false,
+                                        "module_attestation": valid_attestation
                                     },
                                     {
                                         "manifest": {
@@ -5852,7 +5990,8 @@ mod milestone_c_track_u_tests {
                                         "ui_bundle_hash": tampered_hash,
                                         "ui_bundle_size_bytes": 512,
                                         "can_install": false,
-                                        "installed_locally": false
+                                        "installed_locally": false,
+                                        "module_attestation": tampered_attestation
                                     }
                                 ]
                             }))
@@ -6243,14 +6382,32 @@ mod milestone_c_track_u_tests {
         files_b.insert("index.html".to_owned(), b"<h1>Hub B Verified UI</h1>".to_vec());
         let (hash_b, archive_b) = encode_ui_bundle_archive_json(&files_b, Some("index.html")).unwrap();
 
+        // Every credential header the mock hubs receive (`U-2`).
+        static SEEN_CREDENTIALS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         async fn spawn_hub(plugin_id: &'static str, name: &'static str, hash: String, archive: Vec<u8>) -> String {
+            let key = biocompass_node_runtime::froglet_protocol::crypto::generate_signing_key();
+            let key_hex = biocompass_node_runtime::froglet_protocol::crypto::public_key_hex(&key);
+            let attestation = mock_attestation(&key, plugin_id, &hash);
             let app = Router::new()
+                .route(
+                    "/v1/hub-identity",
+                    get(move || {
+                        let k = key_hex.clone();
+                        async move { Json(json!({ "hub_key": k })) }
+                    }),
+                )
                 .route(
                     "/api/v1/plugins",
                     get({
                         let hash = hash.clone();
-                        move || {
+                        move |headers: HeaderMap| {
                             let hash = hash.clone();
+                            let attestation = attestation.clone();
+                            for name in ["cookie", "authorization", "x-api-key"] {
+                                if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
+                                    SEEN_CREDENTIALS.lock().unwrap().push(format!("{name}: {v}"));
+                                }
+                            }
                             async move {
                                 Json(json!({
                                     "plugins": [{
@@ -6269,7 +6426,8 @@ mod milestone_c_track_u_tests {
                                         "source": "org_cloud",
                                         "runs_in": "cloud",
                                         "ui_bundle_hash": hash,
-                                        "can_install": false
+                                        "can_install": false,
+                                        "module_attestation": attestation
                                     }]
                                 }))
                             }
@@ -6384,6 +6542,10 @@ mod milestone_c_track_u_tests {
                         Request::builder()
                             .uri("/api/v1/plugins")
                             .header(header::HOST, &host)
+                            // U-2: the browser's local credentials must never reach the hub.
+                            .header(header::COOKIE, "bc_session=browser-secret-cookie")
+                            .header(header::AUTHORIZATION, "Bearer browser-secret-bearer")
+                            .header("x-api-key", "browser-secret-key")
                             .body(Body::empty())
                             .unwrap(),
                     )
@@ -6396,6 +6558,15 @@ mod milestone_c_track_u_tests {
             .unwrap(),
         )
         .unwrap();
+        assert!(
+            !SEEN_CREDENTIALS
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|h| h.contains("browser-secret")),
+            "browser credentials were forwarded to the hub: {:?}",
+            SEEN_CREDENTIALS.lock().unwrap()
+        );
         let list_a = plugins_a["plugins"].as_array().unwrap();
         let mod_a = list_a
             .iter()
@@ -6404,6 +6575,32 @@ mod milestone_c_track_u_tests {
         assert_eq!(mod_a["source"], "org_cloud");
         assert_eq!(mod_a["runs_in"], "cloud");
         assert_eq!(mod_a["ui_bundle_hash"], hash_a);
+
+        // U-4: Install of a connected-hub module goes to that hub's download offer; a module
+        // whose offer does not allow download is refused with an explanation (it used to fall
+        // through to the local registry and fail as "not found").
+        let install = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/plugins/hub-a/module-one/install")
+                    .header(header::HOST, &host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "plugin_version": "1.0.0", "source": "connected_hub" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(install.status(), StatusCode::FORBIDDEN);
+        let install_body = String::from_utf8(
+            axum::body::to_bytes(install.into_body(), 16 * 1024).await.unwrap().to_vec(),
+        )
+        .unwrap();
+        assert!(install_body.contains("INSTALL_NOT_OFFERED"), "{install_body}");
 
         let ui_entry_a = mod_a["ui_entry_url"].as_str().unwrap();
         let open_a = app
@@ -6598,7 +6795,7 @@ mod milestone_c_track_u_tests {
     #[tokio::test]
     async fn local_provenance_v1_exports_result_manifest_preimage_child_refs_and_omits_params() {
         use biocompass_core_traits::{
-            ArtifactRef, CreditAmountAct, NodeId, OrgId, PluginId, RunId, RunQuote, RunRecord,
+            ArtifactRef, CreditAmountAct, NodeId, PluginId, RunId, RunQuote, RunRecord,
             RunStatus, result_manifest_hash,
         };
 
@@ -6696,7 +6893,7 @@ mod milestone_c_track_u_tests {
         );
         let parent_run = RunRecord {
             run_id: parent_id.clone(),
-            org_id: OrgId::new("local").unwrap(),
+            org_id: state.default_org_id.clone(),
             session_id: None,
             plugin_id: PluginId::new("alithea/demo").unwrap(),
             plugin_version: "1.0.0".into(),
@@ -6726,7 +6923,7 @@ mod milestone_c_track_u_tests {
         let failed_receipt = build_receipt(None, Vec::new());
         let failed_run = RunRecord {
             run_id: failed_id.clone(),
-            org_id: OrgId::new("local").unwrap(),
+            org_id: state.default_org_id.clone(),
             session_id: None,
             plugin_id: PluginId::new("alithea/demo").unwrap(),
             plugin_version: "1.0.0".into(),
@@ -6825,5 +7022,106 @@ mod milestone_c_track_u_tests {
         .unwrap();
         assert!(failed_bundle["runs"][0]["manifest_preimage"].is_null());
         assert!(failed_bundle["runs"][0].get("params").is_none());
+    }
+
+    #[tokio::test]
+    async fn w6_local_provenance_export_never_includes_another_orgs_source_run() {
+        use biocompass_core_traits::{
+            CreditAmountAct, NodeId, OrgId, PluginId, RunId, RunInput, RunQuote, RunRecord,
+            RunStatus,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            crate::marketplace::MarketplaceConfig {
+                mode: DeploymentMode::Local,
+                airgapped: true,
+                explicit_hub_url: None,
+                default_hub_url: "https://hub.biocompass.alithea.bio".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let run = |id: &str, org: &str, inputs: Vec<RunInput>| RunRecord {
+            run_id: RunId::new(id).unwrap(),
+            org_id: OrgId::new(org).unwrap(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            status: RunStatus::Succeeded,
+            admission: None,
+            params: json!({}),
+            grant: None,
+            inputs,
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
+            quote: RunQuote {
+                run_id: RunId::new(id).unwrap(),
+                plugin_id: PluginId::new("alithea/demo").unwrap(),
+                plugin_version: "1.0.0".into(),
+                image_ref: format!("alithea/demo@sha256:{}", "6".repeat(64)),
+                target_node_id: NodeId::new("local").unwrap(),
+                offer_id: "default".into(),
+                offer_name: "Default".into(),
+                base_fee_act: CreditAmountAct::ZERO,
+                estimated_cost_act: CreditAmountAct::ZERO,
+                max_input_bytes: 1024,
+                max_output_bytes: 1024,
+                max_runtime_sec: 60,
+                max_memory_mb: 256,
+                workload_hash: "7".repeat(64),
+                dataset_grant_summary: None,
+                froglet_quote: json!({}),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+            },
+            result_json: None,
+            artifacts: Vec::new(),
+            froglet_receipt: None,
+            froglet_chain: Vec::new(),
+            receipt_verified: true,
+            logs: Vec::new(),
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        let foreign = run("run-foreign-src", "other-org", Vec::new());
+        state.session_store.save_run(&foreign).await.unwrap();
+        let local = run(
+            "run-local-consumer",
+            state.default_org_id.as_str(),
+            vec![RunInput {
+                alias: "x".into(),
+                source_run_id: "run-foreign-src".into(),
+                name: "out.csv".into(),
+                sha256: "a".repeat(64),
+                size_bytes: 1,
+                source_receipt_hash: "b".repeat(64),
+            }],
+        );
+        state.session_store.save_run(&local).await.unwrap();
+
+        let bundle =
+            export_local_provenance_bundle(&state, &local.run_id, &state.default_org_id)
+                .await
+                .unwrap();
+        let ids: Vec<&str> = bundle["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["run_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["run-local-consumer"], "foreign source run must not be exported");
+        assert_eq!(bundle["unresolved_ancestors"], json!(["run-foreign-src"]));
+
+        // A root run of another org is not exportable at all.
+        let err = export_local_provenance_bundle(&state, &foreign.run_id, &state.default_org_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CompassError::NotFound(_)), "{err:?}");
     }
 }

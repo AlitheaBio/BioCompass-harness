@@ -185,10 +185,10 @@ impl CompassError {
                     self.error_code(),
                     crate::error::ErrorCode::InsufficientFunds
                         | crate::error::ErrorCode::DailyActBreakerExceeded
-                ) || lower.contains("insufficient")
-                    || lower.contains("daily act")
-                {
-                    Some("Check your available ACT credits and daily ACT breaker in Settings -> Usage.")
+                ) {
+                    // Typed codes only (no message substring matching); currency-neutral because
+                    // the laptop play ledger counts credits while hosted organizations pay euros.
+                    Some("Check your available balance and the organization's daily spending breaker in Settings -> Usage.")
                 } else {
                     None
                 }
@@ -986,12 +986,19 @@ pub fn canonicalize_run_inputs(inputs: &[RunInput]) -> CompassResult<Vec<RunInpu
         )));
     }
     let mut staged_paths = std::collections::BTreeSet::new();
+    let mut folded_paths = std::collections::BTreeSet::new();
     for input in inputs {
         input.validate()?;
         let rel = input.stage_relative_path();
         if !staged_paths.insert(rel.clone()) {
             return Err(CompassError::Validation(format!(
                 "duplicate run input stage path '/in/artifacts/{rel}'"
+            )));
+        }
+        // `/in` may live on a case-insensitive filesystem (macOS, Windows workstations).
+        if !folded_paths.insert(rel.to_lowercase()) {
+            return Err(CompassError::Validation(format!(
+                "run input stage path '/in/artifacts/{rel}' collides case-insensitively with another input"
             )));
         }
     }

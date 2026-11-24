@@ -33,6 +33,8 @@ fn write_plugin_manifest(dir: &Path, id: &str, max_input_bytes: u64, child_modul
     std::fs::create_dir_all(dir).unwrap();
     let children_toml = if child_modules.is_empty() {
         String::new()
+    } else if child_modules == ["caller"] {
+        "child_modules = \"caller\"\nmax_child_wait_sec = 60\nmax_child_spend_milli_act = 0\n".to_owned()
     } else {
         let quoted: Vec<String> = child_modules.iter().map(|m| format!("\"{m}\"")).collect();
         format!(
@@ -381,6 +383,7 @@ async fn w6_w7_parent_and_child_runs_bind_parent_deal_and_child_receipt_extensio
                 run_id: Some(child_run.run_id.to_string()),
                 receipt_hash,
                 result_json: child_run.result_json,
+                result_path: None,
                 artifacts: staged,
                 error_code: None,
                 error: child_run.error_message,
@@ -502,5 +505,62 @@ async fn w6_w7_parent_and_child_runs_bind_parent_deal_and_child_receipt_extensio
     assert!(
         verify_released_result_commitment(&released_fixture, &result_sha, source).is_err(),
         "forged parent_run_id without bc.parent.v1 must fail closed"
+    );
+}
+
+
+/// N-1: on the laptop a parent declaring `child_modules = "caller"` confirmed through the plain
+/// `RunDispatcher::confirm_run` path gets the in-process child broker: the child runs locally,
+/// is linked with `bc.parent.v1`, and the parent receipt carries `bc.child.v1`.
+#[cfg(unix)]
+#[tokio::test]
+async fn n1_laptop_runtime_brokers_caller_child_runs_through_plain_confirm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runtime, _blob_store, session_store) = build_runtime(tmp.path());
+    runtime.enable_local_child_runs();
+
+    let parent_mod =
+        write_plugin_manifest(&tmp.path().join("p-parent"), "alithea/parent", 4096, &["caller"]);
+    let child_mod = write_plugin_manifest(&tmp.path().join("p-child"), "alithea/child", 4096, &[]);
+    runtime.register_plugin(parent_mod).await.unwrap();
+    runtime.register_plugin(child_mod).await.unwrap();
+
+    let org_id = OrgId::new("org-n1").unwrap();
+    let parent_quote = runtime
+        .prepare_run(PrepareRunRequest {
+            org_id: org_id.clone(),
+            session_id: None,
+            plugin_id: PluginId::from("alithea/parent"),
+            plugin_version: None,
+            offer_id: None,
+            params: json!({ "mode": "parent" }),
+            dataset_grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
+        })
+        .await
+        .unwrap();
+    let parent_run = runtime.confirm_run(&parent_quote.run_id, "idem-n1-parent").await.unwrap();
+    assert_eq!(parent_run.status, RunStatus::Succeeded, "err={:?}", parent_run.error_message);
+
+    use biocompass_core_traits::SessionStore;
+    let child_run = session_store
+        .list_runs(&org_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.parent_run_id.as_deref() == Some(parent_run.run_id.as_str()))
+        .expect("laptop broker persisted the child run");
+    assert_eq!(child_run.status, RunStatus::Succeeded);
+    let parent_receipt: SignedArtifact<ReceiptPayload> =
+        serde_json::from_value(parent_run.froglet_chain[4].clone()).unwrap();
+    let child_receipt_hash = child_run.froglet_receipt.as_ref().unwrap()["hash"].as_str().unwrap();
+    assert_eq!(
+        parent_receipt.payload.extension_refs,
+        vec![format!("bc.child.v1:{child_receipt_hash}")]
     );
 }

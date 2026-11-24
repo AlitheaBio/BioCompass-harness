@@ -1,5 +1,11 @@
+/**
+ * Track U UI-FLOW test against node:http MOCK hubs (U2 buttons, U3 hub switch, U-1 attested UI
+ * cache and tamper refusal). Its timings are NOT a performance proof: the real measurement
+ * against two compass-hub processes with added latency is `e2e/u3_real_hubs/run.sh`.
+ */
 import { expect, test } from "@playwright/test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { moduleAttestation, publicKeyHex, signArtifact } from "./support/froglet_sign.ts";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -67,9 +73,33 @@ async function startMockHub(opts: {
       })
     : null;
   let archiveFetches = 0;
+  // U-1: the mock hub signs module attestations and its own discovery offers with its key.
+  const seed = randomBytes(32).toString("hex");
+  const signedNetOffer = opts.networkOffer && netBundle
+    ? signArtifact(seed, "offer", 1_760_000_000, {
+        provider_id: opts.networkOffer.provider,
+        offer_id: opts.networkOffer.offerId,
+        offer_kind: "biocompass.module.run.v1",
+        launch_url: `https://provider.example.org/offers/${opts.networkOffer.offerId}`,
+        execution_profile: {
+          access_handles: [`${opts.networkOffer.pluginId}@1.0.0`],
+          capabilities: [`biocompass.ui_bundle_hash.v1:${netBundle.hash}`],
+        },
+      })
+    : null;
 
   const server = http.createServer((req, res) => {
     const urlPath = (req.url ?? "/").split("?")[0] ?? "/";
+    if (urlPath === "/v1/hub-identity") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ hub_key: publicKeyHex(seed) }));
+      return;
+    }
+    if (urlPath === "/api/v1/network-modules") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ modules: [] }));
+      return;
+    }
     if (urlPath === "/api/v1/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
@@ -104,9 +134,9 @@ async function startMockHub(opts: {
               source: "org_cloud",
               runs_in: "cloud",
               ui_bundle_hash: mainBundle.hash,
-              ui_bundle_size_bytes: Buffer.byteLength(mainBundle.body),
               can_install: false,
               installed_locally: false,
+              module_attestation: moduleAttestation(seed, opts.pluginId, "1.0.0", mainBundle.hash),
             },
             ...(opts.tamperedHash
               ? [
@@ -127,6 +157,7 @@ async function startMockHub(opts: {
                     runs_in: "cloud",
                     ui_bundle_hash: opts.tamperedHash,
                     can_install: false,
+                    module_attestation: moduleAttestation(seed, "security/tampered-ui", "1.0.0", opts.tamperedHash),
                   },
                 ]
               : []),
@@ -136,23 +167,16 @@ async function startMockHub(opts: {
       return;
     }
     if (urlPath === "/v1/feed") {
-      const offers = opts.networkOffer && netBundle
-        ? [
-            {
-              id: opts.networkOffer.offerId,
-              kind: "run",
-              title: opts.networkOffer.title,
-              plugin_id: opts.networkOffer.pluginId,
-              version: "1.0.0",
-              provider_org: opts.networkOffer.provider,
-              ui_bundle_hash: netBundle.hash,
-              launch_url: `https://provider.example.org/offers/${opts.networkOffer.offerId}`,
-              price_milli_act: 3000,
-            },
-          ]
+      // The hub's own signed discovery offer (froglet/v1 feed format).
+      const artifacts = signedNetOffer
+        ? [{ cursor: 1, artifact_kind: "offer", artifact_hash: signedNetOffer["hash"], document: signedNetOffer }]
         : [];
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ offers }));
+      res.end(JSON.stringify({
+        artifacts,
+        active_offer_hashes: artifacts.map((a) => a.artifact_hash),
+        has_more: false,
+      }));
       return;
     }
     if (urlPath === `/v1/artifacts/${mainBundle.hash}`) {
@@ -187,7 +211,7 @@ async function startMockHub(opts: {
 }
 
 test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
-  test("U1 <1s verified UI cache (local, cloud, network + tamper refusal), U2 button semantics, U3 hub switch, H3 play credits", async ({
+  test("UI-flow (mock hubs, not a performance proof): U1 attested UI cache (local, cloud, network + tamper refusal), U2 button semantics, U3 hub switch, H3 play credits", async ({
     page,
   }) => {
     const tamperedHash = "e".repeat(64);
@@ -252,7 +276,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       await expect(localWin.locator("iframe")).toBeVisible();
       await expect(localWin.frameLocator("iframe").locator("body")).not.toBeEmpty();
       const localElapsedMs = performance.now() - localStart;
-      console.log(`[U1 timing] local bundled module click-to-usable: ${localElapsedMs.toFixed(1)} ms`);
+      console.log(`[UI-flow timing, mock hubs] local bundled module click-to-usable: ${localElapsedMs.toFixed(1)} ms`);
       expect(localElapsedMs).toBeLessThan(1000);
       await localWin.getByRole("button", { name: /close/i }).first().click();
 
@@ -281,7 +305,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         modAWin.frameLocator("iframe").getByTestId("u1-ui-ready"),
       ).toHaveText("Hub A Verified UI Loaded");
       const cloudOpenMs = performance.now() - cloudOpenStart;
-      console.log(`[U1 timing] Hub A cloud module cold/prefetched click-to-usable: ${cloudOpenMs.toFixed(1)} ms`);
+      console.log(`[UI-flow timing, mock hubs] Hub A cloud module cold/prefetched click-to-usable: ${cloudOpenMs.toFixed(1)} ms`);
       expect(cloudOpenMs).toBeLessThan(1000);
       await modAWin.getByRole("button", { name: /close/i }).first().click();
 
@@ -293,7 +317,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         modAWin.frameLocator("iframe").getByTestId("u1-ui-ready"),
       ).toHaveText("Hub A Verified UI Loaded");
       const warmMs = performance.now() - warmStart;
-      console.log(`[U1 timing] Hub A cloud module warm click-to-usable: ${warmMs.toFixed(1)} ms (extra archive hits: ${hubA.archiveHits() - hitsBeforeWarm})`);
+      console.log(`[UI-flow timing, mock hubs] Hub A cloud module warm click-to-usable: ${warmMs.toFixed(1)} ms (extra archive hits: ${hubA.archiveHits() - hitsBeforeWarm})`);
       expect(warmMs).toBeLessThan(1000);
       expect(hubA.archiveHits()).toBe(hitsBeforeWarm);
       await modAWin.getByRole("button", { name: /close/i }).first().click();
@@ -324,7 +348,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         netWin.frameLocator("iframe").getByTestId("u1-net-ready"),
       ).toHaveText("Zurich Network UI Loaded");
       const netMs = performance.now() - netStart;
-      console.log(`[U1 timing] network provider module click-to-usable: ${netMs.toFixed(1)} ms`);
+      console.log(`[UI-flow timing, mock hubs] network provider module click-to-usable: ${netMs.toFixed(1)} ms`);
       expect(netMs).toBeLessThan(1000);
       await netWin.getByRole("button", { name: /close/i }).first().click();
 
@@ -343,7 +367,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         modBWin.frameLocator("iframe").getByTestId("u1-hub-b-ready"),
       ).toHaveText("Hub B Verified UI Loaded");
       const hubBMs = performance.now() - hubBStart;
-      console.log(`[U1 timing] Hub B cloud module after U3 switch click-to-usable: ${hubBMs.toFixed(1)} ms`);
+      console.log(`[UI-flow timing, mock hubs] Hub B cloud module after U3 switch click-to-usable: ${hubBMs.toFixed(1)} ms`);
       expect(hubBMs).toBeLessThan(1000);
     } finally {
       await hubA.close();

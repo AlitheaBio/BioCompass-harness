@@ -125,8 +125,224 @@ pub struct VerifiedRunSummary {
     pub result_hash: Option<String>,
     pub manifest_verified: bool,
     pub extension_refs_verified: bool,
+    /// Public keys that signed this run's chain (`W6-1`): always reported so a reader can
+    /// compare them with keys they obtained out of band.
+    #[serde(default)]
+    pub signers: RunSigners,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+}
+
+/// Signer keys of one run's `froglet/v1` chain and whether each is a configured trust anchor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSigners {
+    /// Key that signed Descriptor, Offer, Quote and Receipt (the executing node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    /// Key that signed the Deal (the hub, or the local workspace requester).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_key: Option<String>,
+    pub provider_trusted: bool,
+    pub requester_trusted: bool,
+}
+
+/// Trust anchors for offline verification (`W6-1`): lowercase 64-hex BIP340 x-only public keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustAnchors {
+    keys: BTreeSet<String>,
+}
+
+impl TrustAnchors {
+    /// Build from raw keys, rejecting anything that is not a 32-byte x-only hex public key.
+    pub fn from_keys<I, S>(raw: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut keys = BTreeSet::new();
+        for key in raw {
+            let key = key.as_ref().trim().to_ascii_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "trusted key '{key}' is not a 64-hex-character secp256k1 x-only public key"
+                ));
+            }
+            keys.insert(key);
+        }
+        Ok(Self { keys })
+    }
+
+    /// Parse a trusted-keys file: one key per line (`#` comments allowed) or a JSON array of keys.
+    pub fn parse_file_contents(raw: &str) -> Result<Vec<String>, String> {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with('[') {
+            let list: Vec<String> = serde_json::from_str(trimmed)
+                .map_err(|e| format!("trusted keys file is not a JSON array of strings: {e}"))?;
+            return Ok(list);
+        }
+        Ok(raw
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or_default().trim().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn contains(&self, key: &str) -> bool {
+        self.keys.contains(&key.trim().to_ascii_lowercase())
+    }
+
+    pub fn extend(&mut self, other: TrustAnchors) {
+        self.keys.extend(other.keys);
+    }
+}
+
+/// Trust evaluation attached to every verification report (`W6-1`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustReport {
+    /// `true` when at least one trust anchor was supplied.
+    pub anchored: bool,
+    /// `true` only when anchored and every run's provider and requester key is trusted.
+    pub all_signers_trusted: bool,
+    /// Every distinct signer key across the bundle.
+    pub signer_keys: Vec<String>,
+    /// Signer keys that are not trust anchors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untrusted_signers: Vec<String>,
+    pub statement: String,
+}
+
+impl TrustReport {
+    pub fn evaluate(signers: &[&RunSigners], anchors: &TrustAnchors) -> Self {
+        let mut all = BTreeSet::new();
+        let mut untrusted = BTreeSet::new();
+        let mut missing_signer = false;
+        for s in signers {
+            for key in [&s.provider_key, &s.requester_key] {
+                match key {
+                    Some(k) => {
+                        all.insert(k.clone());
+                        if !anchors.contains(k) {
+                            untrusted.insert(k.clone());
+                        }
+                    }
+                    None => missing_signer = true,
+                }
+            }
+        }
+        let anchored = !anchors.is_empty();
+        let all_signers_trusted =
+            anchored && untrusted.is_empty() && !missing_signer && !signers.is_empty();
+        let statement = if !anchored {
+            "NO TRUST ANCHOR: only internal consistency was verified (signatures, hashes, links). \
+             Anyone can produce a bundle that passes this check with a fresh key; pass \
+             --trusted-key/--trusted-keys with the hub and node keys you trust."
+                .to_owned()
+        } else if all_signers_trusted {
+            "every run's provider and requester key is a trusted anchor".to_owned()
+        } else {
+            format!(
+                "UNTRUSTED SIGNERS: {} key(s) are not trust anchors",
+                untrusted.len().max(usize::from(missing_signer))
+            )
+        };
+        Self {
+            anchored,
+            all_signers_trusted,
+            signer_keys: all.into_iter().collect(),
+            untrusted_signers: untrusted.into_iter().collect(),
+            statement,
+        }
+    }
+}
+
+/// How `biocompass verify-receipt` turns a report into an exit status (`W6-1`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExitPolicy {
+    /// Accept a report with no trust anchor (internal consistency only).
+    pub no_trust_anchor: bool,
+    /// Accept a bundle whose ancestors are not all present.
+    pub allow_incomplete: bool,
+}
+
+/// Return `Ok(())` when the report should exit 0, else the reasons it must not.
+pub fn exit_verdict(
+    valid: bool,
+    complete: bool,
+    trust: &TrustReport,
+    policy: ExitPolicy,
+) -> Result<(), Vec<String>> {
+    let mut reasons = Vec::new();
+    if !valid {
+        reasons.push("verification failed".to_owned());
+    }
+    if !complete && !policy.allow_incomplete {
+        reasons.push(
+            "bundle is incomplete (unresolved ancestors); pass --allow-incomplete to accept a partial bundle"
+                .to_owned(),
+        );
+    }
+    if trust.anchored {
+        if !trust.all_signers_trusted {
+            reasons.push(format!(
+                "untrusted signer key(s): {}",
+                trust.untrusted_signers.join(", ")
+            ));
+        }
+    } else if !policy.no_trust_anchor {
+        reasons.push(
+            "no trust anchor given: only internal consistency was verified; pass --trusted-key/--trusted-keys, or --no-trust-anchor to accept that"
+                .to_owned(),
+        );
+    }
+    if reasons.is_empty() { Ok(()) } else { Err(reasons) }
+}
+
+/// Extract the provider (Descriptor/Offer/Quote/Receipt) and requester (Deal) signers of a
+/// single chain, reporting any internal signer inconsistency as errors.
+pub fn chain_signers(chain: &[Value], anchors: &TrustAnchors) -> (RunSigners, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut provider: Option<String> = None;
+    let mut requester: Option<String> = None;
+    for doc in chain {
+        let kind = doc.get("artifact_type").and_then(Value::as_str).unwrap_or_default();
+        let Some(signer) = doc.get("signer").and_then(Value::as_str).map(str::to_ascii_lowercase)
+        else {
+            errors.push(format!("{kind} document has no signer"));
+            continue;
+        };
+        let slot = if kind == ARTIFACT_TYPE_DEAL { &mut requester } else { &mut provider };
+        match slot {
+            Some(existing) if *existing != signer => errors.push(format!(
+                "{kind} signer '{signer}' differs from the chain's other {} signer '{existing}'",
+                if kind == ARTIFACT_TYPE_DEAL { "requester" } else { "provider" }
+            )),
+            Some(_) => {}
+            None => *slot = Some(signer.clone()),
+        }
+        let payload = doc.get("payload");
+        let id_field = if kind == ARTIFACT_TYPE_DEAL { "requester_id" } else { "provider_id" };
+        if let Some(id) = payload.and_then(|p| p.get(id_field)).and_then(Value::as_str)
+            && id.to_ascii_lowercase() != signer
+        {
+            errors.push(format!(
+                "{kind} payload {id_field} '{id}' is not its signer '{signer}'"
+            ));
+        }
+    }
+    let signers = RunSigners {
+        provider_trusted: provider.as_deref().is_some_and(|k| anchors.contains(k)),
+        requester_trusted: requester.as_deref().is_some_and(|k| anchors.contains(k)),
+        provider_key: provider,
+        requester_key: requester,
+    };
+    (signers, errors)
 }
 
 /// Offline verification report printed by `biocompass verify-receipt` for `bc.provenance.v1` bundles.
@@ -141,6 +357,9 @@ pub struct ProvenanceVerificationReport {
     pub runs: Vec<VerifiedRunSummary>,
     pub verified_edges: Vec<VerifiedProvenanceEdge>,
     pub unresolved_ancestors: Vec<UnresolvedAncestor>,
+    /// Who signed what, and whether those keys are trust anchors (`W6-1`).
+    #[serde(default)]
+    pub trust: TrustReport,
     pub errors: Vec<String>,
 }
 
@@ -165,7 +384,29 @@ struct ParsedVerifiedRun {
 }
 
 /// Offline-verify a `bc.provenance.v1` bundle without network or hub access (`W6`).
+/// Verify without trust anchors (internal consistency only; signers are still reported).
+#[cfg(test)]
 pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVerificationReport {
+    verify_provenance_bundle_with_anchors(val, now, &TrustAnchors::default())
+}
+
+/// Offline-verify a `bc.provenance.v1` bundle and evaluate every run's signers against `anchors`.
+pub fn verify_provenance_bundle_with_anchors(
+    val: &Value,
+    now: Option<i64>,
+    anchors: &TrustAnchors,
+) -> ProvenanceVerificationReport {
+    let mut report = verify_provenance_bundle_inner(val, now, anchors);
+    let signers: Vec<&RunSigners> = report.runs.iter().map(|r| &r.signers).collect();
+    report.trust = TrustReport::evaluate(&signers, anchors);
+    report
+}
+
+fn verify_provenance_bundle_inner(
+    val: &Value,
+    now: Option<i64>,
+    anchors: &TrustAnchors,
+) -> ProvenanceVerificationReport {
     let mut top_errors: Vec<String> = Vec::new();
     let schema = val
         .get("schema")
@@ -186,6 +427,7 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
             runs: Vec::new(),
             verified_edges: Vec::new(),
             unresolved_ancestors: Vec::new(),
+            trust: TrustReport::default(),
             errors: top_errors,
         };
     }
@@ -219,6 +461,7 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
                 runs: Vec::new(),
                 verified_edges: Vec::new(),
                 unresolved_ancestors: Vec::new(),
+                trust: TrustReport::default(),
                 errors: top_errors,
             };
         }
@@ -251,6 +494,10 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
             run_errors.push(msg.clone());
             top_errors.push(msg);
         }
+
+        // 0. Report (and cross-check) who signed this chain (`W6-1`).
+        let (signers, signer_errors) = chain_signers(&entry.froglet_chain, anchors);
+        run_errors.extend(signer_errors);
 
         // 1. Verify all 5 Froglet chain documents + signatures + inter-document hashes.
         let chain_report = validate_chain_documents(&entry.froglet_chain, now);
@@ -308,6 +555,7 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
                 result_hash: None,
                 manifest_verified: false,
                 extension_refs_verified: false,
+                signers,
                 errors: run_errors,
             });
             continue;
@@ -438,6 +686,7 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
             result_hash: receipt.payload.result_hash.clone(),
             manifest_verified,
             extension_refs_verified,
+            signers,
             errors: run_errors,
         });
 
@@ -677,6 +926,7 @@ pub fn verify_provenance_bundle(val: &Value, now: Option<i64>) -> ProvenanceVeri
         runs: summaries,
         verified_edges: verified_edges_set.into_iter().collect(),
         unresolved_ancestors,
+        trust: TrustReport::default(),
         errors: top_errors,
     }
 }
@@ -1541,5 +1791,139 @@ mod tests {
         assert!(!report.valid, "self-loop cycle tamper must be rejected");
         assert!(!report.acyclic, "self-loop must mark acyclic = false");
         assert!(report.errors.iter().any(|e| e.contains("cycle")), "{:?}", report.errors);
+    }
+
+    fn single_run_bundle(
+        provider_key: &NodeSigningKey,
+        requester_key: &NodeSigningKey,
+        run_id: &str,
+    ) -> Value {
+        let now = 1_760_000_000_i64;
+        let prefix = build_signed_run_prefix(provider_key, requester_key, run_id, now, &[], None);
+        let run = finish_signed_run(
+            provider_key,
+            run_id,
+            now,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            prefix,
+        );
+        serde_json::to_value(ProvenanceBundle {
+            schema: PROVENANCE_BUNDLE_SCHEMA_V1.into(),
+            exported_at: None,
+            root_run_id: run_id.into(),
+            runs: vec![run.to_entry()],
+            edges: Vec::new(),
+            unresolved_ancestors: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn w6_1_fabricated_bundle_with_fresh_key_is_refused_without_matching_trust_anchor() {
+        // An attacker fabricates a perfectly self-consistent bundle with fresh keys.
+        let forger_provider = generate_signing_key();
+        let forger_requester = generate_signing_key();
+        let val = single_run_bundle(&forger_provider, &forger_requester, "run-forged");
+
+        // Internally consistent: the old verifier said valid=true, complete=true.
+        let unanchored = verify_provenance_bundle(&val, None);
+        assert!(unanchored.valid && unanchored.complete, "{:?}", unanchored.errors);
+        // Signers are always reported.
+        let signers = &unanchored.runs[0].signers;
+        assert_eq!(signers.provider_key.as_deref(), Some(public_key_hex(&forger_provider).as_str()));
+        assert_eq!(signers.requester_key.as_deref(), Some(public_key_hex(&forger_requester).as_str()));
+        assert!(!unanchored.trust.anchored);
+        assert!(unanchored.trust.statement.contains("only internal consistency"));
+        // Default exit policy refuses an unanchored result.
+        let err = exit_verdict(true, true, &unanchored.trust, ExitPolicy::default()).unwrap_err();
+        assert!(err.iter().any(|e| e.contains("no trust anchor")), "{err:?}");
+        // Explicit opt-in to "internal consistency only" is accepted.
+        exit_verdict(
+            true,
+            true,
+            &unanchored.trust,
+            ExitPolicy { no_trust_anchor: true, allow_incomplete: false },
+        )
+        .unwrap();
+
+        // With the real hub/node keys as anchors, the forged bundle is refused.
+        let real_provider = generate_signing_key();
+        let real_hub = generate_signing_key();
+        let anchors = TrustAnchors::from_keys([
+            public_key_hex(&real_provider),
+            public_key_hex(&real_hub),
+        ])
+        .unwrap();
+        let anchored = verify_provenance_bundle_with_anchors(&val, None, &anchors);
+        assert!(anchored.trust.anchored);
+        assert!(!anchored.trust.all_signers_trusted);
+        assert_eq!(anchored.trust.untrusted_signers.len(), 2);
+        let err = exit_verdict(anchored.valid, anchored.complete, &anchored.trust, ExitPolicy {
+            no_trust_anchor: true,
+            allow_incomplete: true,
+        })
+        .unwrap_err();
+        assert!(err.iter().any(|e| e.contains("untrusted signer")), "{err:?}");
+
+        // Trusting only the provider is not enough: the requester (hub) must be trusted too.
+        let partial = TrustAnchors::from_keys([public_key_hex(&forger_provider)]).unwrap();
+        let report = verify_provenance_bundle_with_anchors(&val, None, &partial);
+        assert!(report.runs[0].signers.provider_trusted);
+        assert!(!report.runs[0].signers.requester_trusted);
+        assert!(exit_verdict(true, true, &report.trust, ExitPolicy::default()).is_err());
+
+        // The genuine keys pass.
+        let genuine = single_run_bundle(&real_provider, &real_hub, "run-genuine");
+        let report = verify_provenance_bundle_with_anchors(&genuine, None, &anchors);
+        assert!(report.valid && report.trust.all_signers_trusted, "{report:?}");
+        exit_verdict(report.valid, report.complete, &report.trust, ExitPolicy::default()).unwrap();
+    }
+
+    #[test]
+    fn w6_1_incomplete_bundle_exits_non_zero_unless_allowed() {
+        let trust = TrustReport {
+            anchored: true,
+            all_signers_trusted: true,
+            ..TrustReport::default()
+        };
+        let err = exit_verdict(true, false, &trust, ExitPolicy::default()).unwrap_err();
+        assert!(err[0].contains("incomplete"));
+        exit_verdict(true, false, &trust, ExitPolicy { no_trust_anchor: false, allow_incomplete: true })
+            .unwrap();
+        assert!(exit_verdict(false, true, &trust, ExitPolicy { no_trust_anchor: true, allow_incomplete: true }).is_err());
+    }
+
+    #[test]
+    fn w6_1_trusted_keys_file_and_key_validation() {
+        let k = "AB".repeat(32);
+        let parsed = TrustAnchors::parse_file_contents(&format!("# hub\n{k}  # node\n\n")).unwrap();
+        assert_eq!(parsed, vec![k.clone()]);
+        let json = TrustAnchors::parse_file_contents(&format!("[\"{k}\"]")).unwrap();
+        let anchors = TrustAnchors::from_keys(json).unwrap();
+        assert!(anchors.contains(&"ab".repeat(32)));
+        assert!(TrustAnchors::from_keys(["not-a-key"]).is_err());
+        assert!(TrustAnchors::from_keys(["02".to_owned() + &"ab".repeat(32)]).is_err());
+    }
+
+    #[test]
+    fn w6_1_mixed_provider_signers_inside_one_chain_are_rejected() {
+        let provider = generate_signing_key();
+        let other = generate_signing_key();
+        let requester = generate_signing_key();
+        let val = single_run_bundle(&provider, &requester, "run-x");
+        let other_bundle = single_run_bundle(&other, &requester, "run-x");
+        // Splice another key's descriptor+offer in front of the first run's quote/deal/receipt.
+        let mut spliced = val.clone();
+        spliced["runs"][0]["froglet_chain"][0] = other_bundle["runs"][0]["froglet_chain"][0].clone();
+        let report = verify_provenance_bundle(&spliced, None);
+        assert!(!report.valid);
+        assert!(
+            report.errors.iter().any(|e| e.contains("differs from the chain's other provider signer")),
+            "{:?}",
+            report.errors
+        );
     }
 }

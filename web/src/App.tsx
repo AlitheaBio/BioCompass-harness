@@ -52,6 +52,8 @@ import {
   scaffoldPlugin,
   streamAgentChatTurn,
   subscribeNetworkOffer,
+  unsubscribeNetworkOffer,
+  fetchSubscribedNetworkOffers,
   followActiveRun,
   updateLlmConfig,
   updateSessionGrant,
@@ -112,7 +114,9 @@ import { CapacityRequest } from "./components/ModuleTabs";
 import { OrgAdminView } from "./components/OrgAdminView";
 import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
 import {
+  effectiveRunCostMilli,
   formatWorkspaceAmount,
+  negotiatedPriceForRelease,
   runStatusLabel,
   hasMinOrgRole,
   type AuthPrincipal,
@@ -738,6 +742,20 @@ export function App() {
     }).catch(showErrorBanner);
   }, [approvalScope, navigateToPage, openOfferedModule, principal?.auth_method, sessionGeneration, showErrorBanner]);
 
+  // Negotiated per-organisation prices for "Run Cost" (cloud workspaces only).
+  const [moduleOffers, setModuleOffers] = useState<ModuleOffer[]>([]);
+  useEffect(() => {
+    if (!isCloudMode || !principal) {
+      setModuleOffers([]);
+      return;
+    }
+    let active = true;
+    void fetchModuleOffers()
+      .then((offers) => { if (active) setModuleOffers(offers); })
+      .catch(() => { if (active) setModuleOffers([]); });
+    return () => { active = false; };
+  }, [isCloudMode, principal]);
+
   const openSettings = (section: SettingsSection = "general") => {
     setSettingsSection(section);
     setSettingsOpen(true);
@@ -1231,7 +1249,10 @@ export function App() {
     setInstallingPluginId(plugin.manifest.id);
     setErrorBanner(null);
     try {
-      await installPlugin(plugin.manifest.id);
+      // U-4: a connected-hub module installs from that hub's download offer (exact version).
+      const fromConnectedHub =
+        health?.mode === "local" && plugin.source !== "workspace" && Boolean(plugin.can_install);
+      await installPlugin(plugin.manifest.id, fromConnectedHub ? plugin.manifest.version : undefined);
       const updated = await fetchPlugins();
       setPlugins(updated);
     } catch (err: unknown) {
@@ -1906,6 +1927,31 @@ export function App() {
     }
   }, []);
 
+  const [subscribedOfferIds, setSubscribedOfferIds] = useState<ReadonlySet<string>>(new Set());
+  const refreshSubscribedOffers = useCallback(async () => {
+    try {
+      const res = await fetchSubscribedNetworkOffers();
+      setSubscribedOfferIds(new Set(res.subscribed.flatMap((s) => [s.offer_id, s.plugin_id])));
+    } catch {
+      setSubscribedOfferIds(new Set());
+    }
+  }, []);
+  useEffect(() => {
+    if (health?.mode === "local") void refreshSubscribedOffers();
+  }, [health?.mode, refreshSubscribedOffers]);
+
+  // U-4: Remove for an Added network module unsubscribes its offer.
+  const handleRemoveNetworkOffer = useCallback(async (offerId: string, title: string) => {
+    try {
+      await unsubscribeNetworkOffer(offerId);
+      await refreshSubscribedOffers();
+      setPlugins(await fetchPlugins());
+      setModuleUpdate(`Removed network module ${title} from this workspace.`);
+    } catch (err: unknown) {
+      setModuleUpdate(formatClientError(err).message);
+    }
+  }, [refreshSubscribedOffers]);
+
   const handleAddNetworkOffer = useCallback(async (offer: MarketplaceOfferSummary, hubUrl: string) => {
     const pluginId = offer.plugin_id ?? (offer.title.includes("/") ? offer.title : `network/${offer.id}`);
     try {
@@ -1925,11 +1971,12 @@ export function App() {
       });
       const freshPlugins = await fetchPlugins();
       setPlugins(freshPlugins);
+      await refreshSubscribedOffers();
       setModuleUpdate(`Added network module ${offer.title} to this workspace.`);
     } catch (err: unknown) {
       setModuleUpdate(formatClientError(err).message);
     }
-  }, []);
+  }, [refreshSubscribedOffers]);
 
   const handleDownloadRunProvenance = useCallback(async (runId: string) => {
     try {
@@ -4017,7 +4064,7 @@ export function App() {
                 <div className="bc-modules-grid">
                 {filteredPlugins.map((p) => {
                   const isInstalling = installingPluginId === p.manifest.id;
-                  const actions = resolveModuleCardActions(p, health?.mode === "local");
+                  const actions = resolveModuleCardActions(p, health?.mode === "local", subscribedOfferIds);
                   const runtimeIcon =
                     actions.runsIn === "cloud" ? (
                       <IconAlitheaCloud size={15} />
@@ -4088,7 +4135,7 @@ export function App() {
 
                       <div className="bc-module-card-footer">
                         <span className="bc-caption mono">
-                          {formatWorkspaceAmount(p.manifest.price_milli_act, useLocalCredits)} / run
+                          {formatWorkspaceAmount(effectiveRunCostMilli(p, negotiatedPriceForRelease(moduleOffers, p.manifest.id, p.manifest.version)), useLocalCredits)} / run
                         </span>
                         <div
                           style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
@@ -4123,6 +4170,19 @@ export function App() {
                                   <span>Install</span>
                                 </>
                               )}
+                            </button>
+                          )}
+                          {actions.canUnsubscribe && actions.subscriptionId && (
+                            <button
+                              type="button"
+                              className="bc-btn bc-btn-ghost"
+                              data-testid={`module-remove-subscription-btn-${p.manifest.id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleRemoveNetworkOffer(actions.subscriptionId!, p.manifest.name);
+                              }}
+                            >
+                              Remove
                             </button>
                           )}
                           {actions.canOpen && (
@@ -4512,6 +4572,7 @@ export function App() {
 
       {/* ==================== FLOATING MODULE WINDOWS + TRAY ==================== */}
       <FloatingWindowsLayer
+        moduleOffers={moduleOffers}
         windows={windows}
         plugins={plugins}
         runs={runs}

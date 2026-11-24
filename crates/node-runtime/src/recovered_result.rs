@@ -42,7 +42,8 @@ pub(super) async fn load_signed_outcome(
             "chain mirror differs from the original signed quote or deal",
         ));
     }
-    let receipt = verify_native_chain(runtime, run, key, &docs)?;
+    let links = local_brokered_links(runtime, run).await?;
+    let receipt = verify_native_chain(runtime, run, key, &docs, &links)?;
     let mut recovered = run.clone();
     let payload = receipt.payload;
     match (
@@ -104,11 +105,60 @@ pub(super) async fn load_signed_outcome(
     Ok(Some(recovered))
 }
 
+/// Parent/child links as this workspace's own session store recorded them when it brokered the
+/// runs (`W6-2`), so recovery never compares a receipt's links with themselves.
+pub(super) async fn local_brokered_links(
+    runtime: &InProcessNodeRuntime,
+    run: &RunRecord,
+) -> CompassResult<released_result::BrokeredRunLinks> {
+    let parent_deal_hash = match &run.parent_run_id {
+        None => None,
+        Some(parent_id) => {
+            let parent_id = RunId::new(parent_id.clone()).map_err(CompassError::Validation)?;
+            let parent = runtime.session_store.get_run(&parent_id).await?;
+            if parent.org_id != run.org_id {
+                return Err(inconsistent("parent run belongs to another organization"));
+            }
+            Some(
+                parent
+                    .froglet_chain
+                    .get(3)
+                    .and_then(|deal| deal.get("hash"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| inconsistent("brokered parent run has no signed deal"))?
+                    .to_owned(),
+            )
+        }
+    };
+    let mut child_receipt_hashes: Vec<String> = runtime
+        .session_store
+        .list_runs(&run.org_id)
+        .await?
+        .into_iter()
+        .filter(|child| child.parent_run_id.as_deref() == Some(run.run_id.as_str()))
+        .filter_map(|child| {
+            child
+                .froglet_receipt
+                .as_ref()
+                .and_then(|r| r.get("hash"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    child_receipt_hashes.sort();
+    child_receipt_hashes.dedup();
+    Ok(released_result::BrokeredRunLinks {
+        parent_deal_hash,
+        child_receipt_hashes,
+    })
+}
+
 fn verify_native_chain(
     runtime: &InProcessNodeRuntime,
     run: &RunRecord,
     key: &str,
     docs: &[Value],
+    links: &released_result::BrokeredRunLinks,
 ) -> CompassResult<SignedArtifact<ReceiptPayload>> {
     let kinds = [
         ARTIFACT_TYPE_DESCRIPTOR,
@@ -172,8 +222,10 @@ fn verify_native_chain(
         &receipt,
         &run.inputs,
         run.parent_run_id.is_some(),
-        None,
-        None,
+        links.parent_deal_hash.as_deref(),
+        Some(released_result::ExpectedChildren::Brokered(
+            &links.child_receipt_hashes,
+        )),
     )
     .map_err(|error| inconsistent(error.to_string()))?;
     let image = OciImageRef::parse(&run.quote.image_ref, runtime.allow_local_dev_tags)?
@@ -381,6 +433,21 @@ type="object"
         assert_eq!(terminal.status, RunStatus::Succeeded);
         assert_eq!(terminal.result_json, Some(Value::Null));
         assert_eq!(terminal.artifacts[0].blob_key, artifact_key);
+
+        // W6-2: a receipt that signs a bc.child.v1 the local store never brokered is refused
+        // (before the fix the receipt was compared with itself and this was accepted).
+        let mut forged_payload = receipt.payload.clone();
+        forged_payload.extension_refs = vec![format!("bc.child.v1:{}", "ab".repeat(32))];
+        let forged = runtime.sign_provider(ARTIFACT_TYPE_RECEIPT, now + 1, forged_payload)?;
+        let mut forged_chain = chain.clone();
+        forged_chain[4] = serde_json::to_value(&forged).unwrap();
+        blobs
+            .put_bytes(&chain_key, &serde_json::to_vec(&forged_chain).unwrap())
+            .await?;
+        let err = load_signed_outcome(&runtime, &run, "k").await.unwrap_err();
+        assert!(err.to_string().contains("never started"), "{err}");
+        blobs.put_bytes(&chain_key, &serialized).await?;
+
         run.froglet_chain.push(chain[3].clone());
         assert_eq!(
             load_signed_outcome(&runtime, &run, "k")

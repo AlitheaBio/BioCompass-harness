@@ -15,6 +15,11 @@ export interface WorkspaceHubStatus {
   remote_module_count: number;
   last_error?: string | null;
   recent_hubs?: string[];
+  /** Pinned hub signing key (`U-1`); compare it with the key the hub operator publishes. */
+  hub_key?: string | null;
+  /** Key the hub presented when it differs from the pinned key. */
+  presented_hub_key?: string | null;
+  hub_key_status?: "unpinned" | "pinned" | "changed";
 }
 
 export interface SubscribedNetworkOffer {
@@ -710,6 +715,41 @@ export function formatWorkspaceAmount(milliAct: number, isLocalPlayLedger: boole
   return isLocalPlayLedger ? formatLocalPlayCredits(milliAct) : formatMilliEur(milliAct);
 }
 
+/**
+ * The per-run price an organization actually pays (price + base fee, milli-units): the negotiated
+ * offer price when one applies to this release, otherwise the module's default offer.
+ */
+export function effectiveRunCostMilli(
+  plugin: { manifest: Pick<PluginManifest, "price_milli_act" | "offers">; effective_offers?: ResolvedPluginOffer[] },
+  negotiated?: Pick<NegotiatedModuleOfferPrice, "price_milli_act" | "base_fee_milli_act"> | null,
+): number {
+  if (negotiated) {
+    return negotiated.price_milli_act + negotiated.base_fee_milli_act;
+  }
+  const offer = plugin.effective_offers?.[0] ?? plugin.manifest.offers?.[0];
+  if (offer) {
+    return offer.price_milli_act + offer.base_fee_milli_act;
+  }
+  return plugin.manifest.price_milli_act;
+}
+
+/** The negotiated price of this organization's offer for one module release, if any. */
+export function negotiatedPriceForRelease(
+  offers: Pick<ModuleOffer, "plugin_id" | "version" | "action" | "negotiated_price">[],
+  pluginId: string,
+  version: string,
+): NegotiatedModuleOfferPrice | null {
+  return (
+    offers.find(
+      (offer) =>
+        offer.plugin_id === pluginId &&
+        offer.version === version &&
+        offer.action === "run" &&
+        offer.negotiated_price != null,
+    )?.negotiated_price ?? null
+  );
+}
+
 export type OrgRole = "owner" | "admin" | "developer" | "member" | "viewer";
 
 export interface AuthPrincipal {
@@ -1097,12 +1137,41 @@ export interface AgentCredentialRecord {
   total_ceiling_milli_act: number | null;
   spent_total_milli_act: number;
   spent_today_milli_act?: number;
+  /** True when no daily ceiling is set (spend bounded only by the org balance and breaker). */
+  unlimited_daily?: boolean;
+  /** True when no total ceiling is set. */
+  unlimited_total?: boolean;
   burst_per_minute: number;
   expires_at: string;
   created_by: string;
   created_at: string;
   revoked_at: string | null;
   last_used_at: string | null;
+}
+
+/** Which spending ceilings a credential lacks (server flags win; fall back to null ceilings). */
+export function unlimitedCeilings(cred: Pick<
+  AgentCredentialRecord,
+  "unlimited_daily" | "unlimited_total" | "daily_ceiling_milli_act" | "total_ceiling_milli_act"
+>): { daily: boolean; total: boolean } {
+  return {
+    daily: cred.unlimited_daily ?? cred.daily_ceiling_milli_act == null,
+    total: cred.unlimited_total ?? cred.total_ceiling_milli_act == null,
+  };
+}
+
+/** Plain-language warning for a credential issued without one or both ceilings. */
+export function unlimitedCeilingWarning(daily: boolean, total: boolean): string | null {
+  if (daily && total) {
+    return "No daily or total spending ceiling: this agent can spend up to the organization's whole balance, limited only by the daily breaker.";
+  }
+  if (daily) {
+    return "No daily spending ceiling: this agent can spend its whole total ceiling in one day.";
+  }
+  if (total) {
+    return "No total spending ceiling: this agent can keep spending its daily ceiling every day until it expires.";
+  }
+  return null;
 }
 
 export interface CreateAgentCredentialInput {
@@ -1132,10 +1201,46 @@ export interface NegotiatedModuleOfferPrice {
 
 export interface BillingStatementTotals {
   run_count: number;
+  /** Runs whose reservation is still open (not yet settled or refunded). */
+  in_flight_run_count?: number;
+  /** Settled spend only; in-flight reservations are reported separately. */
   total_milli_eur: number;
   module_fee_milli_eur: number;
   dataset_fee_milli_eur: number;
   refunded_milli_eur: number;
+  reserved_in_flight_milli_eur?: number;
+}
+
+export interface BillingStatementPage {
+  limit: number;
+  has_more: boolean;
+  next_cursor?: string | null;
+}
+
+export interface BillingLedgerKindTotal {
+  kind: string;
+  entries: number;
+  delta_milli_eur: number;
+}
+
+export interface BillingLedgerEntry {
+  tx_id: string;
+  kind: string;
+  delta_milli_eur: number;
+  balance_after_milli_eur: number;
+  reference: string;
+  created_at: string;
+}
+
+/** Reconciliation of the statement range with the organization ledger (org admins only). */
+export interface BillingLedgerReconciliation {
+  opening_balance_milli_eur: number;
+  closing_balance_milli_eur: number;
+  movements_milli_eur: number;
+  reconciled: boolean;
+  by_kind: BillingLedgerKindTotal[];
+  non_run_entries: BillingLedgerEntry[];
+  reserved_now_milli_eur: number;
 }
 
 export interface BillingStatementModuleBreakdown {
@@ -1166,6 +1271,8 @@ export interface BillingStatementEntry {
   agent_credential_id?: string | null;
   agent_credential_label?: string | null;
   status: string;
+  in_flight?: boolean;
+  reserved_in_flight_milli_eur?: number;
   settled_milli_eur: number;
   refunded_milli_eur: number;
   module_fee_milli_eur: number;
@@ -1185,6 +1292,8 @@ export interface BillingStatement {
   by_dataset: BillingStatementDatasetBreakdown[];
   by_credential: BillingStatementCredentialBreakdown[];
   entries: BillingStatementEntry[];
+  page?: BillingStatementPage;
+  ledger?: BillingLedgerReconciliation | null;
 }
 
 export interface WebhookEndpointRecord {

@@ -31,6 +31,8 @@ const MAX_FEED_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OFFERS_PREVIEW: usize = 50;
 const MAX_RECENT_HUBS: usize = 8;
 const UI_BUNDLE_HASH_CAP_PREFIX: &str = "biocompass.ui_bundle_hash.v1:";
+/// The connected hub's module list is reused for this long instead of two outbound fetches per list call (`U-2`).
+const REMOTE_MODULES_TTL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +83,9 @@ pub struct MarketplaceOfferSummary {
     pub price_milli_act: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The signed `froglet/v1` offer document this summary was parsed from (never serialized).
+    #[serde(skip)]
+    pub signed_offer: Option<Value>,
 }
 
 /// Network offer explicitly subscribed ("Add" button, `U2`) in a local workspace.
@@ -123,6 +128,14 @@ pub struct WorkspaceHubStatus {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_hubs: Vec<String>,
+    /// Pinned hub signing key for the connected hub (`U-1`); compare it with the hub operator's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_key: Option<String>,
+    /// Key the hub presented on the last connection, when it differs from the pinned key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_hub_key: Option<String>,
+    /// `unpinned`, `pinned` or `changed` (a changed key is refused until re-trusted).
+    pub hub_key_status: String,
 }
 
 /// Module discovered from a connected cloud hub (`U3`) or subscribed network offer (`U2`).
@@ -141,6 +154,12 @@ pub struct RemoteHubModule {
     pub launch_url: Option<String>,
     pub offer_id: Option<String>,
     pub hub_origin: String,
+    /// Verified UI attestation (`U-1`); without it the module's UI is not opened.
+    pub ui_attestation: Option<crate::ui_cache::VerifiedUiAttestation>,
+    /// Origin the UI bundle is fetched from (the providing peer for federated modules).
+    pub ui_fetch_origin: String,
+    /// Why a listed UI bundle was refused, if it was.
+    pub ui_attestation_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +238,9 @@ struct PersistedWorkspaceHub {
     recent_hubs: Vec<String>,
     #[serde(default)]
     subscribed_network_offers: Vec<SubscribedNetworkOffer>,
+    /// Hub URL -> pinned hub signing key (`U-1`).
+    #[serde(default)]
+    pinned_hub_keys: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +259,9 @@ struct MarketplaceRuntimeState {
     hub_session_bearer: Option<String>,
     hub_session_actor: Option<String>,
     cached_remote_modules: Vec<RemoteHubModule>,
+    cached_remote_at: Option<std::time::Instant>,
+    pinned_hub_keys: std::collections::BTreeMap<String, String>,
+    presented_hub_key: Option<String>,
 }
 
 pub struct MarketplaceClient {
@@ -297,7 +322,23 @@ impl MarketplaceClient {
         let connected = active_url.is_some()
             && guard.decision == MarketplaceConsentDecision::Accepted
             && guard.last_error.is_none();
+        let pinned = active_url
+            .as_ref()
+            .and_then(|u| guard.pinned_hub_keys.get(u).cloned());
+        let changed = guard
+            .presented_hub_key
+            .as_ref()
+            .is_some_and(|p| pinned.as_ref().is_some_and(|k| k != p));
+        let hub_key_status = match (&pinned, changed) {
+            (_, true) => "changed",
+            (Some(_), false) => "pinned",
+            (None, _) => "unpinned",
+        }
+        .to_owned();
         WorkspaceHubStatus {
+            hub_key: pinned,
+            presented_hub_key: changed.then(|| guard.presented_hub_key.clone()).flatten(),
+            hub_key_status,
             mode: if self.cfg.airgapped {
                 WorkspaceHubMode::Offline
             } else {
@@ -345,7 +386,18 @@ impl MarketplaceClient {
         mode: WorkspaceHubMode,
         custom_hub_url: Option<String>,
         auth_bearer: Option<String>,
+        trusted_hub_key: Option<String>,
     ) -> CompassResult<WorkspaceHubStatus> {
+        let trusted_hub_key = trusted_hub_key
+            .map(|k| k.trim().to_ascii_lowercase())
+            .filter(|k| !k.is_empty());
+        if let Some(key) = &trusted_hub_key
+            && (key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(CompassError::Validation(
+                "hub_key must be the hub's 64-hex-character signing key".into(),
+            ));
+        }
         if self.cfg.mode != DeploymentMode::Local {
             return Err(CompassError::AccessDenied(
                 "workspace hub switcher is only available in local workstation mode".into(),
@@ -410,6 +462,17 @@ impl MarketplaceClient {
                     {
                         guard.hub_session_bearer = Some(token.to_owned());
                     }
+                    if let Some(key) = &trusted_hub_key {
+                        // Explicit entry or re-trust after a key change.
+                        guard.pinned_hub_keys.insert(url.clone(), key.clone());
+                        guard.presented_hub_key = None;
+                        guard.cached_remote_modules.clear();
+                        guard.cached_remote_at = None;
+                    }
+                    if previous_url != *url {
+                        guard.presented_hub_key = None;
+                        guard.cached_remote_at = None;
+                    }
                     guard.hub_url = url.clone();
                     guard.decision = MarketplaceConsentDecision::Accepted;
                     guard.consent_source = "user_setting".to_owned();
@@ -424,6 +487,7 @@ impl MarketplaceClient {
                 hub_url: resolved_url.clone(),
                 recent_hubs: guard.recent_hubs.clone(),
                 subscribed_network_offers: guard.subscribed_network_offers.clone(),
+                pinned_hub_keys: guard.pinned_hub_keys.clone(),
             };
             save_persisted_workspace_hub(&self.data_dir, &persisted_hub)?;
 
@@ -436,7 +500,7 @@ impl MarketplaceClient {
         }
 
         if resolved_url.is_some() {
-            let _ = self.refresh_connected_hub(None).await;
+            let _ = self.refresh_connected_hub().await;
         }
         Ok(self.workspace_hub_status().await)
     }
@@ -495,7 +559,7 @@ impl MarketplaceClient {
                 guard.hub_session_actor = actor;
             }
         }
-        let _ = self.refresh_connected_hub(None).await;
+        let _ = self.refresh_connected_hub().await;
         Ok(self.workspace_hub_status().await)
     }
 
@@ -510,31 +574,52 @@ impl MarketplaceClient {
     }
 
     /// Refresh feed + remote module catalog from the currently connected hub (`U3`).
-    pub async fn refresh_connected_hub(
-        &self,
-        caller_auth: Option<&CallerAuth>,
-    ) -> CompassResult<Vec<RemoteHubModule>> {
+    ///
+    /// `U-2`: only the stored hub session token is ever sent to the hub; the browser's local
+    /// `Cookie` / `Authorization` / `X-API-Key` never leave this machine.
+    /// `U-1`: the hub key is pinned on first connection; a changed key is refused, and every
+    /// module's UI attestation is verified against the pinned key before it can be opened.
+    pub async fn refresh_connected_hub(&self) -> CompassResult<Vec<RemoteHubModule>> {
         let Some((hub_url, stored_auth)) = self.active_hub_origin_and_auth().await else {
             return Ok(Vec::new());
         };
         let validated_hub_url = validate_marketplace_hub_url(&hub_url)?;
-        let effective_auth = merge_hub_auth(caller_auth, stored_auth.as_ref());
 
-        // 1. Fetch public feed (`/v1/feed`) for discovery offers & signed UI bundle hashes.
+        // 1. Pin (first connection) or check the hub's signing key.
+        let pinned_key = self.check_hub_key(&validated_hub_url).await?;
+
+        // 2. Feed, org modules and federated network modules, fetched concurrently.
         let feed_url = format!("{validated_hub_url}/v1/feed");
-        let feed_result = fetch_marketplace_feed(&self.http, &feed_url).await;
-
-        // 2. Fetch authenticated/accessible org modules (`/api/v1/plugins`) if reachable.
-        let plugins_result =
-            fetch_hub_plugins(&self.http, &validated_hub_url, effective_auth.as_ref()).await;
+        let (feed_result, plugins_result, network_result) = tokio::join!(
+            fetch_marketplace_feed(&self.http, &feed_url),
+            fetch_hub_plugins(&self.http, &validated_hub_url, stored_auth.as_ref()),
+            fetch_network_modules(&self.http, &validated_hub_url, stored_auth.as_ref()),
+        );
 
         let mut modules: Vec<RemoteHubModule> = Vec::new();
         let mut seen_ids = std::collections::HashSet::<String>::new();
 
         if let Ok(org_plugins) = &plugins_result {
-            for m in org_plugins {
+            for (m, attestation_doc) in org_plugins {
+                let mut m = m.clone();
+                attach_attestation(&mut m, pinned_key.as_deref(), attestation_doc.as_ref(), None);
                 seen_ids.insert(m.manifest.id.as_str().to_owned());
-                modules.push(m.clone());
+                modules.push(m);
+            }
+        }
+        if let Ok(network) = &network_result {
+            for entry in network {
+                if let Some(mut m) = entry.to_module(&validated_hub_url) {
+                    attach_attestation(
+                        &mut m,
+                        pinned_key.as_deref(),
+                        entry.module_attestation.as_ref(),
+                        entry.froglet_offer.as_ref(),
+                    );
+                    if seen_ids.insert(m.manifest.id.as_str().to_owned()) {
+                        modules.push(m);
+                    }
+                }
             }
         }
 
@@ -549,14 +634,35 @@ impl MarketplaceClient {
             }
         };
 
-        // Include public module offers from the connected hub's feed if not already listed from `/api/v1/plugins`.
+        // Include public module offers from the connected hub's feed if not already listed.
+        // The hub signs its own listings, so a feed offer is attested when it is signed by the
+        // pinned hub key.
         for offer in &feed_offers {
             if !matches!(offer.kind.as_str(), "run" | "download") {
                 continue;
             }
-            if let Some(m) = synthesize_module_from_offer(offer, &validated_hub_url)
+            if let Some(mut m) = synthesize_module_from_offer(offer, &validated_hub_url)
                 && seen_ids.insert(m.manifest.id.as_str().to_owned())
             {
+                match (pinned_key.as_deref(), offer.signed_offer.as_ref()) {
+                    (Some(key), Some(doc)) => {
+                        match crate::ui_cache::VerifiedUiAttestation::from_signed_offer(
+                            doc,
+                            key,
+                            m.manifest.id.as_str(),
+                            &m.manifest.version,
+                        ) {
+                            Ok(a) => m.ui_attestation = Some(a),
+                            Err(e) => {
+                                m.ui_attestation_error = Some(e.to_string());
+                                m.ui_bundle_hash = None;
+                            }
+                        }
+                    }
+                    _ => {
+                        m.ui_bundle_hash = None;
+                    }
+                }
                 modules.push(m);
             }
         }
@@ -574,19 +680,76 @@ impl MarketplaceClient {
                 guard.offers_preview = feed_offers;
             }
             guard.cached_remote_modules = modules.clone();
+            guard.cached_remote_at = Some(std::time::Instant::now());
         }
         Ok(modules)
     }
 
-    /// Return the last fetched remote modules plus any explicitly subscribed network offers (`U2`/`U3`).
-    pub async fn list_remote_and_subscribed_modules(
-        &self,
-        caller_auth: Option<&CallerAuth>,
-    ) -> Vec<RemoteHubModule> {
-        let mut out = if self.active_hub_origin_and_auth().await.is_some() {
-            match self.refresh_connected_hub(caller_auth).await {
-                Ok(mods) => mods,
-                Err(_) => self.inner.read().await.cached_remote_modules.clone(),
+    /// Fetch `/v1/hub-identity`, pin it on first connection, and refuse a changed key (`U-1`).
+    /// Returns the pinned key, or `None` when the hub publishes no identity and none is pinned.
+    async fn check_hub_key(&self, hub_url: &str) -> CompassResult<Option<String>> {
+        let presented = fetch_hub_identity(&self.http, hub_url).await.ok();
+        let mut guard = self.inner.write().await;
+        if guard.hub_url != hub_url {
+            return Ok(None);
+        }
+        let pinned = guard.pinned_hub_keys.get(hub_url).cloned();
+        match (pinned, presented) {
+            (None, Some(key)) => {
+                guard.pinned_hub_keys.insert(hub_url.to_owned(), key.clone());
+                guard.presented_hub_key = None;
+                let persisted = persisted_from_guard(&guard);
+                save_persisted_workspace_hub(&self.data_dir, &persisted)?;
+                Ok(Some(key))
+            }
+            (Some(pinned), Some(key)) if pinned != key => {
+                guard.presented_hub_key = Some(key.clone());
+                guard.cached_remote_modules.clear();
+                guard.cached_remote_at = None;
+                let msg = format!(
+                    "UI_HUB_KEY_CHANGED: hub {hub_url} now presents key {key}, but {pinned} is pinned; \
+                     compare it with the hub operator and re-trust it in the hub chooser"
+                );
+                guard.last_error = Some(msg.clone());
+                Err(CompassError::ui_bundle_tampered(msg))
+            }
+            (Some(pinned), _) => {
+                guard.presented_hub_key = None;
+                Ok(Some(pinned))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// The modules fetched by the last refresh, without any network I/O.
+    pub async fn cached_remote_modules(&self) -> Vec<RemoteHubModule> {
+        self.inner.read().await.cached_remote_modules.clone()
+    }
+
+    /// Return the remote modules (cached for a short TTL) plus subscribed network offers (`U2`/`U3`).
+    pub async fn list_remote_and_subscribed_modules(&self) -> Vec<RemoteHubModule> {
+        let mut out = if let Some((hub_url, _)) = self.active_hub_origin_and_auth().await {
+            let fresh = {
+                let guard = self.inner.read().await;
+                (guard.hub_url == hub_url
+                    && guard
+                        .cached_remote_at
+                        .is_some_and(|at| at.elapsed() < REMOTE_MODULES_TTL))
+                .then(|| guard.cached_remote_modules.clone())
+            };
+            match fresh {
+                Some(mods) => mods,
+                None => match self.refresh_connected_hub().await {
+                    Ok(mods) => mods,
+                    Err(_) => {
+                        let guard = self.inner.read().await;
+                        if guard.presented_hub_key.is_some() {
+                            Vec::new()
+                        } else {
+                            guard.cached_remote_modules.clone()
+                        }
+                    }
+                },
             }
         } else {
             Vec::new()
@@ -602,6 +765,8 @@ impl MarketplaceClient {
             if let Some(module) = synthesize_module_from_subscription(&sub)
                 && seen.insert(module.manifest.id.as_str().to_owned())
             {
+                // A subscription's own hash is user-supplied and never trusted (`U-1`): its UI
+                // opens only while the connected hub lists the module with a verified attestation.
                 out.push(module);
             }
         }
@@ -621,6 +786,16 @@ impl MarketplaceClient {
         if self.cfg.airgapped {
             return Err(CompassError::AccessDenied(
                 "subscribing to network offers is disabled in --airgapped mode".into(),
+            ));
+        }
+        if self.cfg.mode != DeploymentMode::Local {
+            return Err(CompassError::AccessDenied(
+                "network offers are subscribed per local workspace; in cloud-web mode use the organisation's module offers".into(),
+            ));
+        }
+        if self.inner.read().await.decision != MarketplaceConsentDecision::Accepted {
+            return Err(CompassError::AccessDenied(
+                "MARKETPLACE_CONSENT_REQUIRED: connect to a hub (marketplace consent) before adding network offers".into(),
             ));
         }
         validate_marketplace_hub_url(&offer.hub_url)?;
@@ -649,12 +824,7 @@ impl MarketplaceClient {
         } else {
             guard.subscribed_network_offers.push(offer);
         }
-        let persisted = PersistedWorkspaceHub {
-            mode: guard.hub_mode,
-            hub_url: (guard.hub_mode != WorkspaceHubMode::Offline).then(|| guard.hub_url.clone()),
-            recent_hubs: guard.recent_hubs.clone(),
-            subscribed_network_offers: guard.subscribed_network_offers.clone(),
-        };
+        let persisted = persisted_from_guard(&guard);
         save_persisted_workspace_hub(&self.data_dir, &persisted)?;
         Ok(guard.subscribed_network_offers.clone())
     }
@@ -668,12 +838,7 @@ impl MarketplaceClient {
         guard
             .subscribed_network_offers
             .retain(|item| item.offer_id != offer_id && item.plugin_id != offer_id);
-        let persisted = PersistedWorkspaceHub {
-            mode: guard.hub_mode,
-            hub_url: (guard.hub_mode != WorkspaceHubMode::Offline).then(|| guard.hub_url.clone()),
-            recent_hubs: guard.recent_hubs.clone(),
-            subscribed_network_offers: guard.subscribed_network_offers.clone(),
-        };
+        let persisted = persisted_from_guard(&guard);
         save_persisted_workspace_hub(&self.data_dir, &persisted)?;
         Ok(guard.subscribed_network_offers.clone())
     }
@@ -761,6 +926,7 @@ impl MarketplaceClient {
                     .then(|| guard.hub_url.clone()),
                 recent_hubs: guard.recent_hubs.clone(),
                 subscribed_network_offers: guard.subscribed_network_offers.clone(),
+                pinned_hub_keys: guard.pinned_hub_keys.clone(),
             };
             let _ = save_persisted_workspace_hub(&self.data_dir, &persisted_hub);
         }
@@ -857,19 +1023,184 @@ impl MarketplaceClient {
     }
 }
 
+fn persisted_from_guard(guard: &MarketplaceRuntimeState) -> PersistedWorkspaceHub {
+    PersistedWorkspaceHub {
+        mode: guard.hub_mode,
+        hub_url: (guard.hub_mode != WorkspaceHubMode::Offline).then(|| guard.hub_url.clone()),
+        recent_hubs: guard.recent_hubs.clone(),
+        subscribed_network_offers: guard.subscribed_network_offers.clone(),
+        pinned_hub_keys: guard.pinned_hub_keys.clone(),
+    }
+}
+
+async fn fetch_hub_identity(http: &Client, hub_url: &str) -> CompassResult<String> {
+    let resp = http
+        .get(format!("{hub_url}/v1/hub-identity"))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| CompassError::Storage(format!("hub identity request failed: {}", e.without_url())))?;
+    if !resp.status().is_success() {
+        return Err(CompassError::NotFound("hub publishes no identity".into()));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| CompassError::Protocol(format!("decode hub identity: {e}")))?;
+    body.get("hub_key")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .filter(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| CompassError::Protocol("hub identity has no valid hub_key".into()))
+}
+
+/// Verify a listed module's attestation and either attach it or drop the UI (`U-1`).
+fn attach_attestation(
+    m: &mut RemoteHubModule,
+    pinned_key: Option<&str>,
+    doc: Option<&Value>,
+    provider_offer: Option<&Value>,
+) {
+    let Some(listed_hash) = m.ui_bundle_hash.clone() else {
+        return;
+    };
+    let result = match (pinned_key, doc) {
+        (Some(key), Some(doc)) => crate::ui_cache::VerifiedUiAttestation::verify(
+            doc,
+            key,
+            m.manifest.id.as_str(),
+            &m.manifest.version,
+            provider_offer,
+        )
+        .and_then(|a| {
+            if a.ui_bundle_hash == listed_hash {
+                Ok(a)
+            } else {
+                Err(CompassError::ui_bundle_tampered(
+                    "UI_ATTESTATION_INVALID: listed UI hash differs from the attested hash",
+                ))
+            }
+        }),
+        (None, _) => Err(CompassError::ui_bundle_tampered(
+            "UI_ATTESTATION_INVALID: no pinned hub key for this hub",
+        )),
+        (_, None) => Err(CompassError::ui_bundle_tampered(
+            "UI_ATTESTATION_INVALID: the hub listed this module without a signed attestation",
+        )),
+    };
+    match result {
+        Ok(a) => {
+            m.ui_bundle_size_bytes = a.ui_bundle_size_bytes.or(m.ui_bundle_size_bytes);
+            m.ui_attestation = Some(a);
+        }
+        Err(e) => {
+            tracing::warn!(plugin = %m.manifest.id, error = %e, "refusing unattested module UI");
+            m.ui_attestation_error = Some(e.to_string());
+            m.ui_bundle_hash = None;
+            m.has_ui_bundle = false;
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkModulesEnvelope {
+    #[serde(default)]
+    modules: Vec<NetworkModuleWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NetworkModuleWire {
+    plugin_id: String,
+    version: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    offer_id: Option<String>,
+    #[serde(default)]
+    offer_kind: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    peer_origin: Option<String>,
+    #[serde(default)]
+    launch_url: Option<String>,
+    #[serde(default)]
+    ui_bundle_hash: Option<String>,
+    #[serde(default)]
+    froglet_offer: Option<Value>,
+    #[serde(default)]
+    module_attestation: Option<Value>,
+}
+
+impl NetworkModuleWire {
+    fn to_module(&self, hub_origin: &str) -> Option<RemoteHubModule> {
+        let kind = match self.offer_kind.as_deref() {
+            Some("download") | Some("biocompass.module.download.v1") => "download",
+            _ => "run",
+        };
+        let offer = MarketplaceOfferSummary {
+            id: self.offer_id.clone().unwrap_or_else(|| self.plugin_id.clone()),
+            kind: kind.to_owned(),
+            title: self.title.clone().unwrap_or_else(|| self.plugin_id.clone()),
+            version: Some(self.version.clone()),
+            provider_org: self.provider.clone(),
+            plugin_id: Some(self.plugin_id.clone()),
+            ui_bundle_hash: self
+                .ui_bundle_hash
+                .clone()
+                .filter(|h| crate::ui_cache::is_sha256_hex(h)),
+            ui_bundle_size_bytes: None,
+            launch_url: self.launch_url.clone(),
+            price_milli_act: None,
+            description: None,
+            signed_offer: None,
+        };
+        let mut m = synthesize_module_from_offer(&offer, hub_origin)?;
+        // Federated bundles are fetched from the providing peer and verified against the
+        // peer-signed offer; the connected hub only endorses the peer's key.
+        if let Some(origin) = self
+            .peer_origin
+            .as_deref()
+            .and_then(|o| validate_marketplace_hub_url(o).ok())
+        {
+            m.ui_fetch_origin = origin;
+        }
+        Some(m)
+    }
+}
+
+async fn fetch_network_modules(
+    http: &Client,
+    hub_url: &str,
+    auth: Option<&CallerAuth>,
+) -> CompassResult<Vec<NetworkModuleWire>> {
+    let Some(caller) = auth else {
+        return Ok(Vec::new());
+    };
+    let mut req = http
+        .get(format!("{hub_url}/api/v1/network-modules"))
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(bearer) = caller.authorization.as_deref().filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", bearer);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CompassError::Storage(format!("fetch network modules failed: {}", e.without_url())))?;
+    if !resp.status().is_success() {
+        return Err(crate::cloud_client::map_http_error(resp).await);
+    }
+    let body: NetworkModulesEnvelope = resp
+        .json()
+        .await
+        .map_err(|e| CompassError::Protocol(format!("decode network modules JSON: {e}")))?;
+    Ok(body.modules)
+}
+
 fn push_recent_hub(list: &mut Vec<String>, url: &str) {
     list.retain(|existing| existing != url);
     list.insert(0, url.to_owned());
     list.truncate(MAX_RECENT_HUBS);
-}
-
-fn merge_hub_auth(caller: Option<&CallerAuth>, stored: Option<&CallerAuth>) -> Option<CallerAuth> {
-    if let Some(c) = caller
-        && (c.authorization.is_some() || c.api_key.is_some() || c.cookie.is_some())
-    {
-        return Some(c.clone());
-    }
-    stored.cloned()
 }
 
 fn compute_initial_state(
@@ -884,6 +1215,10 @@ fn compute_initial_state(
     let subscribed_network_offers = persisted_hub
         .as_ref()
         .map(|h| h.subscribed_network_offers.clone())
+        .unwrap_or_default();
+    let pinned_hub_keys = persisted_hub
+        .as_ref()
+        .map(|h| h.pinned_hub_keys.clone())
         .unwrap_or_default();
 
     if cfg.airgapped {
@@ -905,6 +1240,9 @@ fn compute_initial_state(
             hub_session_bearer: None,
             hub_session_actor: None,
             cached_remote_modules: Vec::new(),
+            cached_remote_at: None,
+            pinned_hub_keys: pinned_hub_keys.clone(),
+            presented_hub_key: None,
         };
     }
 
@@ -932,6 +1270,9 @@ fn compute_initial_state(
             hub_session_bearer: None,
             hub_session_actor: None,
             cached_remote_modules: Vec::new(),
+            cached_remote_at: None,
+            pinned_hub_keys: pinned_hub_keys.clone(),
+            presented_hub_key: None,
         };
     }
 
@@ -962,6 +1303,9 @@ fn compute_initial_state(
             hub_session_bearer: None,
             hub_session_actor: None,
             cached_remote_modules: Vec::new(),
+            cached_remote_at: None,
+            pinned_hub_keys: pinned_hub_keys.clone(),
+            presented_hub_key: None,
         };
     }
 
@@ -995,6 +1339,9 @@ fn compute_initial_state(
             hub_session_bearer: None,
             hub_session_actor: None,
             cached_remote_modules: Vec::new(),
+            cached_remote_at: None,
+            pinned_hub_keys: pinned_hub_keys.clone(),
+            presented_hub_key: None,
         };
     }
 
@@ -1019,6 +1366,9 @@ fn compute_initial_state(
             hub_session_bearer: None,
             hub_session_actor: None,
             cached_remote_modules: Vec::new(),
+            cached_remote_at: None,
+            pinned_hub_keys: pinned_hub_keys.clone(),
+            presented_hub_key: None,
         };
     }
 
@@ -1037,6 +1387,9 @@ fn compute_initial_state(
         hub_session_bearer: None,
         hub_session_actor: None,
         cached_remote_modules: Vec::new(),
+        cached_remote_at: None,
+        pinned_hub_keys,
+        presented_hub_key: None,
     }
 }
 
@@ -1285,6 +1638,7 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 launch_url,
                 price_milli_act,
                 description: None,
+                signed_offer: entry.get("document").cloned(),
             });
         }
 
@@ -1379,6 +1733,7 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 launch_url,
                 price_milli_act,
                 description,
+                signed_offer: None,
             }
         })
         .collect();
@@ -1416,27 +1771,25 @@ struct RemoteHubPluginWire {
     launch_url: Option<String>,
     #[serde(default)]
     marketplace_offer_id: Option<String>,
+    #[serde(default)]
+    module_attestation: Option<Value>,
 }
 
 async fn fetch_hub_plugins(
     http: &Client,
     hub_url: &str,
     auth: Option<&CallerAuth>,
-) -> CompassResult<Vec<RemoteHubModule>> {
+) -> CompassResult<Vec<(RemoteHubModule, Option<Value>)>> {
     let url = format!("{hub_url}/api/v1/plugins");
     let mut req = http
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/json");
-    if let Some(caller) = auth {
-        if let Some(bearer) = caller.authorization.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("Authorization", bearer);
-        }
-        if let Some(key) = caller.api_key.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("X-API-Key", key);
-        }
-        if let Some(cookie) = caller.cookie.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("Cookie", cookie);
-        }
+    // Only the stored hub session token (`U-2`); this client never holds browser credentials.
+    if let Some(bearer) = auth
+        .and_then(|caller| caller.authorization.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        req = req.header("Authorization", bearer);
     }
     let resp = req
         .send()
@@ -1457,21 +1810,27 @@ async fn fetch_hub_plugins(
             let has_ui = dto
                 .has_ui_bundle
                 .unwrap_or_else(|| dto.ui_bundle_hash.is_some() || dto.manifest.ui.is_some());
-            RemoteHubModule {
-                manifest: dto.manifest,
-                skill: dto.skill,
-                source: dto.source.unwrap_or(ModuleSource::OrgCloud),
-                runs_in: dto.runs_in.unwrap_or(ModuleRunsIn::Cloud),
-                has_ui_bundle: has_ui,
-                has_remote_icon: dto.icon_url.is_some(),
-                ui_bundle_hash: dto.ui_bundle_hash,
-                ui_bundle_size_bytes: dto.ui_bundle_size_bytes,
-                can_install: dto.can_install,
-                provider_label: dto.provider_label,
-                launch_url: dto.launch_url,
-                offer_id: dto.marketplace_offer_id,
-                hub_origin: hub_url.to_owned(),
-            }
+            (
+                RemoteHubModule {
+                    manifest: dto.manifest,
+                    skill: dto.skill,
+                    source: dto.source.unwrap_or(ModuleSource::OrgCloud),
+                    runs_in: dto.runs_in.unwrap_or(ModuleRunsIn::Cloud),
+                    has_ui_bundle: has_ui,
+                    has_remote_icon: dto.icon_url.is_some(),
+                    ui_bundle_hash: dto.ui_bundle_hash,
+                    ui_bundle_size_bytes: dto.ui_bundle_size_bytes,
+                    can_install: dto.can_install,
+                    provider_label: dto.provider_label,
+                    launch_url: dto.launch_url,
+                    offer_id: dto.marketplace_offer_id,
+                    hub_origin: hub_url.to_owned(),
+                    ui_attestation: None,
+                    ui_fetch_origin: hub_url.to_owned(),
+                    ui_attestation_error: None,
+                },
+                dto.module_attestation,
+            )
         })
         .collect())
 }
@@ -1519,8 +1878,9 @@ fn synthesize_module_from_offer(
         dataset_input_contract: None,
         runtime_queries: Vec::new(),
         runtime_join_queries: std::collections::BTreeMap::new(),
-        child_modules: Vec::new(),
+        child_modules: Default::default(),
         max_child_wait_sec: None,
+        max_child_spend_milli_act: None,
         image: format!("network://{hub_origin}/offers/{}", offer.id),
         network: NetworkPolicy::default(),
         price_milli_act: offer.price_milli_act.unwrap_or(0),
@@ -1552,6 +1912,9 @@ fn synthesize_module_from_offer(
             .or_else(|| Some(format!("{hub_origin}/module-offers/{}", offer.id))),
         offer_id: Some(offer.id.clone()),
         hub_origin: hub_origin.to_owned(),
+        ui_attestation: None,
+        ui_fetch_origin: hub_origin.to_owned(),
+        ui_attestation_error: None,
     })
 }
 
@@ -1568,6 +1931,7 @@ fn synthesize_module_from_subscription(sub: &SubscribedNetworkOffer) -> Option<R
         launch_url: sub.launch_url.clone(),
         price_milli_act: Some(sub.price_milli_act),
         description: (!sub.description.is_empty()).then(|| sub.description.clone()),
+        signed_offer: None,
     };
     synthesize_module_from_offer(&offer, &sub.hub_url)
 }
@@ -1958,30 +2322,87 @@ mod tests {
         assert_eq!(offers[2].version, None);
     }
 
+    /// Mock hub that signs real `bc.module_attestation.v1` documents with a swappable key.
+    struct MockHub {
+        url: String,
+        seen_auth: Arc<tokio::sync::Mutex<Vec<String>>>,
+        /// Every request's header block (to prove no browser credentials are forwarded).
+        requests: Arc<tokio::sync::Mutex<Vec<String>>>,
+        key: Arc<std::sync::Mutex<biocompass_node_runtime::froglet_protocol::crypto::NodeSigningKey>>,
+        /// When set, the attestation signs a different UI hash than the listing (tamper).
+        tamper: Arc<std::sync::atomic::AtomicBool>,
+    }
+
     async fn spawn_mock_hub_server(
         plugin_id: &'static str,
         plugin_name: &'static str,
         ui_bundle_hash: String,
     ) -> (String, Arc<tokio::sync::Mutex<Vec<String>>>) {
+        let hub = spawn_signing_mock_hub(plugin_id, plugin_name, ui_bundle_hash).await;
+        (hub.url, hub.seen_auth)
+    }
+
+    async fn spawn_signing_mock_hub(
+        plugin_id: &'static str,
+        plugin_name: &'static str,
+        ui_bundle_hash: String,
+    ) -> MockHub {
+        use biocompass_node_runtime::froglet_protocol::crypto::{generate_signing_key, public_key_hex};
+        use biocompass_node_runtime::module_attestation::{
+            ModuleAttestationPayload, sign_module_attestation,
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let seen_auth = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-        let seen_auth_bg = Arc::clone(&seen_auth);
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let key = Arc::new(std::sync::Mutex::new(generate_signing_key()));
+        let tamper = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (seen_auth_bg, requests_bg, key_bg, tamper_bg) = (
+            Arc::clone(&seen_auth),
+            Arc::clone(&requests),
+            Arc::clone(&key),
+            Arc::clone(&tamper),
+        );
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; 8192];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                requests_bg.lock().await.push(req.clone());
                 for line in req.lines() {
                     if line.to_ascii_lowercase().starts_with("authorization:") {
                         seen_auth_bg.lock().await.push(line.to_owned());
                     }
                 }
+                let signing_key = key_bg.lock().unwrap().clone();
                 let first_line = req.lines().next().unwrap_or("");
-                let body = if first_line.starts_with("GET /api/v1/plugins") {
+                let body = if first_line.starts_with("GET /v1/hub-identity") {
+                    serde_json::json!({ "hub_key": public_key_hex(&signing_key) }).to_string()
+                } else if first_line.starts_with("GET /api/v1/network-modules") {
+                    serde_json::json!({ "modules": [] }).to_string()
+                } else if first_line.starts_with("GET /api/v1/plugins") {
+                    let attested_hash = if tamper_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                        "f".repeat(64)
+                    } else {
+                        ui_bundle_hash.clone()
+                    };
+                    let attestation = sign_module_attestation(
+                        &signing_key,
+                        ModuleAttestationPayload {
+                            plugin_id: plugin_id.to_owned(),
+                            version: "1.0.0".into(),
+                            ui_bundle_hash: Some(attested_hash),
+                            ui_bundle_size_bytes: Some(128),
+                            image_digest: None,
+                            hub_key: String::new(),
+                            issued_at: 1_760_000_000,
+                            provider: None,
+                        },
+                    )
+                    .unwrap();
                     serde_json::json!({
                         "plugins": [{
                             "manifest": {
@@ -2001,7 +2422,8 @@ mod tests {
                             "ui_bundle_hash": ui_bundle_hash,
                             "ui_bundle_size_bytes": 128,
                             "can_install": false,
-                            "installed_locally": false
+                            "installed_locally": false,
+                            "module_attestation": attestation,
                         }]
                     })
                     .to_string()
@@ -2039,7 +2461,143 @@ mod tests {
                 let _ = stream.shutdown().await;
             }
         });
-        (format!("http://{addr}"), seen_auth)
+        MockHub {
+            url: format!("http://{addr}"),
+            seen_auth,
+            requests,
+            key,
+            tamper,
+        }
+    }
+
+    fn local_cfg(default_hub_url: &str) -> MarketplaceConfig {
+        MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: default_hub_url.to_owned(),
+            explicit_hub_url: None,
+            airgapped: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn u1_hub_key_is_pinned_on_first_connection_and_a_changed_key_is_refused_until_retrusted() {
+        use biocompass_node_runtime::froglet_protocol::crypto::{generate_signing_key, public_key_hex};
+        let hash = "a".repeat(64);
+        let hub = spawn_signing_mock_hub("org-a/alpha-mod", "Alpha", hash.clone()).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = MarketplaceClient::new(tmp.path(), local_cfg(&hub.url)).unwrap();
+        let status = client
+            .set_workspace_hub(WorkspaceHubMode::AlitheaCloud, None, Some("t".into()), None)
+            .await
+            .unwrap();
+        let first_key = public_key_hex(&hub.key.lock().unwrap());
+        assert_eq!(status.hub_key.as_deref(), Some(first_key.as_str()));
+        assert_eq!(status.hub_key_status, "pinned");
+        let mods = client.list_remote_and_subscribed_modules().await;
+        assert_eq!(mods[0].ui_bundle_hash.as_deref(), Some(hash.as_str()));
+        assert!(mods[0].ui_attestation.is_some());
+
+        // The pin survives a restart.
+        let restarted = MarketplaceClient::new(tmp.path(), local_cfg(&hub.url)).unwrap();
+        assert_eq!(
+            restarted.workspace_hub_status().await.hub_key.as_deref(),
+            Some(first_key.as_str())
+        );
+
+        // The hub (or an impostor) now signs with another key: refused, nothing openable.
+        *hub.key.lock().unwrap() = generate_signing_key();
+        let new_key = public_key_hex(&hub.key.lock().unwrap());
+        let err = restarted.refresh_connected_hub().await.unwrap_err();
+        assert!(err.to_string().contains("UI_HUB_KEY_CHANGED"), "{err}");
+        let st = restarted.workspace_hub_status().await;
+        assert_eq!(st.hub_key_status, "changed");
+        assert_eq!(st.presented_hub_key.as_deref(), Some(new_key.as_str()));
+        assert!(restarted.list_remote_and_subscribed_modules().await.is_empty());
+
+        // Explicit re-trust of the new key restores the listing.
+        let st = restarted
+            .set_workspace_hub(WorkspaceHubMode::AlitheaCloud, None, Some("t".into()), Some(new_key.clone()))
+            .await
+            .unwrap();
+        assert_eq!(st.hub_key.as_deref(), Some(new_key.as_str()));
+        assert_eq!(st.hub_key_status, "pinned");
+        let mods = restarted.list_remote_and_subscribed_modules().await;
+        assert!(mods[0].ui_attestation.is_some());
+    }
+
+    #[tokio::test]
+    async fn u1_listing_whose_attestation_signs_another_hash_cannot_be_opened() {
+        let hash = "a".repeat(64);
+        let hub = spawn_signing_mock_hub("org-a/alpha-mod", "Alpha", hash.clone()).await;
+        hub.tamper.store(true, std::sync::atomic::Ordering::SeqCst);
+        let tmp = tempfile::tempdir().unwrap();
+        let client = MarketplaceClient::new(tmp.path(), local_cfg(&hub.url)).unwrap();
+        client
+            .set_workspace_hub(WorkspaceHubMode::AlitheaCloud, None, Some("t".into()), None)
+            .await
+            .unwrap();
+        let mods = client.list_remote_and_subscribed_modules().await;
+        let alpha = mods.iter().find(|m| m.manifest.id.as_str() == "org-a/alpha-mod").unwrap();
+        assert!(alpha.ui_attestation.is_none());
+        assert!(alpha.ui_bundle_hash.is_none());
+        assert!(alpha.ui_attestation_error.as_deref().unwrap_or("").contains("UI_ATTESTATION_INVALID"));
+    }
+
+    #[tokio::test]
+    async fn u2_module_list_is_cached_for_a_short_ttl_instead_of_refetched_per_call() {
+        let hub = spawn_signing_mock_hub("org-a/alpha-mod", "Alpha", "a".repeat(64)).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let client = MarketplaceClient::new(tmp.path(), local_cfg(&hub.url)).unwrap();
+        client
+            .set_workspace_hub(WorkspaceHubMode::AlitheaCloud, None, Some("t".into()), None)
+            .await
+            .unwrap();
+        let count = |reqs: &[String]| {
+            reqs.iter()
+                .filter(|r| r.starts_with("GET /api/v1/plugins"))
+                .count()
+        };
+        let before = count(&hub.requests.lock().await);
+        for _ in 0..5 {
+            assert_eq!(client.list_remote_and_subscribed_modules().await.len(), 1);
+        }
+        assert_eq!(count(&hub.requests.lock().await), before, "list calls must hit the TTL cache");
+    }
+
+    #[tokio::test]
+    async fn subscribe_network_offer_requires_marketplace_consent_and_local_mode() {
+        let offer = SubscribedNetworkOffer {
+            offer_id: "mo-1".into(),
+            hub_url: "https://hub.example.org".into(),
+            plugin_id: "org/mod".into(),
+            version: "1.0.0".into(),
+            title: "Mod".into(),
+            description: String::new(),
+            kind: "run".into(),
+            provider_label: "Provider".into(),
+            ui_bundle_hash: None,
+            ui_bundle_size_bytes: None,
+            launch_url: None,
+            price_milli_act: 0,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let unconsented = MarketplaceClient::new(tmp.path(), local_cfg("https://hub.example.org")).unwrap();
+        let err = unconsented.subscribe_network_offer(offer.clone()).await.unwrap_err();
+        assert!(err.to_string().contains("MARKETPLACE_CONSENT_REQUIRED"), "{err}");
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        let cloud = MarketplaceClient::new(
+            tmp2.path(),
+            MarketplaceConfig {
+                mode: DeploymentMode::CloudWeb,
+                default_hub_url: "https://hub.example.org".into(),
+                explicit_hub_url: None,
+                airgapped: false,
+            },
+        )
+        .unwrap();
+        let err = cloud.subscribe_network_offer(offer).await.unwrap_err();
+        assert!(err.to_string().contains("cloud-web"), "{err}");
     }
 
     #[tokio::test]
@@ -2066,6 +2624,7 @@ mod tests {
                 WorkspaceHubMode::AlitheaCloud,
                 None,
                 Some("secret-token-hub-a".to_owned()),
+                None,
             )
             .await
             .expect("switch to hub A");
@@ -2073,7 +2632,7 @@ mod tests {
         assert_eq!(status_a.hub_url.as_deref(), Some(hub_a.as_str()));
         assert!(status_a.connected);
         assert!(status_a.authenticated);
-        let mods_a = client.list_remote_and_subscribed_modules(None).await;
+        let mods_a = client.list_remote_and_subscribed_modules().await;
         assert_eq!(mods_a.len(), 1);
         assert_eq!(mods_a[0].manifest.id.as_str(), "org-a/alpha-mod");
         assert_eq!(mods_a[0].ui_bundle_hash.as_deref(), Some(hash_a.as_str()));
@@ -2081,13 +2640,13 @@ mod tests {
 
         // 2. Switch to Custom Cloud (Hub B) — token from Hub A MUST NOT leak to Hub B!
         let status_b = client
-            .set_workspace_hub(WorkspaceHubMode::CustomCloud, Some(hub_b.clone()), None)
+            .set_workspace_hub(WorkspaceHubMode::CustomCloud, Some(hub_b.clone()), None, None)
             .await
             .expect("switch to hub B");
         assert_eq!(status_b.mode, WorkspaceHubMode::CustomCloud);
         assert_eq!(status_b.hub_url.as_deref(), Some(hub_b.as_str()));
         assert!(!status_b.authenticated, "Hub A token must be cleared on hub switch");
-        let mods_b = client.list_remote_and_subscribed_modules(None).await;
+        let mods_b = client.list_remote_and_subscribed_modules().await;
         assert_eq!(mods_b.len(), 1);
         assert_eq!(mods_b[0].manifest.id.as_str(), "org-b/beta-mod");
         assert_eq!(mods_b[0].ui_bundle_hash.as_deref(), Some(hash_b.as_str()));
@@ -2106,11 +2665,11 @@ mod tests {
 
         // 4. Switch to Offline clears remote modules cleanly.
         let offline = restarted
-            .set_workspace_hub(WorkspaceHubMode::Offline, None, None)
+            .set_workspace_hub(WorkspaceHubMode::Offline, None, None, None)
             .await
             .expect("offline");
         assert_eq!(offline.mode, WorkspaceHubMode::Offline);
         assert_eq!(offline.hub_url, None);
-        assert!(restarted.list_remote_and_subscribed_modules(None).await.is_empty());
+        assert!(restarted.list_remote_and_subscribed_modules().await.is_empty());
     }
 }

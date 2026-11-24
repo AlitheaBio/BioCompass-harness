@@ -37,6 +37,7 @@ export function WorkspaceHubChooser({
   const [password, setPassword] = useState("");
   const [orgId, setOrgId] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  const [hubKeyInput, setHubKeyInput] = useState("");
 
   useEffect(() => {
     if (initialStatus) {
@@ -75,7 +76,7 @@ export function WorkspaceHubChooser({
       : msg;
   };
 
-  const applyHubChoice = async (nextMode: WorkspaceHubMode, nextUrl?: string) => {
+  const applyHubChoice = async (nextMode: WorkspaceHubMode, nextUrl?: string, hubKey?: string) => {
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -83,7 +84,9 @@ export function WorkspaceHubChooser({
       const updated = await updateWorkspaceHub({
         mode: nextMode,
         ...(nextMode === "custom_cloud" ? { hub_url: (nextUrl ?? customUrl).trim() } : {}),
+        ...(hubKey ? { hub_key: hubKey.trim().toLowerCase() } : {}),
       });
+      if (hubKey) setHubKeyInput("");
       setStatus(updated);
       setMode(updated.mode);
       if (updated.mode === "custom_cloud" && updated.hub_url) {
@@ -330,6 +333,59 @@ export function WorkspaceHubChooser({
               </button>
             </form>
           )}
+        </div>
+      )}
+
+      {!airgapped && status && status.mode !== "offline" && (
+        <div
+          data-testid="workspace-hub-key"
+          data-hub-key-status={status.hub_key_status ?? "unpinned"}
+          style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}
+        >
+          <span className="bc-caption">
+            Hub signing key{" "}
+            {status.hub_key_status === "changed"
+              ? "(CHANGED — module UIs are blocked until you re-trust it)"
+              : status.hub_key_status === "pinned"
+                ? "(pinned; compare with the key your hub operator publishes)"
+                : "(not pinned yet)"}
+            :
+          </span>
+          {status.hub_key && (
+            <code className="mono" data-testid="workspace-hub-key-pinned" style={{ wordBreak: "break-all" }}>
+              {status.hub_key}
+            </code>
+          )}
+          {status.hub_key_status === "changed" && status.presented_hub_key && (
+            <>
+              <span className="bc-caption" style={{ color: "var(--bc-danger)" }}>Hub now presents:</span>
+              <code className="mono" data-testid="workspace-hub-key-presented" style={{ wordBreak: "break-all" }}>
+                {status.presented_hub_key}
+              </code>
+            </>
+          )}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input
+              type="text"
+              className="bc-input mono"
+              aria-label="Hub signing key to trust"
+              data-testid="workspace-hub-key-input"
+              placeholder="64-hex hub signing key"
+              value={hubKeyInput}
+              disabled={busy}
+              style={{ flex: 1, minWidth: 220 }}
+              onChange={(e) => setHubKeyInput(e.target.value)}
+            />
+            <button
+              type="button"
+              className="bc-btn bc-btn-secondary bc-btn-sm"
+              data-testid="workspace-hub-key-trust-btn"
+              disabled={busy || !/^[0-9a-fA-F]{64}$/.test(hubKeyInput.trim())}
+              onClick={() => void applyHubChoice(status.mode, status.hub_url ?? customUrl, hubKeyInput)}
+            >
+              Trust this key
+            </button>
+          </div>
         </div>
       )}
 

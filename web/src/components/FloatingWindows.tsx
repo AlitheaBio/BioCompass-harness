@@ -19,8 +19,11 @@ import {
 } from "./ModuleTabs";
 import { SandboxedPluginFrame } from "./SandboxedPluginFrame";
 import { resolveModuleCardActions } from "../moduleListPolicy";
+import { negotiatedPriceForRelease } from "../types";
 import type {
   DatasetGrant,
+  ModuleOffer,
+  NegotiatedModuleOfferPrice,
   RunVerification,
   PluginSummary,
   RunQuote,
@@ -60,6 +63,7 @@ export function FloatingWindowsLayer({
   pendingQuoteParams = null,
   isConfirmingRun,
   isLocalPlayLedger = false,
+  moduleOffers = [],
   liveLogs,
   verifyReport,
   onFocusWindow,
@@ -92,6 +96,8 @@ export function FloatingWindowsLayer({
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
   isLocalPlayLedger?: boolean;
+  /** Org module offers (cloud): negotiated prices for "Run Cost". */
+  moduleOffers?: ModuleOffer[];
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocusWindow: (winId: string) => void;
@@ -206,6 +212,7 @@ export function FloatingWindowsLayer({
             pendingQuoteParams={hasPendingQuote ? pendingQuoteParams : null}
             isConfirmingRun={isConfirmingRun && hasPendingQuote}
             isLocalPlayLedger={isLocalPlayLedger}
+            negotiatedPrice={negotiatedPriceForRelease(moduleOffers, plugin.manifest.id, plugin.manifest.version)}
             liveLogs={liveLogs}
             verifyReport={isFocused ? verifyReport : null}
             onFocus={() => onFocusWindow(win.id)}
@@ -312,6 +319,7 @@ export function ModuleFloatingWindow({
   pendingQuoteParams = null,
   isConfirmingRun,
   isLocalPlayLedger = false,
+  negotiatedPrice = null,
   liveLogs,
   verifyReport,
   onFocus,
@@ -346,6 +354,7 @@ export function ModuleFloatingWindow({
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
   isLocalPlayLedger?: boolean;
+  negotiatedPrice?: NegotiatedModuleOfferPrice | null;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocus: () => void;
@@ -732,6 +741,7 @@ export function ModuleFloatingWindow({
             plugin={plugin}
             isFocused={isFocused}
             isLocalPlayLedger={isLocalPlayLedger}
+            negotiatedPrice={negotiatedPrice}
           />
         )}
       </div>

@@ -39,6 +39,16 @@ pub const OPEN_TICKET_LIFETIME_SECS: i64 = 300;
 /// Maximum concurrent open tickets retained in memory.
 const MAX_OPEN_TICKETS: usize = 4096;
 
+/// Maximum live open tickets per tenant (viewer scope); one tenant can never evict another's.
+const MAX_OPEN_TICKETS_PER_TENANT: usize = 256;
+
+/// Default on-disk UI cache budget (`BIOCOMPASS_UI_CACHE_MAX_BYTES` overrides), LRU-evicted.
+const DEFAULT_MAX_DISK_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Prefetch only bundles at or under this attested size, and at most this many per minute.
+const MAX_PREFETCH_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PREFETCHES_PER_MINUTE: u32 = 32;
+
 /// Icon cache entry TTL and max entry count.
 const ICON_CACHE_TTL_SECS: u64 = 300;
 const MAX_ICON_CACHE_ENTRIES: usize = 256;
@@ -97,20 +107,192 @@ impl CachedUiBundle {
     }
 }
 
+/// A module attestation whose signature was verified against a pinned hub key (`U-1`), and for a
+/// federated module also the providing peer's signed offer. Only verification code can build one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedUiAttestation {
+    pub plugin_id: String,
+    pub version: String,
+    pub ui_bundle_hash: String,
+    pub ui_bundle_size_bytes: Option<u64>,
+    /// Key the attestation was verified against (the pinned hub key).
+    pub hub_key: String,
+    /// Federated provider key, when the bundle is attested by an approved peer's signed offer.
+    pub provider_key: Option<String>,
+    /// Private: only verification code in this module can construct one.
+    verified_at: Instant,
+}
+
+impl VerifiedUiAttestation {
+    /// Verify a hub-signed attestation document against `pinned_hub_key` (and, when it endorses
+    /// a federated provider, the peer-signed offer) and bind it to `plugin_id@version`.
+    pub fn verify(
+        doc: &serde_json::Value,
+        pinned_hub_key: &str,
+        plugin_id: &str,
+        version: &str,
+        provider_offer: Option<&serde_json::Value>,
+    ) -> CompassResult<Self> {
+        use biocompass_node_runtime::module_attestation::{
+            verify_module_attestation, verify_provider_offer,
+        };
+        let payload = verify_module_attestation(doc, pinned_hub_key)
+            .map_err(|e| CompassError::ui_bundle_tampered(format!("UI_ATTESTATION_INVALID: {e}")))?;
+        if payload.plugin_id != plugin_id || payload.version != version {
+            return Err(CompassError::ui_bundle_tampered(format!(
+                "UI_ATTESTATION_INVALID: attestation is for {}@{}, not {plugin_id}@{version}",
+                payload.plugin_id, payload.version
+            )));
+        }
+        let hash = payload
+            .ui_bundle_hash
+            .clone()
+            .filter(|h| is_sha256_hex(h))
+            .ok_or_else(|| {
+                CompassError::ui_bundle_tampered("UI_ATTESTATION_INVALID: no UI bundle hash attested")
+            })?;
+        let provider_key = match (&payload.provider, provider_offer) {
+            (Some(_), Some(offer)) => {
+                verify_provider_offer(&payload, offer).map_err(|e| {
+                    CompassError::ui_bundle_tampered(format!("UI_ATTESTATION_INVALID: {e}"))
+                })?;
+                payload.provider.as_ref().map(|p| p.peer_pubkey.to_ascii_lowercase())
+            }
+            (Some(_), None) => {
+                return Err(CompassError::ui_bundle_tampered(
+                    "UI_ATTESTATION_INVALID: federated module is missing its provider-signed offer",
+                ));
+            }
+            (None, _) => None,
+        };
+        Ok(Self {
+            plugin_id: plugin_id.to_owned(),
+            version: version.to_owned(),
+            ui_bundle_hash: hash,
+            ui_bundle_size_bytes: payload.ui_bundle_size_bytes,
+            hub_key: pinned_hub_key.to_ascii_lowercase(),
+            provider_key,
+            verified_at: Instant::now(),
+        })
+    }
+
+    /// A hub's own discovery offer (signed by the hub key via the feed) attests its UI hash.
+    pub fn from_signed_offer(
+        offer_doc: &serde_json::Value,
+        pinned_hub_key: &str,
+        plugin_id: &str,
+        version: &str,
+    ) -> CompassResult<Self> {
+        use biocompass_node_runtime::froglet_protocol::protocol::{SignedArtifact, verify_artifact};
+        use biocompass_node_runtime::module_attestation::offer_ui_bundle_hash;
+        let offer: SignedArtifact<serde_json::Value> = serde_json::from_value(offer_doc.clone())
+            .map_err(|e| CompassError::ui_bundle_tampered(format!("UI_ATTESTATION_INVALID: {e}")))?;
+        if offer.artifact_type != "offer" || !verify_artifact(&offer) {
+            return Err(CompassError::ui_bundle_tampered(
+                "UI_ATTESTATION_INVALID: feed offer signature is invalid",
+            ));
+        }
+        let pinned = pinned_hub_key.to_ascii_lowercase();
+        if offer.signer.to_ascii_lowercase() != pinned {
+            return Err(CompassError::ui_bundle_tampered(format!(
+                "UI_ATTESTATION_INVALID: feed offer signed by '{}', not the pinned hub key",
+                offer.signer
+            )));
+        }
+        let handle = offer
+            .payload
+            .pointer("/execution_profile/access_handles/0")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if handle != format!("{plugin_id}@{version}") {
+            return Err(CompassError::ui_bundle_tampered(
+                "UI_ATTESTATION_INVALID: feed offer is for another module version",
+            ));
+        }
+        let hash = offer_ui_bundle_hash(&offer.payload)
+            .filter(|h| is_sha256_hex(h))
+            .ok_or_else(|| {
+                CompassError::ui_bundle_tampered("UI_ATTESTATION_INVALID: offer has no UI hash")
+            })?;
+        Ok(Self {
+            plugin_id: plugin_id.to_owned(),
+            version: version.to_owned(),
+            ui_bundle_hash: hash,
+            ui_bundle_size_bytes: offer
+                .payload
+                .get("ui_bundle_size_bytes")
+                .and_then(serde_json::Value::as_u64),
+            hub_key: pinned,
+            provider_key: None,
+            verified_at: Instant::now(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(plugin_id: &str, version: &str, hash: &str, size: Option<u64>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            version: version.into(),
+            ui_bundle_hash: hash.into(),
+            ui_bundle_size_bytes: size,
+            hub_key: "00".repeat(32),
+            provider_key: None,
+            verified_at: Instant::now(),
+        }
+    }
+
+    fn check_bundle(&self, bundle: &CachedUiBundle) -> CompassResult<()> {
+        if !constant_time_eq_str(&self.ui_bundle_hash, &bundle.ui_bundle_hash) {
+            return Err(CompassError::ui_bundle_tampered(
+                "UI bundle hash differs from the attested hash",
+            ));
+        }
+        if let Some(size) = self.ui_bundle_size_bytes
+            && size != bundle.total_raw_bytes
+        {
+            return Err(CompassError::ui_bundle_tampered(format!(
+                "UI bundle size {} differs from the attested {size} bytes",
+                bundle.total_raw_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// How a bundle about to be fetched is trusted (`U-1`).
+#[derive(Debug, Clone)]
+pub enum UiTrust {
+    /// The module list's attestation was already verified against the pinned hub key.
+    Verified(VerifiedUiAttestation),
+    /// Verify the attestation embedded in the `/v1/artifacts/<hash>` response against this key.
+    Embedded {
+        pinned_hub_key: String,
+        plugin_id: String,
+        version: String,
+    },
+}
+
 /// Origin pointer recorded when listing/subscribing/syncing a remote or network module.
 ///
 /// Intentionally stores NO caller credentials (`Cookie` / `Authorization` / `X-API-Key`);
 /// credentials are always supplied ephemerally by the active request or local hub session.
+/// A source exists only for a module whose UI attestation was verified.
 #[derive(Debug, Clone)]
 pub struct RemoteUiSource {
     pub hub_origin: String,
     pub ui_bundle_hash: String,
     pub entry: String,
+    pub attestation: VerifiedUiAttestation,
 }
 
 /// Short-lived viewer-bound authorization grant minted ONCE per module open (`U1` + `SEC-17`).
+///
+/// Bound to the viewer (session hash and tenant scope), the organization, the module and version,
+/// and the exact bundle; every sub-resource request is checked against all of them.
 #[derive(Debug, Clone)]
 pub struct UiOpenGrant {
+    /// Tenant (viewer credential) scope that opened the module; per-tenant ticket limits use it.
+    pub tenant_scope: String,
     pub org_id: Option<String>,
     pub session_sha256: Option<String>,
     pub plugin_id: String,
@@ -138,6 +320,9 @@ pub struct UiBundleArchiveJson {
     pub ui_bundle_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+    /// Hub-signed `bc.module_attestation.v1` for the module version the archive was served for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_attestation: Option<serde_json::Value>,
     pub files: Vec<UiBundleArchiveFileJson>,
 }
 
@@ -190,6 +375,12 @@ pub struct UiBundleCache {
     local_dir_cache: RwLock<HashMap<PathBuf, (u64, Arc<CachedUiBundle>)>>,
     tickets: RwLock<HashMap<String, UiOpenGrant>>,
     icons: RwLock<HashMap<IconCacheKey, CachedIcon>>,
+    /// `(hash, plugin_id, version)` triples whose attestation was verified in this process.
+    attested: RwLock<std::collections::HashSet<(String, String, String)>>,
+    max_disk_bytes: u64,
+    prefetch_window: std::sync::Mutex<(Instant, u32)>,
+    /// `BIOCOMPASS_UI_PREFETCH=0` disables pre-fetch (used to measure the true cold open path).
+    prefetch_enabled: bool,
 }
 
 impl UiBundleCache {
@@ -204,6 +395,15 @@ impl UiBundleCache {
             .build()
             .expect("build UI cache HTTP client");
         let disk_dir = persist_to_disk.then(|| data_dir.join("ui-cache"));
+        let max_disk_bytes = std::env::var("BIOCOMPASS_UI_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MAX_DISK_CACHE_BYTES);
+        Self::with_limits(disk_dir, http, max_disk_bytes)
+    }
+
+    fn with_limits(disk_dir: Option<PathBuf>, http: Client, max_disk_bytes: u64) -> Self {
         Self {
             disk_dir,
             http,
@@ -215,7 +415,34 @@ impl UiBundleCache {
             local_dir_cache: RwLock::new(HashMap::new()),
             tickets: RwLock::new(HashMap::new()),
             icons: RwLock::new(HashMap::new()),
+            attested: RwLock::new(std::collections::HashSet::new()),
+            max_disk_bytes,
+            prefetch_window: std::sync::Mutex::new((Instant::now(), 0)),
+            prefetch_enabled: !std::env::var("BIOCOMPASS_UI_PREFETCH")
+                .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no")),
         }
+    }
+
+    /// Test constructor with an explicit disk budget.
+    #[cfg(test)]
+    pub(crate) fn new_with_disk_budget(data_dir: &Path, max_disk_bytes: u64) -> Self {
+        Self::with_limits(Some(data_dir.join("ui-cache")), Client::new(), max_disk_bytes)
+    }
+
+    /// `true` when `(hash, plugin_id, version)` had its attestation verified in this process.
+    pub async fn is_attested(&self, hash: &str, plugin_id: &str, version: &str) -> bool {
+        self.attested
+            .read()
+            .await
+            .contains(&(hash.to_owned(), plugin_id.to_owned(), version.to_owned()))
+    }
+
+    async fn record_attested(&self, a: &VerifiedUiAttestation) {
+        let mut set = self.attested.write().await;
+        if set.len() >= MAX_MODULE_SOURCES * 4 {
+            set.clear();
+        }
+        set.insert((a.ui_bundle_hash.clone(), a.plugin_id.clone(), a.version.clone()));
     }
 
     /// Return the disk cache root directory, if enabled.
@@ -232,9 +459,14 @@ impl UiBundleCache {
         version: &str,
         source: RemoteUiSource,
     ) {
-        if !is_sha256_hex(&source.ui_bundle_hash) {
+        if !is_sha256_hex(&source.ui_bundle_hash)
+            || source.attestation.ui_bundle_hash != source.ui_bundle_hash
+            || source.attestation.plugin_id != plugin_id
+            || source.attestation.version != version
+        {
             return;
         }
+        self.record_attested(&source.attestation).await;
         let key = ModuleUiKey {
             scope: scope.to_owned(),
             plugin_id: plugin_id.to_owned(),
@@ -242,7 +474,14 @@ impl UiBundleCache {
         };
         let mut sources = self.module_sources.write().await;
         if sources.len() >= MAX_MODULE_SOURCES && !sources.contains_key(&key) {
-            sources.clear();
+            // Evict only this scope's entries so one tenant cannot flush another's.
+            let victim = sources.keys().find(|k| k.scope == scope).cloned();
+            match victim {
+                Some(k) => {
+                    sources.remove(&k);
+                }
+                None => return,
+            }
         }
         sources.insert(key, source);
     }
@@ -291,9 +530,57 @@ impl UiBundleCache {
         hash: &str,
         hub_origin: &str,
         auth: Option<&CallerAuth>,
+        trust: &UiTrust,
+    ) -> CompassResult<Arc<CachedUiBundle>> {
+        self.get_or_fetch_bounded(hash, hub_origin, auth, trust, MAX_ARCHIVE_HTTP_BYTES)
+            .await
+    }
+
+    async fn trusted_hit(
+        &self,
+        hash: &str,
+        trust: &UiTrust,
+    ) -> CompassResult<Option<Arc<CachedUiBundle>>> {
+        let Some(hit) = self.get_cached(hash).await? else {
+            return Ok(None);
+        };
+        match trust {
+            UiTrust::Verified(a) => {
+                a.check_bundle(&hit)?;
+                self.record_attested(a).await;
+                Ok(Some(hit))
+            }
+            UiTrust::Embedded {
+                plugin_id, version, ..
+            } => {
+                // Serve from cache only if this module version's attestation was verified for
+                // these bytes; otherwise refetch to obtain and verify the embedded attestation.
+                if self.is_attested(hash, plugin_id, version).await {
+                    Ok(Some(hit))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    async fn get_or_fetch_bounded(
+        &self,
+        hash: &str,
+        hub_origin: &str,
+        auth: Option<&CallerAuth>,
+        trust: &UiTrust,
+        max_body: usize,
     ) -> CompassResult<Arc<CachedUiBundle>> {
         validate_hash(hash)?;
-        if let Some(hit) = self.get_cached(hash).await? {
+        if let UiTrust::Verified(a) = trust
+            && a.ui_bundle_hash != hash
+        {
+            return Err(CompassError::ui_bundle_tampered(
+                "requested UI bundle hash differs from the attested hash",
+            ));
+        }
+        if let Some(hit) = self.trusted_hit(hash, trust).await? {
             return Ok(hit);
         }
 
@@ -308,7 +595,7 @@ impl UiBundleCache {
         let _guard = flight_lock.lock().await;
 
         // Re-check cache after winning the single-flight lock.
-        if let Some(hit) = self.get_cached(hash).await? {
+        if let Some(hit) = self.trusted_hit(hash, trust).await? {
             return Ok(hit);
         }
 
@@ -343,7 +630,7 @@ impl UiBundleCache {
             .map(str::to_owned);
         if resp
             .content_length()
-            .is_some_and(|len| len as usize > MAX_ARCHIVE_HTTP_BYTES)
+            .is_some_and(|len| len as usize > max_body)
         {
             return Err(CompassError::Validation(format!(
                 "UI bundle archive exceeds {} byte cap",
@@ -357,7 +644,7 @@ impl UiBundleCache {
             let chunk = chunk.map_err(|e| {
                 CompassError::Storage(format!("read UI bundle stream failed: {}", e.without_url()))
             })?;
-            if body.len().saturating_add(chunk.len()) > MAX_ARCHIVE_HTTP_BYTES {
+            if body.len().saturating_add(chunk.len()) > max_body {
                 return Err(CompassError::Validation(format!(
                     "UI bundle archive exceeds {} byte cap",
                     MAX_UI_BUNDLE_BYTES
@@ -367,9 +654,28 @@ impl UiBundleCache {
         }
 
         let bundle = parse_and_verify_ui_archive(hash, content_type.as_deref(), &body)?;
+        // U-1: never cache or serve a bundle whose attestation does not verify.
+        let attestation = match trust {
+            UiTrust::Verified(a) => a.clone(),
+            UiTrust::Embedded {
+                pinned_hub_key,
+                plugin_id,
+                version,
+            } => {
+                let doc = embedded_attestation(&body).ok_or_else(|| {
+                    CompassError::ui_bundle_tampered(
+                        "UI_ATTESTATION_INVALID: archive carries no module attestation",
+                    )
+                })?;
+                VerifiedUiAttestation::verify(&doc, pinned_hub_key, plugin_id, version, None)?
+            }
+        };
+        attestation.check_bundle(&bundle)?;
         if let Some(root) = &self.disk_dir {
             persist_bundle_to_disk(root, &bundle)?;
+            enforce_disk_budget(root, self.max_disk_bytes, &bundle.ui_bundle_hash);
         }
+        self.record_attested(&attestation).await;
         let bundle = Arc::new(bundle);
         self.insert_memory(Arc::clone(&bundle)).await;
 
@@ -388,13 +694,38 @@ impl UiBundleCache {
     /// Asynchronously warm the UI cache in the background when modules are listed/subscribed/synced.
     pub fn prefetch_background(
         self: &Arc<Self>,
-        hash: String,
+        attestation: VerifiedUiAttestation,
         hub_origin: String,
         auth: Option<CallerAuth>,
     ) {
-        if !is_sha256_hex(&hash) || hub_origin.trim().is_empty() {
+        let hash = attestation.ui_bundle_hash.clone();
+        if !self.prefetch_enabled || !is_sha256_hex(&hash) || hub_origin.trim().is_empty() {
             return;
         }
+        // Bounded by size: large (or unsized) bundles are fetched on first open only.
+        let Some(size) = attestation.ui_bundle_size_bytes else {
+            return;
+        };
+        if size > MAX_PREFETCH_BUNDLE_BYTES {
+            return;
+        }
+        // Bounded by count: at most MAX_PREFETCHES_PER_MINUTE new prefetches per minute.
+        {
+            let Ok(mut window) = self.prefetch_window.lock() else {
+                return;
+            };
+            if window.0.elapsed() >= Duration::from_secs(60) {
+                *window = (Instant::now(), 0);
+            }
+            if window.1 >= MAX_PREFETCHES_PER_MINUTE {
+                return;
+            }
+            window.1 += 1;
+        }
+        let max_body = usize::try_from(size.saturating_mul(2).saturating_add(64 * 1024))
+            .unwrap_or(MAX_ARCHIVE_HTTP_BYTES)
+            .min(MAX_ARCHIVE_HTTP_BYTES);
+        let trust = UiTrust::Verified(attestation);
         let cache = Arc::clone(self);
         tokio::spawn(async move {
             let Ok(_permit) = cache.prefetch_slots.clone().acquire_owned().await else {
@@ -403,7 +734,10 @@ impl UiBundleCache {
             if let Ok(Some(_)) = cache.get_cached(&hash).await {
                 return;
             }
-            if let Err(err) = cache.get_or_fetch(&hash, &hub_origin, auth.as_ref()).await {
+            if let Err(err) = cache
+                .get_or_fetch_bounded(&hash, &hub_origin, auth.as_ref(), &trust, max_body)
+                .await
+            {
                 tracing::debug!(ui_bundle_hash = %hash, error = %err, "background UI bundle prefetch skipped");
             }
         });
@@ -459,18 +793,76 @@ impl UiBundleCache {
         let ticket = format!("{U1_TICKET_PREFIX}{}", hex::encode(seed));
 
         let mut map = self.tickets.write().await;
+        map.retain(|_, v| v.expires_at > now);
+        // Per-tenant limit: evict this tenant's oldest ticket, never another tenant's.
+        let tenant_count = map
+            .values()
+            .filter(|g| g.tenant_scope == grant.tenant_scope)
+            .count();
+        if tenant_count >= MAX_OPEN_TICKETS_PER_TENANT
+            && let Some(oldest) = map
+                .iter()
+                .filter(|(_, g)| g.tenant_scope == grant.tenant_scope)
+                .min_by_key(|(_, g)| g.expires_at)
+                .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
         if map.len() >= MAX_OPEN_TICKETS {
-            map.retain(|_, v| v.expires_at > now);
-            if map.len() >= MAX_OPEN_TICKETS {
-                map.clear();
+            // Global safety cap: evict the oldest ticket of the largest tenant.
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for g in map.values() {
+                *counts.entry(g.tenant_scope.as_str()).or_default() += 1;
+            }
+            let largest = counts
+                .into_iter()
+                .max_by_key(|(_, n)| *n)
+                .map(|(scope, _)| scope.to_owned());
+            if let Some(scope) = largest
+                && let Some(oldest) = map
+                    .iter()
+                    .filter(|(_, g)| g.tenant_scope == scope)
+                    .min_by_key(|(_, g)| g.expires_at)
+                    .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest);
             }
         }
         map.insert(ticket.clone(), grant);
         ticket
     }
 
-    /// Validate a U1 open ticket, preserving `SEC-17` viewer-session binding on entry loads.
+    /// Validate a U1 open ticket on every sub-resource: viewer session (entry loads, or whenever
+    /// presented), tenant scope (whenever credentials are presented), and that the bundle is
+    /// still the attested bundle of the ticket's module version.
     pub async fn verify_open_ticket(
+        &self,
+        ticket: &str,
+        headers: &HeaderMap,
+        asset_path: &str,
+    ) -> CompassResult<UiOpenGrant> {
+        let grant = self.verify_open_ticket_session(ticket, headers, asset_path).await?;
+        let presented_scope = icon_cache_scope_for_headers(headers);
+        if presented_scope != "anonymous"
+            && grant.tenant_scope != "local"
+            && !constant_time_eq_str(&presented_scope, &grant.tenant_scope)
+        {
+            return Err(CompassError::AccessDenied(
+                "FORBIDDEN: plugin UI access ticket belongs to another viewer".into(),
+            ));
+        }
+        if let Some(hash) = grant.ui_bundle_hash.as_deref()
+            && !self.is_attested(hash, &grant.plugin_id, &grant.version).await
+        {
+            return Err(CompassError::AccessDenied(
+                "FORBIDDEN: plugin UI access ticket does not match an attested module version"
+                    .into(),
+            ));
+        }
+        Ok(grant)
+    }
+
+    async fn verify_open_ticket_session(
         &self,
         ticket: &str,
         headers: &HeaderMap,
@@ -799,6 +1191,7 @@ pub fn encode_ui_bundle_archive_json(
         kind: Some("ui_bundle.v1".to_owned()),
         ui_bundle_hash: Some(ui_bundle_hash.clone()),
         entry: Some(resolved_entry),
+        module_attestation: None,
         files: encoded_files,
     };
     let bytes = serde_json::to_vec(&payload)
@@ -986,6 +1379,7 @@ fn persist_bundle_to_disk(cache_root: &Path, bundle: &CachedUiBundle) -> Compass
     }
     std::fs::create_dir_all(cache_root)
         .map_err(|e| CompassError::Storage(format!("create ui-cache root: {e}")))?;
+    restrict_dir(cache_root)?;
 
     let tmp_dir = cache_root.join(format!(
         ".tmp-{}-{}",
@@ -1032,6 +1426,7 @@ fn load_verified_from_disk(cache_root: &Path, expected_hash: &str) -> CompassRes
     if !manifest_path.is_file() {
         return Ok(None);
     }
+    touch_lru(&dir);
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| CompassError::Storage(format!("read ui-cache manifest: {e}")))?;
     let manifest: DiskBundleManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
@@ -1097,12 +1492,112 @@ fn load_verified_from_disk(cache_root: &Path, expected_hash: &str) -> CompassRes
     }))
 }
 
+/// Write `bytes` to a temp file in the same directory, fsync, then rename over `path`.
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> CompassResult<()> {
-    let mut file = std::fs::File::create(path)
-        .map_err(|e| CompassError::Storage(format!("create ui-cache file: {e}")))?;
-    file.write_all(bytes)
+    let dir = path
+        .parent()
+        .ok_or_else(|| CompassError::Storage("ui-cache file has no parent".into()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| CompassError::Storage(format!("create ui-cache temp file: {e}")))?;
+    tmp.write_all(bytes)
         .map_err(|e| CompassError::Storage(format!("write ui-cache file: {e}")))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| CompassError::Storage(format!("sync ui-cache file: {e}")))?;
+    tmp.persist(path)
+        .map_err(|e| CompassError::Storage(format!("commit ui-cache file: {}", e.error)))?;
     Ok(())
+}
+
+/// Restrict the cache root to its owner (0700): bundles may belong to private org modules.
+fn restrict_dir(dir: &Path) -> CompassResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| CompassError::Storage(format!("chmod 0700 ui-cache root: {e}")))?;
+    }
+    Ok(())
+}
+
+const LRU_MARKER: &str = "last-used";
+
+fn touch_lru(bundle_dir: &Path) {
+    let _ = std::fs::write(bundle_dir.join(LRU_MARKER), b"");
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            total += dir_size(&entry.path());
+        } else {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+/// Evict least-recently-used bundles until the cache root fits `max_bytes`; `keep` is never evicted.
+fn enforce_disk_budget(cache_root: &Path, max_bytes: u64, keep: &str) {
+    touch_lru(&cache_root.join(keep));
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    let mut bundles: Vec<(std::time::SystemTime, u64, PathBuf, bool)> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !is_sha256_hex(&name) {
+                // Stale temp directories from interrupted writes are always reclaimable.
+                if name.starts_with(".tmp-") {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+                return None;
+            }
+            let used = std::fs::metadata(e.path().join(LRU_MARKER))
+                .and_then(|m| m.modified())
+                .or_else(|_| std::fs::metadata(e.path()).and_then(|m| m.modified()))
+                .unwrap_or(std::time::UNIX_EPOCH);
+            Some((used, dir_size(&e.path()), e.path(), name == keep))
+        })
+        .collect();
+    let mut total: u64 = bundles.iter().map(|b| b.1).sum();
+    if total <= max_bytes {
+        return;
+    }
+    bundles.sort_by_key(|b| b.0);
+    for (_, size, path, is_keep) in bundles {
+        if total <= max_bytes {
+            break;
+        }
+        if is_keep {
+            continue;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+fn embedded_attestation(body: &[u8]) -> Option<serde_json::Value> {
+    if body.first() != Some(&b'{') {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        module_attestation: Option<serde_json::Value>,
+    }
+    serde_json::from_slice::<Envelope>(body)
+        .ok()
+        .and_then(|e| e.module_attestation)
+        .filter(|v| !v.is_null())
 }
 
 fn collect_local_ui_files(
@@ -1729,5 +2224,206 @@ mod tests {
         let fresh2 = UiBundleCache::new(dir.path(), true);
         let err = fresh2.get_cached(&hash).await.unwrap_err();
         assert!(err.is_code(ErrorCode::UiBundleTampered));
+    }
+
+    async fn serve_once_forever(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn sample_files() -> BTreeMap<String, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        files.insert("index.html".to_owned(), b"<h1>Hi</h1>".to_vec());
+        files
+    }
+
+    #[tokio::test]
+    async fn u1_fetch_refuses_bundles_whose_attestation_is_missing_wrong_or_mis_sized() {
+        use biocompass_node_runtime::froglet_protocol::crypto::{generate_signing_key, public_key_hex};
+        use biocompass_node_runtime::module_attestation::{
+            ModuleAttestationPayload, sign_module_attestation,
+        };
+        let files = sample_files();
+        let (hash, archive) = encode_ui_bundle_archive_json(&files, Some("index.html")).unwrap();
+        let size: u64 = files.values().map(|v| v.len() as u64).sum();
+        let hub = generate_signing_key();
+        let other = generate_signing_key();
+        let attest = |key, h: &str| {
+            sign_module_attestation(
+                key,
+                ModuleAttestationPayload {
+                    plugin_id: "org/mod".into(),
+                    version: "1.0.0".into(),
+                    ui_bundle_hash: Some(h.to_owned()),
+                    ui_bundle_size_bytes: Some(size),
+                    image_digest: None,
+                    hub_key: String::new(),
+                    issued_at: 1,
+                    provider: None,
+                },
+            )
+            .unwrap()
+        };
+        let with_attestation = |doc: serde_json::Value| {
+            let mut v: serde_json::Value = serde_json::from_slice(&archive).unwrap();
+            v["module_attestation"] = doc;
+            serde_json::to_vec(&v).unwrap()
+        };
+        let embedded = |key: &str| UiTrust::Embedded {
+            pinned_hub_key: key.to_owned(),
+            plugin_id: "org/mod".into(),
+            version: "1.0.0".into(),
+        };
+        let pinned = public_key_hex(&hub);
+
+        // No attestation embedded -> refused.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = UiBundleCache::new(dir.path(), true);
+        let origin = serve_once_forever(archive.clone()).await;
+        let err = cache.get_or_fetch(&hash, &origin, None, &embedded(&pinned)).await.unwrap_err();
+        assert!(err.is_code(ErrorCode::UiBundleTampered), "{err}");
+        assert!(cache.get_cached(&hash).await.unwrap().is_none(), "nothing may be cached");
+
+        // Signed by a key other than the pinned one -> refused.
+        let origin = serve_once_forever(with_attestation(attest(&other, &hash))).await;
+        let err = cache.get_or_fetch(&hash, &origin, None, &embedded(&pinned)).await.unwrap_err();
+        assert!(err.to_string().contains("UI_ATTESTATION_INVALID"), "{err}");
+
+        // Verified listing attestation with the wrong size -> refused.
+        let wrong_size = VerifiedUiAttestation::for_tests("org/mod", "1.0.0", &hash, Some(size + 1));
+        let origin = serve_once_forever(archive.clone()).await;
+        let err = cache
+            .get_or_fetch(&hash, &origin, None, &UiTrust::Verified(wrong_size))
+            .await
+            .unwrap_err();
+        assert!(err.is_code(ErrorCode::UiBundleTampered), "{err}");
+
+        // Correct embedded attestation -> cached, and the module version is recorded as attested.
+        let origin = serve_once_forever(with_attestation(attest(&hub, &hash))).await;
+        let bundle = cache.get_or_fetch(&hash, &origin, None, &embedded(&pinned)).await.unwrap();
+        assert_eq!(bundle.ui_bundle_hash, hash);
+        assert!(cache.is_attested(&hash, "org/mod", "1.0.0").await);
+        // The cache root is private to the owner.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("ui-cache")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_cache_is_capped_and_evicts_least_recently_used_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ui-cache");
+        let mut hashes = Vec::new();
+        for i in 0..3u8 {
+            let mut files = BTreeMap::new();
+            files.insert("index.html".to_owned(), vec![b'a' + i; 4096]);
+            let (hash, bytes) = encode_ui_bundle_archive_json(&files, Some("index.html")).unwrap();
+            let bundle = parse_and_verify_ui_archive(&hash, None, &bytes).unwrap();
+            persist_bundle_to_disk(&root, &bundle).unwrap();
+            enforce_disk_budget(&root, 10_000, &hash);
+            hashes.push(hash);
+            // Distinct LRU timestamps.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Each bundle is ~4.4 KiB on disk; a 10 kB budget keeps the two most recent.
+        assert!(!root.join(&hashes[0]).exists(), "oldest bundle must be evicted");
+        assert!(root.join(&hashes[1]).exists());
+        assert!(root.join(&hashes[2]).exists());
+        // Touching an old bundle (a cache hit) protects it from the next eviction.
+        touch_lru(&root.join(&hashes[1]));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut files = BTreeMap::new();
+        files.insert("index.html".to_owned(), vec![b'z'; 4096]);
+        let (h4, bytes) = encode_ui_bundle_archive_json(&files, Some("index.html")).unwrap();
+        persist_bundle_to_disk(&root, &parse_and_verify_ui_archive(&h4, None, &bytes).unwrap()).unwrap();
+        enforce_disk_budget(&root, 10_000, &h4);
+        assert!(root.join(&hashes[1]).exists());
+        assert!(!root.join(&hashes[2]).exists());
+        let _ = UiBundleCache::new_with_disk_budget(dir.path(), 10_000);
+    }
+
+    fn grant(tenant: &str, hash: Option<&str>) -> UiOpenGrant {
+        UiOpenGrant {
+            tenant_scope: tenant.to_owned(),
+            org_id: Some("org".into()),
+            session_sha256: None,
+            plugin_id: "org/mod".into(),
+            version: "1.0.0".into(),
+            ui_bundle_hash: hash.map(str::to_owned),
+            local_ui_root: None,
+            entry: "index.html".into(),
+            expires_at: Utc::now().timestamp() + 300,
+        }
+    }
+
+    #[tokio::test]
+    async fn one_tenant_flooding_tickets_never_evicts_another_tenants_ticket() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = UiBundleCache::new(dir.path(), false);
+        let hash = "a".repeat(64);
+        cache
+            .record_attested(&VerifiedUiAttestation::for_tests("org/mod", "1.0.0", &hash, None))
+            .await;
+        let victim = cache.issue_open_ticket(grant("tenant-b", Some(&hash))).await;
+        for _ in 0..(MAX_OPEN_TICKETS + 10) {
+            cache.issue_open_ticket(grant("tenant-a", Some(&hash))).await;
+        }
+        let headers = HeaderMap::new();
+        cache.verify_open_ticket(&victim, &headers, "app.js").await.unwrap();
+        let tenant_a = cache
+            .tickets
+            .read()
+            .await
+            .values()
+            .filter(|g| g.tenant_scope == "tenant-a")
+            .count();
+        assert!(tenant_a <= MAX_OPEN_TICKETS_PER_TENANT);
+    }
+
+    #[tokio::test]
+    async fn open_tickets_are_bound_to_viewer_and_attested_module_version_on_every_subresource() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = UiBundleCache::new(dir.path(), false);
+        let hash = "a".repeat(64);
+        let mut viewer = HeaderMap::new();
+        viewer.insert(header::COOKIE, HeaderValue::from_static("bc_session=viewer-a"));
+        let scope = icon_cache_scope_for_headers(&viewer);
+
+        // A grant for a module version whose bundle was never attested is refused.
+        let unattested = cache.issue_open_ticket(grant(&scope, Some(&hash))).await;
+        assert!(cache.verify_open_ticket(&unattested, &viewer, "app.js").await.is_err());
+
+        cache
+            .record_attested(&VerifiedUiAttestation::for_tests("org/mod", "1.0.0", &hash, None))
+            .await;
+        let ticket = cache.issue_open_ticket(grant(&scope, Some(&hash))).await;
+        cache.verify_open_ticket(&ticket, &viewer, "app.js").await.unwrap();
+        // Another viewer's credentials on a sub-resource are refused.
+        let mut other = HeaderMap::new();
+        other.insert(header::COOKIE, HeaderValue::from_static("bc_session=viewer-b"));
+        assert!(cache.verify_open_ticket(&ticket, &other, "app.js").await.is_err());
+        // An attestation for a different version does not authorize this grant.
+        let mut g = grant(&scope, Some(&hash));
+        g.version = "2.0.0".into();
+        let wrong_version = cache.issue_open_ticket(g).await;
+        assert!(cache.verify_open_ticket(&wrong_version, &viewer, "app.js").await.is_err());
     }
 }

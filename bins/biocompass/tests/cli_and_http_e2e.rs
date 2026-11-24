@@ -199,8 +199,31 @@ async fn gate4_blackbox_cli_scaffold_docker_build_run_verify_and_http_csp_suite(
     );
 
     // 4. Black-box CLI: `biocompass verify-receipt` + upstream standalone `froglet-verify`
-    let verify_out = Command::new(bin)
+    // W6-1: without a trust anchor the command reports internal consistency only and fails.
+    let unanchored = Command::new(bin)
         .args(["verify-receipt", receipt_path.to_str().unwrap()])
+        .output()
+        .expect("run biocompass verify-receipt");
+    assert!(!unanchored.status.success(), "verify-receipt must fail without a trust anchor");
+    assert!(String::from_utf8_lossy(&unanchored.stderr).contains("no trust anchor"));
+    let chain: Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    let provider_key = chain[4]["signer"].as_str().unwrap().to_owned();
+    let requester_key = chain[3]["signer"].as_str().unwrap().to_owned();
+    // A wrong anchor is refused.
+    let wrong = Command::new(bin)
+        .args(["verify-receipt", "--trusted-key", &"ab".repeat(32), receipt_path.to_str().unwrap()])
+        .output()
+        .expect("run biocompass verify-receipt");
+    assert!(!wrong.status.success(), "untrusted signers must fail");
+    let verify_out = Command::new(bin)
+        .args([
+            "verify-receipt",
+            "--trusted-key",
+            &provider_key,
+            "--trusted-key",
+            &requester_key,
+            receipt_path.to_str().unwrap(),
+        ])
         .output()
         .expect("run biocompass verify-receipt");
     assert!(

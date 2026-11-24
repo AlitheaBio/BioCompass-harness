@@ -34,6 +34,10 @@ export interface ModuleCardActionModel {
   canRemove: boolean;
   /** Network run-only offers show Open + "Runs at <provider>" badge with run handoff until C3. */
   isNetworkRunOnly: boolean;
+  /** Remove for an Added (subscribed) network module: unsubscribes the offer. */
+  canUnsubscribe: boolean;
+  /** Offer ID to unsubscribe when `canUnsubscribe`. */
+  subscriptionId: string | null;
   runsAtProviderLabel: string | null;
   safeHandoffUrl: string | null;
 }
@@ -98,8 +102,9 @@ export function resolveModuleCardActions(
     | "removable_versions"
     | "detached_versions"
     | "launch_url"
-  >,
+  > & Partial<Pick<PluginSummary, "marketplace_offer_id" | "manifest">>,
   isLocalWorkspace: boolean,
+  subscribedOfferIds: ReadonlySet<string> = new Set(),
 ): ModuleCardActionModel {
   const source = inferModuleSource(plugin);
   const runsIn = inferModuleRunsIn(plugin);
@@ -130,6 +135,12 @@ export function resolveModuleCardActions(
   const safeHandoffUrl = plugin.launch_url
     ? sanitizeHandoffUrl(plugin.launch_url)
     : null;
+  const subscriptionId =
+    (plugin.marketplace_offer_id && subscribedOfferIds.has(plugin.marketplace_offer_id)
+      ? plugin.marketplace_offer_id
+      : null) ??
+    (plugin.manifest?.id && subscribedOfferIds.has(plugin.manifest.id) ? plugin.manifest.id : null);
+  const canUnsubscribe = isLocalWorkspace && source === "network_provider" && subscriptionId !== null;
 
   return {
     sourceLabel: formatModuleSourceLabel(plugin),
@@ -140,8 +151,44 @@ export function resolveModuleCardActions(
     canInstall,
     canRemove,
     isNetworkRunOnly,
+    canUnsubscribe,
+    subscriptionId,
     runsAtProviderLabel,
     safeHandoffUrl,
+  };
+}
+
+/**
+ * U-4: a network run-only module's UI opens in this workspace, but its runs execute at the
+ * provider (brokered runs arrive with C3). Returns the explanation shown to the user and sent
+ * back to the module when its UI asks to run, or `null` when the module runs here.
+ */
+export function networkRunHandoff(
+  plugin: Pick<
+    PluginSummary,
+    | "source"
+    | "runs_in"
+    | "execution_target"
+    | "provider_label"
+    | "can_install"
+    | "installed_locally"
+    | "installed"
+    | "launch_url"
+  >,
+): { message: string; handoffUrl: string | null } | null {
+  const source = inferModuleSource(plugin);
+  const runsIn = inferModuleRunsIn(plugin);
+  const installedLocally = plugin.installed_locally ?? (plugin.installed && runsIn === "local");
+  if (!(source === "network_provider" || runsIn === "network_provider") || installedLocally) {
+    return null;
+  }
+  const provider = plugin.provider_label?.trim() || "its provider";
+  const handoffUrl = plugin.launch_url ? sanitizeHandoffUrl(plugin.launch_url) : null;
+  return {
+    message:
+      `This module runs at ${provider}. Runs cannot be started from this workspace yet; ` +
+      (handoffUrl ? "continue at the provider to run it." : "ask the provider to run it."),
+    handoffUrl,
   };
 }
 
