@@ -33,7 +33,7 @@ export function ClientCloudImportPanel({
   const [importVersion, setImportVersion] = useState("");
   const [importHubUrl, setImportHubUrl] = useState("");
 
-  const [catOfferId, setCatOfferId] = useState("");
+  const [catPeerId, setCatPeerId] = useState("");
   const [catId, setCatId] = useState("");
   const [catHubUrl, setCatHubUrl] = useState("");
 
@@ -96,10 +96,10 @@ export function ClientCloudImportPanel({
             e.preventDefault();
             void runAction(async () => {
               const res = await registerClientCloudOutbound({
-                ...(hubUrl.trim() ? { hub_url: hubUrl.trim() } : {}),
+                ...(hubUrl.trim() ? { target_hub_url: hubUrl.trim() } : {}),
                 ...(orgName.trim() ? { org_name: orgName.trim() } : {}),
               });
-              return res.message ?? `Outbound registration submitted (${res.status}).`;
+              return `Outbound registration ${res.registered ? "submitted" : "pending"} for peer ${res.local_peer_id} -> ${res.target_hub_url}.`;
             });
           }}
         >
@@ -175,14 +175,11 @@ export function ClientCloudImportPanel({
                           void runAction(async () => {
                             const res = await importFederatedModule({
                               peer_id: item.peer_id,
-                              offer_id: item.offer.offer_id,
+                              marketplace_offer_id: item.offer.offer_id,
                               plugin_id: item.offer.plugin_id!,
                               version: item.offer.version!,
                             });
-                            return (
-                              res.message ??
-                              `Imported ${res.plugin_id ?? item.offer.plugin_id}@${res.version ?? item.offer.version} into Client Cloud.`
-                            );
+                            return `Imported ${res.plugin_id}@${res.version} (${res.visibility}, digest ${res.image_digest.slice(0, 19)}…).`;
                           })
                         }
                       >
@@ -201,25 +198,24 @@ export function ClientCloudImportPanel({
           style={{ marginTop: 10 }}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!importOfferId.trim() || !importPluginId.trim() || !importVersion.trim()) return;
+            if (!importPluginId.trim() || !importVersion.trim()) return;
             void runAction(async () => {
               const res = await importFederatedModule({
-                ...(importHubUrl.trim() ? { hub_url: importHubUrl.trim() } : {}),
-                offer_id: importOfferId.trim(),
+                ...(importHubUrl.trim() ? { source_hub_url: importHubUrl.trim() } : {}),
+                ...(importOfferId.trim() ? { marketplace_offer_id: importOfferId.trim() } : {}),
                 plugin_id: importPluginId.trim(),
                 version: importVersion.trim(),
               });
-              return res.message ?? `Imported module ${importPluginId}@${importVersion} (${res.status}).`;
+              return `Imported module ${res.plugin_id}@${res.version} (${res.visibility}, digest ${res.image_digest.slice(0, 19)}…).`;
             });
           }}
         >
           <label className="bc-field">
-            <span className="bc-field-label">Offer ID</span>
+            <span className="bc-field-label">Marketplace Offer ID (optional)</span>
             <input
               className="bc-input mono"
               data-testid="u4-import-offer-id"
               placeholder="mo-..."
-              required
               value={importOfferId}
               onChange={(e) => setImportOfferId(e.target.value)}
             />
@@ -259,7 +255,7 @@ export function ClientCloudImportPanel({
               type="submit"
               className="bc-btn bc-btn-secondary"
               data-testid="u4-import-module-btn"
-              disabled={busy || !importOfferId.trim() || !importPluginId.trim() || !importVersion.trim()}
+              disabled={busy || !importPluginId.trim() || !importVersion.trim()}
             >
               Import Module
             </button>
@@ -350,10 +346,9 @@ export function ClientCloudImportPanel({
                           void runAction(async () => {
                             const res = await importFederatedCatalog({
                               peer_id: item.peer_id,
-                              offer_id: item.offer.offer_id,
                               catalog_id: item.offer.catalog_id!,
                             });
-                            return res.message ?? `Imported licensed catalog copy ${item.offer.catalog_id}.`;
+                            return `Imported licensed catalog copy ${res.catalog.id} (${res.shard_count} shard${res.shard_count === 1 ? "" : "s"}).`;
                           })
                         }
                       >
@@ -372,27 +367,17 @@ export function ClientCloudImportPanel({
           style={{ marginTop: 12 }}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!catOfferId.trim() || !catId.trim()) return;
+            if (!catId.trim()) return;
             void runAction(async () => {
               const res = await importFederatedCatalog({
-                ...(catHubUrl.trim() ? { hub_url: catHubUrl.trim() } : {}),
-                offer_id: catOfferId.trim(),
+                ...(catPeerId.trim() ? { peer_id: catPeerId.trim() } : {}),
+                ...(catHubUrl.trim() ? { source_hub_url: catHubUrl.trim() } : {}),
                 catalog_id: catId.trim(),
               });
-              return res.message ?? `Imported licensed catalog copy ${catId} (${res.status}).`;
+              return `Imported licensed catalog copy ${res.catalog.id} (${res.shard_count} shard${res.shard_count === 1 ? "" : "s"}).`;
             });
           }}
         >
-          <label className="bc-field">
-            <span className="bc-field-label">Dataset Offer ID</span>
-            <input
-              className="bc-input mono"
-              placeholder="do-..."
-              required
-              value={catOfferId}
-              onChange={(e) => setCatOfferId(e.target.value)}
-            />
-          </label>
           <label className="bc-field">
             <span className="bc-field-label">Catalog ID</span>
             <input
@@ -401,6 +386,15 @@ export function ClientCloudImportPanel({
               required
               value={catId}
               onChange={(e) => setCatId(e.target.value)}
+            />
+          </label>
+          <label className="bc-field">
+            <span className="bc-field-label">Federation Peer ID (optional)</span>
+            <input
+              className="bc-input mono"
+              placeholder="peer-alithea"
+              value={catPeerId}
+              onChange={(e) => setCatPeerId(e.target.value)}
             />
           </label>
           <label className="bc-field">
@@ -418,7 +412,7 @@ export function ClientCloudImportPanel({
               type="submit"
               className="bc-btn bc-btn-secondary"
               data-testid="u4-import-catalog-btn"
-              disabled={busy || !catOfferId.trim() || !catId.trim()}
+              disabled={busy || !catId.trim()}
             >
               Import Licensed Catalog Copy
             </button>

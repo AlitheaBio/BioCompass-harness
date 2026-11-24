@@ -12,7 +12,6 @@ import type {
   CatalogManifest,
   CatalogQuery,
   CatalogQueryResult,
-  ClientCloudImportResult,
   CreateAgentCredentialInput,
   CreatedAgentCredential,
   CreatedApiKey,
@@ -33,6 +32,8 @@ import type {
   GrantAccessLevel,
   GrantUsageSummary,
   HealthStatus,
+  ImportedFederatedCatalogResult,
+  ImportedFederatedModuleResult,
   IngestFormat,
   IngestMode,
   HostedHlaPublication,
@@ -1676,18 +1677,27 @@ export function publishModuleOffer(payload: Pick<ModuleOffer,
   });
 }
 
-export function fetchModuleOfferPrice(offerId: string): Promise<NegotiatedModuleOfferPrice | null> {
-  return apiFetch<NegotiatedModuleOfferPrice | null>(`${moduleOfferPath(offerId)}/price`);
+export async function fetchModuleOfferPrice(
+  offerId: string,
+): Promise<NegotiatedModuleOfferPrice | null> {
+  const data = await apiFetch<{ offer_id: string; price: NegotiatedModuleOfferPrice | null }>(
+    `${moduleOfferPath(offerId)}/price`,
+  );
+  return data.price ?? null;
 }
 
-export function updateModuleOfferPrice(
+export async function updateModuleOfferPrice(
   offerId: string,
-  payload: { manifest_offer_id: string; price_milli_act: number; base_fee_milli_act: number },
+  payload: { manifest_offer_id?: string; price_milli_act: number; base_fee_milli_act: number },
 ): Promise<NegotiatedModuleOfferPrice> {
-  return apiFetch<NegotiatedModuleOfferPrice>(`${moduleOfferPath(offerId)}/price`, {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
+  const data = await apiFetch<{ price: NegotiatedModuleOfferPrice }>(
+    `${moduleOfferPath(offerId)}/price`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
+  return data.price;
 }
 
 function moduleOfferPath(id: string): string {
@@ -2103,15 +2113,23 @@ export async function revokeAgentCredential(
 // Milestone C1 — H4 Billing Statements & Outbound Webhooks
 // ---------------------------------------------------------------------------
 
+function toRfc3339StatementBound(raw: string, bound: "start" | "end"): string {
+  const trimmed = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return bound === "start" ? `${trimmed}T00:00:00Z` : `${trimmed}T23:59:59Z`;
+  }
+  return trimmed;
+}
+
 export async function fetchBillingStatement(params?: {
   from?: string;
   to?: string;
   credential_id?: string;
 }): Promise<BillingStatement> {
   const qs = new URLSearchParams();
-  if (params?.from) qs.set("from", params.from);
-  if (params?.to) qs.set("to", params.to);
-  if (params?.credential_id) qs.set("credential_id", params.credential_id);
+  if (params?.from?.trim()) qs.set("from", toRfc3339StatementBound(params.from, "start"));
+  if (params?.to?.trim()) qs.set("to", toRfc3339StatementBound(params.to, "end"));
+  if (params?.credential_id?.trim()) qs.set("credential_id", params.credential_id.trim());
   const query = qs.toString();
   return apiFetch<BillingStatement>(
     `/api/v1/billing/statement${query ? `?${query}` : ""}`,
@@ -2119,16 +2137,17 @@ export async function fetchBillingStatement(params?: {
 }
 
 export async function fetchWebhooks(): Promise<WebhookEndpointRecord[]> {
-  const data = await apiFetch<{ endpoints?: WebhookEndpointRecord[]; webhooks?: WebhookEndpointRecord[] }>(
+  const data = await apiFetch<{ webhooks: WebhookEndpointRecord[] }>(
     "/api/v1/webhooks",
   );
-  return data.endpoints ?? data.webhooks ?? [];
+  return data.webhooks ?? [];
 }
 
 export async function createWebhook(payload: {
   label: string;
   url: string;
   event_types: string[];
+  enabled?: boolean;
 }): Promise<CreatedWebhookEndpoint> {
   return apiFetch<CreatedWebhookEndpoint>("/api/v1/webhooks", {
     method: "POST",
@@ -2140,14 +2159,14 @@ export async function updateWebhook(
   endpointId: string,
   payload: { label?: string; url?: string; event_types?: string[]; enabled?: boolean },
 ): Promise<WebhookEndpointRecord> {
-  const data = await apiFetch<{ endpoint?: WebhookEndpointRecord } & Partial<WebhookEndpointRecord>>(
+  const data = await apiFetch<{ webhook: WebhookEndpointRecord }>(
     `/api/v1/webhooks/${encodeURIComponent(endpointId)}`,
     {
       method: "PATCH",
       body: JSON.stringify(payload),
     },
   );
-  return (data.endpoint ?? data) as WebhookEndpointRecord;
+  return data.webhook;
 }
 
 export async function deleteWebhook(endpointId: string): Promise<void> {
@@ -2189,10 +2208,11 @@ export async function createDocument(payload: {
   content: Record<string, unknown>;
   project_id?: string | null;
 }): Promise<ModuleDocumentDetail> {
-  return apiFetch<ModuleDocumentDetail>("/api/v1/documents", {
+  const data = await apiFetch<{ document: ModuleDocumentDetail }>("/api/v1/documents", {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  return data.document;
 }
 
 export async function fetchDocument(
@@ -2200,22 +2220,24 @@ export async function fetchDocument(
   version?: number,
 ): Promise<ModuleDocumentDetail> {
   const qs = version != null ? `?version=${encodeURIComponent(String(version))}` : "";
-  return apiFetch<ModuleDocumentDetail>(
+  const data = await apiFetch<{ document: ModuleDocumentDetail }>(
     `/api/v1/documents/${encodeURIComponent(docId)}${qs}`,
   );
+  return data.document;
 }
 
 export async function updateDocument(
   docId: string,
   payload: { base_version: number; content: Record<string, unknown>; title?: string },
 ): Promise<ModuleDocumentDetail> {
-  return apiFetch<ModuleDocumentDetail>(
+  const data = await apiFetch<{ document: ModuleDocumentDetail }>(
     `/api/v1/documents/${encodeURIComponent(docId)}`,
     {
       method: "PUT",
       body: JSON.stringify(payload),
     },
   );
+  return data.document;
 }
 
 export async function deleteDocument(docId: string): Promise<void> {
@@ -2227,7 +2249,7 @@ export async function deleteDocument(docId: string): Promise<void> {
 export async function fetchDocumentVersions(
   docId: string,
 ): Promise<ModuleDocumentVersionRecord[]> {
-  const data = await apiFetch<{ versions: ModuleDocumentVersionRecord[] }>(
+  const data = await apiFetch<{ doc_id?: string; versions: ModuleDocumentVersionRecord[] }>(
     `/api/v1/documents/${encodeURIComponent(docId)}/versions`,
   );
   return data.versions ?? [];
@@ -2244,8 +2266,11 @@ export async function fetchRunProvenance(runId: string): Promise<ProvenanceBundl
 // ---------------------------------------------------------------------------
 
 export async function registerClientCloudOutbound(payload?: {
-  hub_url?: string;
+  target_hub_url?: string;
   org_name?: string;
+  label?: string;
+  peer_id?: string;
+  target_peer_pubkey?: string;
 }): Promise<OutboundRegistrationResult> {
   return apiFetch<OutboundRegistrationResult>("/api/v1/admin/federation/register-outbound", {
     method: "POST",
@@ -2255,12 +2280,15 @@ export async function registerClientCloudOutbound(payload?: {
 
 export async function importFederatedModule(payload: {
   peer_id?: string;
-  hub_url?: string;
-  offer_id: string;
+  source_hub_url?: string;
   plugin_id: string;
   version: string;
-}): Promise<ClientCloudImportResult> {
-  return apiFetch<ClientCloudImportResult>("/api/v1/admin/federation/import-module", {
+  marketplace_offer_id?: string;
+  expected_ui_bundle_hash?: string;
+  source_auth_header?: string;
+  visibility?: string;
+}): Promise<ImportedFederatedModuleResult> {
+  return apiFetch<ImportedFederatedModuleResult>("/api/v1/admin/federation/import-module", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -2283,11 +2311,11 @@ export async function updateCatalogDataPlacement(
 
 export async function importFederatedCatalog(payload: {
   peer_id?: string;
-  hub_url?: string;
-  offer_id: string;
+  source_hub_url?: string;
   catalog_id: string;
-}): Promise<ClientCloudImportResult> {
-  return apiFetch<ClientCloudImportResult>("/api/v1/admin/federation/import-catalog", {
+  source_auth_header?: string;
+}): Promise<ImportedFederatedCatalogResult> {
+  return apiFetch<ImportedFederatedCatalogResult>("/api/v1/admin/federation/import-catalog", {
     method: "POST",
     body: JSON.stringify(payload),
   });

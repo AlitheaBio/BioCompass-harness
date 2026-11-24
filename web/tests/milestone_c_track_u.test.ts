@@ -191,6 +191,28 @@ test("[C1/U3/U4] API client and Enterprise UI panels wire every Milestone C1 rou
   const docsSrc = readSrc("components/DocumentsPanel.tsx");
   assert.match(docsSrc, /DOC_VERSION_CONFLICT/);
   assert.match(docsSrc, /document-version-conflict-banner/);
+  assert.doesNotMatch(docsSrc, /content_json/);
+
+  const stmtSrc = readSrc("components/BillingStatementPanel.tsx");
+  assert.match(stmtSrc, /g\.plugin_id/);
+  assert.match(stmtSrc, /g\.catalog_id/);
+  assert.match(stmtSrc, /g\.dataset_fee_milli_eur/);
+  assert.match(stmtSrc, /entry\.settled_milli_eur/);
+
+  const offersSrc = readSrc("components/ModuleOffersView.tsx");
+  assert.match(offersSrc, /offer\.negotiated_price/);
+
+  const u4Src = readSrc("components/ClientCloudImportPanel.tsx");
+  assert.match(u4Src, /target_hub_url/);
+  assert.match(u4Src, /source_hub_url/);
+  assert.match(u4Src, /marketplace_offer_id/);
+  assert.match(u4Src, /res\.shard_count/);
+
+  assert.match(apiSrc, /toRfc3339StatementBound/);
+  assert.match(apiSrc, /data\.webhooks/);
+  assert.match(apiSrc, /data\.webhook/);
+  assert.match(apiSrc, /data\.price/);
+  assert.match(apiSrc, /data\.document/);
 
   const provSrc = readSrc("components/ProvenancePanel.tsx");
   assert.match(provSrc, /bc\.provenance\.v1/);

@@ -337,12 +337,12 @@ export interface ModuleOffer {
   action: ModuleOfferAction;
   scope: ModuleOfferScope;
   approval_required: boolean;
+  serving_org_id?: string | null;
+  target_node_id?: string | null;
   access?: ModuleOfferAccess;
+  negotiated_price?: NegotiatedModuleOfferPrice | null;
   ui_bundle_hash?: string | null;
   ui_bundle_size_bytes?: number | null;
-  manifest_offer_id?: string | null;
-  price_milli_act?: number | null;
-  base_fee_milli_act?: number | null;
 }
 
 export interface FederatedOfferSummary {
@@ -1127,7 +1127,7 @@ export interface NegotiatedModuleOfferPrice {
   manifest_offer_id: string;
   price_milli_act: number;
   base_fee_milli_act: number;
-  updated_at?: string;
+  updated_at: string;
 }
 
 export interface BillingStatementTotals {
@@ -1138,26 +1138,41 @@ export interface BillingStatementTotals {
   refunded_milli_eur: number;
 }
 
-export interface BillingStatementGroup {
-  key: string;
-  label?: string;
+export interface BillingStatementModuleBreakdown {
+  plugin_id: string;
   run_count: number;
   total_milli_eur: number;
-  module_fee_milli_eur?: number;
-  dataset_fee_milli_eur?: number;
+  module_fee_milli_eur: number;
+}
+
+export interface BillingStatementDatasetBreakdown {
+  catalog_id: string;
+  run_count: number;
+  dataset_fee_milli_eur: number;
+}
+
+export interface BillingStatementCredentialBreakdown {
+  credential_id?: string | null;
+  label: string;
+  run_count: number;
+  total_milli_eur: number;
 }
 
 export interface BillingStatementEntry {
   run_id: string;
   plugin_id: string;
+  plugin_version: string;
   catalog_id?: string | null;
   agent_credential_id?: string | null;
+  agent_credential_label?: string | null;
   status: string;
-  total_milli_eur: number;
+  settled_milli_eur: number;
+  refunded_milli_eur: number;
   module_fee_milli_eur: number;
   dataset_fee_milli_eur: number;
   receipt_hash?: string | null;
   created_at: string;
+  completed_at?: string | null;
 }
 
 export interface BillingStatement {
@@ -1166,9 +1181,9 @@ export interface BillingStatement {
   from?: string | null;
   to?: string | null;
   totals: BillingStatementTotals;
-  by_module: BillingStatementGroup[];
-  by_dataset: BillingStatementGroup[];
-  by_credential: BillingStatementGroup[];
+  by_module: BillingStatementModuleBreakdown[];
+  by_dataset: BillingStatementDatasetBreakdown[];
+  by_credential: BillingStatementCredentialBreakdown[];
   entries: BillingStatementEntry[];
 }
 
@@ -1186,9 +1201,8 @@ export interface WebhookEndpointRecord {
 }
 
 export interface CreatedWebhookEndpoint {
-  endpoint: WebhookEndpointRecord;
-  signing_secret?: string;
-  secret?: string;
+  webhook: WebhookEndpointRecord;
+  signing_secret: string;
 }
 
 export interface WebhookDeliveryRecord {
@@ -1199,6 +1213,7 @@ export interface WebhookDeliveryRecord {
   status: "pending" | "delivered" | "failed" | "dead_letter" | string;
   attempt_count: number;
   max_attempts: number;
+  next_attempt_at?: string | null;
   last_http_status?: number | null;
   last_error?: string | null;
   delivered_at?: string | null;
@@ -1221,7 +1236,6 @@ export interface ModuleDocumentRecord {
 export interface ModuleDocumentVersionRecord {
   doc_id: string;
   version: number;
-  content_json: Record<string, unknown>;
   content_sha256: string;
   base_version: number;
   author_user_id?: string | null;
@@ -1229,9 +1243,14 @@ export interface ModuleDocumentVersionRecord {
   created_at: string;
 }
 
-export interface ModuleDocumentDetail {
-  document: ModuleDocumentRecord;
-  version: ModuleDocumentVersionRecord;
+export interface ModuleDocumentDetail extends ModuleDocumentRecord {
+  version: number;
+  content: Record<string, unknown>;
+  content_sha256: string;
+  base_version: number;
+  author_user_id?: string | null;
+  author_credential_id?: string | null;
+  version_created_at: string;
 }
 
 export interface ProvenanceLineageEdge {
@@ -1268,18 +1287,30 @@ export interface ProvenanceBundle {
 export type CatalogDataPlacement = "stays_with_alithea" | "licensable_copy";
 
 export interface OutboundRegistrationResult {
-  status: string;
-  peer_id?: string;
-  hub_url?: string;
-  message?: string;
+  registered: boolean;
+  target_hub_url: string;
+  local_peer_id: string;
+  local_peer_pubkey: string;
+  recorded_provider_peer_id?: string | null;
+  remote_response: Record<string, unknown>;
 }
 
-export interface ClientCloudImportResult {
-  status: string;
-  plugin_id?: string;
-  version?: string;
-  catalog_id?: string;
-  image_digest?: string;
+export interface ImportedFederatedModuleResult {
+  imported: boolean;
+  plugin_id: string;
+  version: string;
+  image_digest: string;
   ui_bundle_hash?: string | null;
-  message?: string;
+  visibility: string;
+}
+
+export interface ImportedFederatedCatalogResult {
+  imported: boolean;
+  catalog: {
+    id: string;
+    name?: string;
+    latest_snapshot_id?: number;
+    dataset_digest?: string;
+  };
+  shard_count: number;
 }

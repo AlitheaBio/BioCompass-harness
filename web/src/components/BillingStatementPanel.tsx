@@ -140,8 +140,8 @@ export function BillingStatementPanel() {
                 </thead>
                 <tbody>
                   {statement.by_module.map((g) => (
-                    <tr key={g.key}>
-                      <td className="mono">{g.label ?? g.key}</td>
+                    <tr key={g.plugin_id}>
+                      <td className="mono">{g.plugin_id}</td>
                       <td className="mono">{g.run_count}</td>
                       <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.total_milli_eur)}</td>
                     </tr>
@@ -162,10 +162,10 @@ export function BillingStatementPanel() {
                 </thead>
                 <tbody>
                   {statement.by_dataset.map((g) => (
-                    <tr key={g.key}>
-                      <td className="mono">{g.label ?? g.key}</td>
+                    <tr key={g.catalog_id}>
+                      <td className="mono">{g.catalog_id}</td>
                       <td className="mono">{g.run_count}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.total_milli_eur)}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.dataset_fee_milli_eur)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -184,8 +184,8 @@ export function BillingStatementPanel() {
                 </thead>
                 <tbody>
                   {statement.by_credential.map((g) => (
-                    <tr key={g.key}>
-                      <td className="mono">{g.label ?? g.key}</td>
+                    <tr key={g.credential_id ?? g.label}>
+                      <td className="mono">{g.label}</td>
                       <td className="mono">{g.run_count}</td>
                       <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.total_milli_eur)}</td>
                     </tr>
@@ -207,7 +207,7 @@ export function BillingStatementPanel() {
                   <th>Run ID</th>
                   <th>Module</th>
                   <th>Credential</th>
-                  <th>Module / Dataset Fee</th>
+                  <th>Settled / Fees</th>
                   <th>Receipt Hash</th>
                   <th>Timestamp</th>
                 </tr>
@@ -217,9 +217,11 @@ export function BillingStatementPanel() {
                   <tr key={entry.run_id}>
                     <td className="mono">{entry.run_id.slice(0, 14)}</td>
                     <td className="mono">{entry.plugin_id}</td>
-                    <td className="mono">{entry.agent_credential_id ?? "human"}</td>
                     <td className="mono">
-                      {formatMilliAct(entry.module_fee_milli_eur)} + {formatMilliAct(entry.dataset_fee_milli_eur)}
+                      {entry.agent_credential_label ?? entry.agent_credential_id ?? "human"}
+                    </td>
+                    <td className="mono">
+                      {formatMilliAct(entry.settled_milli_eur)} ({formatMilliAct(entry.module_fee_milli_eur)} + {formatMilliAct(entry.dataset_fee_milli_eur)})
                     </td>
                     <td className="mono">{entry.receipt_hash ? `${entry.receipt_hash.slice(0, 16)}…` : "—"}</td>
                     <td className="bc-caption mono">{new Date(entry.created_at).toLocaleString()}</td>

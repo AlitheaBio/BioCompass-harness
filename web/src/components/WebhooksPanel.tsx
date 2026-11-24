@@ -113,7 +113,7 @@ export function WebhooksPanel() {
     }
   };
 
-  const createdSecret = created?.signing_secret ?? created?.secret ?? null;
+  const createdSecret = created?.signing_secret ?? null;
 
   return (
     <div className="bc-settings-stack" data-testid="webhooks-panel">

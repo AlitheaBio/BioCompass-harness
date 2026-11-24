@@ -229,10 +229,10 @@ export function ModuleOffersView({
                     <td className="mono">{offer.plugin_id} · {offer.version}</td>
                     <td>
                       <div>{scopeLabels[offer.scope]}</div>
-                      {offer.price_milli_act != null && (
+                      {offer.negotiated_price != null && (
                         <div className="bc-caption mono" data-testid={`module-offer-price-${offer.offer_id}`}>
-                          Negotiated: {formatMilliAct(offer.price_milli_act)}
-                          {offer.base_fee_milli_act ? ` (+${formatMilliAct(offer.base_fee_milli_act)} base)` : ""}
+                          Negotiated ({offer.negotiated_price.manifest_offer_id}): {formatMilliAct(offer.negotiated_price.price_milli_act)}
+                          {offer.negotiated_price.base_fee_milli_act ? ` (+${formatMilliAct(offer.negotiated_price.base_fee_milli_act)} base)` : ""}
                         </div>
                       )}
                       {canApprove && offer.scope === "custom_shared" && offer.publisher_org_id === principal.org_id && (
@@ -279,12 +279,12 @@ export function ModuleOffersView({
                             style={{ marginTop: 4 }}
                             onClick={() => {
                               setEditingPriceOfferId(offer.offer_id);
-                              setEditManifestOfferId(offer.manifest_offer_id ?? "standard");
+                              setEditManifestOfferId(offer.negotiated_price?.manifest_offer_id ?? "standard");
                               setEditPriceEur(
-                                offer.price_milli_act != null ? (offer.price_milli_act / 1000).toFixed(2) : "",
+                                offer.negotiated_price != null ? (offer.negotiated_price.price_milli_act / 1000).toFixed(2) : "",
                               );
                               setEditBaseFeeEur(
-                                offer.base_fee_milli_act != null ? (offer.base_fee_milli_act / 1000).toFixed(2) : "0",
+                                offer.negotiated_price != null ? (offer.negotiated_price.base_fee_milli_act / 1000).toFixed(2) : "0",
                               );
                             }}
                           >

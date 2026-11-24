@@ -79,9 +79,9 @@ export function DocumentsPanel({
       ]);
       setSelectedDetail(detail);
       setVersions(history);
-      setEditTitle(detail.document.title);
-      setEditContentText(JSON.stringify(detail.version.content_json, null, 2));
-      setBaseVersion(detail.version.version);
+      setEditTitle(detail.title);
+      setEditContentText(JSON.stringify(detail.content, null, 2));
+      setBaseVersion(detail.version);
     } catch (err: unknown) {
       setError(formatErrorInline(err));
     } finally {
@@ -116,11 +116,21 @@ export function DocumentsPanel({
       });
       setNewTitle("");
       setSelectedDetail(created);
-      setEditTitle(created.document.title);
-      setEditContentText(JSON.stringify(created.version.content_json, null, 2));
-      setBaseVersion(created.version.version);
-      setVersions([created.version]);
-      setNotice(`Created "${created.document.title}" (v${created.version.version}).`);
+      setEditTitle(created.title);
+      setEditContentText(JSON.stringify(created.content, null, 2));
+      setBaseVersion(created.version);
+      setVersions([
+        {
+          doc_id: created.id,
+          version: created.version,
+          content_sha256: created.content_sha256,
+          base_version: created.base_version,
+          author_user_id: created.author_user_id,
+          author_credential_id: created.author_credential_id,
+          created_at: created.version_created_at,
+        },
+      ]);
+      setNotice(`Created "${created.title}" (v${created.version}).`);
       await refreshList();
     } catch (err: unknown) {
       setError(formatErrorInline(err));
@@ -148,15 +158,15 @@ export function DocumentsPanel({
     setConflictMsg(null);
     setNotice(null);
     try {
-      const updated = await updateDocument(selectedDetail.document.id, {
+      const updated = await updateDocument(selectedDetail.id, {
         base_version: baseVersion,
         content: parsed,
-        title: editTitle.trim() || selectedDetail.document.title,
+        title: editTitle.trim() || selectedDetail.title,
       });
       setSelectedDetail(updated);
-      setBaseVersion(updated.version.version);
-      setVersions(await fetchDocumentVersions(updated.document.id));
-      setNotice(`Saved version v${updated.version.version} (${updated.version.content_sha256.slice(0, 12)}).`);
+      setBaseVersion(updated.version);
+      setVersions(await fetchDocumentVersions(updated.id));
+      setNotice(`Saved version v${updated.version} (${updated.content_sha256.slice(0, 12)}).`);
       await refreshList();
     } catch (err: unknown) {
       if (err instanceof ApiClientError && (err.status === 409 || err.code === "DOC_VERSION_CONFLICT")) {
@@ -176,7 +186,7 @@ export function DocumentsPanel({
     setError(null);
     try {
       await deleteDocument(docId);
-      if (selectedDetail?.document.id === docId) {
+      if (selectedDetail?.id === docId) {
         setSelectedDetail(null);
         setVersions([]);
       }
@@ -208,7 +218,7 @@ export function DocumentsPanel({
               type="button"
               className="bc-btn bc-btn-secondary bc-btn-sm"
               data-testid="document-reload-latest-btn"
-              onClick={() => void openDocument(selectedDetail.document.id)}
+              onClick={() => void openDocument(selectedDetail.id)}
             >
               Reload Latest
             </button>
@@ -286,11 +296,11 @@ export function DocumentsPanel({
           <div className="bc-card-header">
             <div>
               <span className="bc-card-title">
-                {selectedDetail.document.title} · <span className="mono">v{baseVersion}</span>
+                {selectedDetail.title} · <span className="mono">v{baseVersion}</span>
               </span>
               <div className="bc-caption mono">
-                SHA-256: {selectedDetail.version.content_sha256.slice(0, 16)}… · Author:{" "}
-                {selectedDetail.version.author_credential_id ?? selectedDetail.version.author_user_id ?? selectedDetail.document.created_by}
+                SHA-256: {selectedDetail.content_sha256.slice(0, 16)}… · Author:{" "}
+                {selectedDetail.author_credential_id ?? selectedDetail.author_user_id ?? selectedDetail.created_by}
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -300,9 +310,9 @@ export function DocumentsPanel({
                   className="bc-btn bc-btn-secondary bc-btn-sm"
                   onClick={() =>
                     onLoadParams(
-                      selectedDetail.version.content_json,
-                      selectedDetail.document.id,
-                      selectedDetail.version.version,
+                      selectedDetail.content,
+                      selectedDetail.id,
+                      selectedDetail.version,
                     )
                   }
                 >
@@ -353,7 +363,7 @@ export function DocumentsPanel({
                     key={ver.version}
                     type="button"
                     className={`bc-btn bc-btn-sm ${ver.version === baseVersion ? "bc-btn-primary" : "bc-btn-ghost"}`}
-                    onClick={() => void openDocument(selectedDetail.document.id, ver.version)}
+                    onClick={() => void openDocument(selectedDetail.id, ver.version)}
                   >
                     v{ver.version} ({ver.content_sha256.slice(0, 8)})
                   </button>

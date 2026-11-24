@@ -426,6 +426,11 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         return json({ revoked: true, credential_id: "cred-1" });
       }
       if (pathname === "billing/statement") {
+        const searchParams = new URL(req.url()).searchParams;
+        const fromParam = searchParams.get("from");
+        const toParam = searchParams.get("to");
+        if (fromParam) expect(fromParam).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+        if (toParam) expect(toParam).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
         return json({
           org_id: "org-pharma",
           currency: "EUR",
@@ -436,26 +441,51 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
             dataset_fee_milli_eur: 2_500,
             refunded_milli_eur: 0,
           },
-          by_module: [{ key: "alithea/hla-motif-enrichment", run_count: 3, total_milli_eur: 10_000 }],
-          by_dataset: [{ key: "alithea/hla-atlas-v2026.1", run_count: 3, total_milli_eur: 2_500 }],
-          by_credential: [{ key: "cred-1", label: "Research MCP Agent", run_count: 3, total_milli_eur: 12_500 }],
+          by_module: [
+            {
+              plugin_id: "alithea/hla-motif-enrichment",
+              run_count: 3,
+              total_milli_eur: 12_500,
+              module_fee_milli_eur: 10_000,
+            },
+          ],
+          by_dataset: [
+            {
+              catalog_id: "alithea/hla-atlas-v2026.1",
+              run_count: 3,
+              dataset_fee_milli_eur: 2_500,
+            },
+          ],
+          by_credential: [
+            {
+              credential_id: "cred-1",
+              label: "Research MCP Agent",
+              run_count: 3,
+              total_milli_eur: 12_500,
+            },
+          ],
           entries: [
             {
               run_id: "run-c1-001",
               plugin_id: "alithea/hla-motif-enrichment",
+              plugin_version: "2.0.0",
+              catalog_id: "alithea/hla-atlas-v2026.1",
               agent_credential_id: "cred-1",
+              agent_credential_label: "Research MCP Agent",
               status: "succeeded",
-              total_milli_eur: 5_000,
+              settled_milli_eur: 5_000,
+              refunded_milli_eur: 0,
               module_fee_milli_eur: 4_000,
               dataset_fee_milli_eur: 1_000,
               receipt_hash: "a".repeat(64),
               created_at: "2026-11-23T12:00:00Z",
+              completed_at: "2026-11-23T12:00:05Z",
             },
           ],
         });
       }
       if (pathname === "webhooks" && method === "GET") {
-        return json({ endpoints: webhooks });
+        return json({ webhooks });
       }
       if (pathname === "webhooks" && method === "POST") {
         const body = req.postDataJSON() as Record<string, unknown>;
@@ -471,7 +501,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
           updated_at: "2026-11-23T00:00:00Z",
         };
         webhooks.push(ep);
-        return json({ endpoint: ep, signing_secret: "whsec_demo_hmac_key" }, 201);
+        return json({ webhook: ep, signing_secret: "whsec_demo_hmac_key" }, 201);
       }
       if (pathname === "webhooks/wh-1/deliveries") {
         return json({
@@ -484,6 +514,7 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
               status: "delivered",
               attempt_count: 1,
               max_attempts: 8,
+              next_attempt_at: "2026-11-23T12:01:00Z",
               last_http_status: 200,
               delivered_at: "2026-11-23T12:01:00Z",
               created_at: "2026-11-23T12:01:00Z",
@@ -516,27 +547,24 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
             plugin_id: "alithea/bc-jupyter-notebook",
             title: "Cohort Analysis Notebook",
             latest_version: docVersion,
+            version: docVersion,
+            content: { cells: [{ source: `version ${docVersion}` }] },
+            content_sha256: "c".repeat(64),
+            base_version: docVersion - 1,
             created_by: "admin@pharma.bio",
             created_at: "2026-11-23T00:00:00Z",
             updated_at: "2026-11-23T00:00:00Z",
-          },
-          version: {
-            doc_id: "doc-nb-1",
-            version: docVersion,
-            content_json: { cells: [{ source: `version ${docVersion}` }] },
-            content_sha256: "c".repeat(64),
-            base_version: docVersion - 1,
-            created_at: "2026-11-23T00:00:00Z",
+            version_created_at: "2026-11-23T00:00:00Z",
           },
         });
       }
       if (pathname === "documents/doc-nb-1/versions") {
         return json({
+          doc_id: "doc-nb-1",
           versions: [
             {
               doc_id: "doc-nb-1",
               version: docVersion,
-              content_json: { cells: [] },
               content_sha256: "c".repeat(64),
               base_version: docVersion - 1,
               created_at: "2026-11-23T00:00:00Z",
@@ -561,22 +589,28 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
             plugin_id: "alithea/bc-jupyter-notebook",
             title: "Cohort Analysis Notebook",
             latest_version: docVersion,
+            version: docVersion,
+            content: req.postDataJSON().content,
+            content_sha256: "d".repeat(64),
+            base_version: docVersion - 1,
             created_by: "admin@pharma.bio",
             created_at: "2026-11-23T00:00:00Z",
             updated_at: "2026-11-23T00:00:00Z",
-          },
-          version: {
-            doc_id: "doc-nb-1",
-            version: docVersion,
-            content_json: req.postDataJSON().content,
-            content_sha256: "d".repeat(64),
-            base_version: docVersion - 1,
-            created_at: "2026-11-23T00:00:00Z",
+            version_created_at: "2026-11-23T00:00:00Z",
           },
         });
       }
       if (pathname === "admin/federation/register-outbound") {
-        return json({ status: "pending", message: "Outbound registration submitted to Alithea hub." });
+        const body = req.postDataJSON() as Record<string, unknown>;
+        expect(body).not.toHaveProperty("hub_url");
+        return json({
+          registered: true,
+          target_hub_url: (body.target_hub_url as string | undefined) ?? "https://hub.biocompass.alithea.bio",
+          local_peer_id: "peer-pharma-cloud",
+          local_peer_pubkey: "a".repeat(64),
+          recorded_provider_peer_id: "peer-alithea",
+          remote_response: { status: "pending" },
+        });
       }
       if (pathname === "catalogs/org-pharma/study-1/placement" && method === "PATCH") {
         return json({ catalog_id: "org-pharma/study-1", data_placement: "licensable_copy" });
@@ -637,10 +671,13 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
     await page.getByTestId("agent-cred-revoke-cred-1").click();
     await expect(page.getByTestId("agent-cred-row-cred-1")).toContainText("Revoked");
 
-    // 3. H4 Statements in EUR
+    // 3. H4 Statements in EUR (zero NaN, exact by_module/by_dataset/by_credential fields)
     await page.getByTestId("org-tab-statements").click();
     await expect(page.getByTestId("statement-totals-grid")).toContainText("€12.50");
     await expect(page.getByTestId("billing-statement-panel")).toContainText("Research MCP Agent");
+    await expect(page.getByTestId("billing-statement-panel")).toContainText("alithea/hla-atlas-v2026.1");
+    await expect(page.getByTestId("billing-statement-panel")).toContainText("€2.50");
+    await expect(page.getByTestId("billing-statement-panel")).not.toContainText("NaN");
 
     // 4. H4 Outbound Webhooks + Delivery logs
     await page.getByTestId("org-tab-webhooks").click();
