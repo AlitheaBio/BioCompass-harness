@@ -357,6 +357,8 @@ impl AppState {
             stage_root_dir: root.join("stages"),
             allow_local_dev_tags,
         })?);
+        // W7: notebooks and other parents declaring `child_modules` start local child runs.
+        runtime.enable_local_child_runs();
 
         let catalogs_root = root.join("catalogs");
         let catalog_dir = catalogs_root.join("hla-immunopeptidomics-v1");

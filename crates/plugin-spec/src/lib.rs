@@ -195,6 +195,103 @@ pub const MAX_UI_BUNDLE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_CHILD_MODULES: usize = 32;
 /// Maximum cumulative wait time (seconds) a parent module may pause while awaiting child runs (`W7`, 24 h).
 pub const MAX_CHILD_WAIT_SEC: u64 = 86_400;
+/// Platform default child spend cap per parent run when the manifest omits one (`W7`, 10.00 EUR).
+pub const DEFAULT_MAX_CHILD_SPEND_MILLI_ACT: i64 = 10_000;
+/// Upper bound accepted for a manifest `max_child_spend_milli_act` (`W7`, 10,000.00 EUR).
+pub const MAX_CHILD_SPEND_MILLI_ACT: i64 = 10_000_000;
+/// Manifest keyword for [`ChildModules::Caller`].
+pub const CHILD_MODULES_CALLER: &str = "caller";
+
+/// Which child modules a parent module may start through the file mailbox (`W7`).
+///
+/// `List` is an explicit allow-list; `Caller` lets the module start any module the initiating
+/// principal (the parent run's agent credential, otherwise the person who confirmed the parent)
+/// could prepare and confirm directly. The hub authorises every child as that principal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildModules {
+    List(Vec<String>),
+    Caller,
+}
+
+impl Default for ChildModules {
+    fn default() -> Self {
+        Self::List(Vec::new())
+    }
+}
+
+impl From<Vec<String>> for ChildModules {
+    fn from(list: Vec<String>) -> Self {
+        Self::List(list)
+    }
+}
+
+impl ChildModules {
+    /// `true` when the module declares no child modules at all (mailbox child runs disabled).
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::List(list) if list.is_empty())
+    }
+
+    /// `true` when this module may start child runs (any list entry or `"caller"`).
+    pub fn declares_children(&self) -> bool {
+        !self.is_empty()
+    }
+
+    pub fn is_caller(&self) -> bool {
+        matches!(self, Self::Caller)
+    }
+
+    /// Module-level policy check: `Caller` permits every module (the hub authorises the principal);
+    /// an explicit list permits only listed IDs.
+    pub fn permits(&self, plugin_id: &str) -> bool {
+        match self {
+            Self::Caller => true,
+            Self::List(list) => list.iter().any(|allowed| allowed == plugin_id),
+        }
+    }
+
+    /// Explicit list entries (empty for `Caller`).
+    pub fn listed(&self) -> &[String] {
+        match self {
+            Self::List(list) => list,
+            Self::Caller => &[],
+        }
+    }
+
+    /// JSON form used in signed terms and in `/in/.bc/config.json`.
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::List(list) => json!(list),
+            Self::Caller => json!(CHILD_MODULES_CALLER),
+        }
+    }
+}
+
+impl Serialize for ChildModules {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::List(list) => list.serialize(serializer),
+            Self::Caller => serializer.serialize_str(CHILD_MODULES_CALLER),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChildModules {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            List(Vec<String>),
+            Keyword(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::List(list) => Ok(Self::List(list)),
+            Raw::Keyword(word) if word == CHILD_MODULES_CALLER => Ok(Self::Caller),
+            Raw::Keyword(other) => Err(serde::de::Error::custom(format!(
+                "child_modules must be a list of module IDs or \"{CHILD_MODULES_CALLER}\", got \"{other}\""
+            ))),
+        }
+    }
+}
 
 pub const TARGET_VALIDATION_DATASET_INPUT_CONTRACT: &str = "biocompass.target-validation.v1";
 pub const OFF_TARGET_TOXICITY_DATASET_INPUT_CONTRACT: &str = "biocompass.off-target-toxicity.v1";
@@ -237,12 +334,17 @@ pub struct PluginManifest {
     /// Named measurement aggregates, optionally filtered through an approved release relationship.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runtime_join_queries: std::collections::BTreeMap<String, ScopedQueryDefinition>,
-    /// Allowlist of child module IDs (`<org>/<name>`) this module may invoke via the child-run broker (`W7`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub child_modules: Vec<String>,
+    /// Child modules this module may start via the child-run broker (`W7`): an explicit list of
+    /// module IDs (`<org>/<name>`) or `"caller"` (any module the initiating principal may start).
+    #[serde(default, skip_serializing_if = "ChildModules::is_empty")]
+    pub child_modules: ChildModules,
     /// Maximum cumulative seconds this parent module may pause its execution clock waiting for child runs (`W7`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_child_wait_sec: Option<u64>,
+    /// Signed cap (milli-EUR) on the total spend of all children of one parent run (`W7`).
+    /// When omitted the platform default ([`DEFAULT_MAX_CHILD_SPEND_MILLI_ACT`]) applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_child_spend_milli_act: Option<i64>,
     pub image: String,
     #[serde(default)]
     pub network: NetworkPolicy,
@@ -294,6 +396,14 @@ impl DatasetImportContract {
 impl PluginManifest {
     pub fn has_live_queries(&self) -> bool {
         !self.runtime_queries.is_empty() || !self.runtime_join_queries.is_empty()
+    }
+
+    /// Signed per-parent child spend cap: the manifest value, or the platform default when the
+    /// module declares child modules; `None` for modules that cannot start children (`W7`).
+    pub fn effective_max_child_spend_milli_act(&self) -> Option<i64> {
+        self.child_modules
+            .declares_children()
+            .then(|| self.max_child_spend_milli_act.unwrap_or(DEFAULT_MAX_CHILD_SPEND_MILLI_ACT))
     }
 
     /// Modules with an explicit provider input contract require an authorized dataset at quote time.
@@ -446,14 +556,14 @@ impl PluginManifest {
                 "runtime_join_queries requires an isolated compute-only module and up to 16 named measures".into(),
             ));
         }
-        if !self.child_modules.is_empty() {
-            if self.child_modules.len() > MAX_CHILD_MODULES {
+        if let ChildModules::List(children) = &self.child_modules {
+            if children.len() > MAX_CHILD_MODULES {
                 return Err(CompassError::Validation(format!(
                     "child_modules may declare at most {MAX_CHILD_MODULES} modules"
                 )));
             }
             let mut seen_children = std::collections::HashSet::new();
-            for child in &self.child_modules {
+            for child in children {
                 validate_scaffold_plugin_id(child).map_err(|_| {
                     CompassError::Validation(format!(
                         "invalid child_modules entry '{child}': must be '<namespace>/<slug>' matching ^[a-z0-9][a-z0-9_-]{{0,62}}$"
@@ -478,6 +588,18 @@ impl PluginManifest {
             return Err(CompassError::Validation(format!(
                 "max_child_wait_sec must be between 1 and {MAX_CHILD_WAIT_SEC} seconds, got {wait_sec}"
             )));
+        }
+        if let Some(cap) = self.max_child_spend_milli_act
+            && !(0..=MAX_CHILD_SPEND_MILLI_ACT).contains(&cap)
+        {
+            return Err(CompassError::Validation(format!(
+                "max_child_spend_milli_act must be between 0 and {MAX_CHILD_SPEND_MILLI_ACT}, got {cap}"
+            )));
+        }
+        if self.max_child_spend_milli_act.is_some() && self.child_modules.is_empty() {
+            return Err(CompassError::Validation(
+                "max_child_spend_milli_act requires child_modules".into(),
+            ));
         }
         if self.inputs.schema.get("x-biocompass-import").is_some() {
             self.version_operation_specs()?;
@@ -890,9 +1012,56 @@ max_child_wait_sec = 3600
         let parsed = PluginManifest::from_toml_str(valid_toml, true).expect("valid child_modules");
         assert_eq!(
             parsed.child_modules,
-            vec!["alithea/hla-motif-enrichment", "alithea/peptide-qc"]
+            ChildModules::List(vec![
+                "alithea/hla-motif-enrichment".into(),
+                "alithea/peptide-qc".into()
+            ])
         );
         assert_eq!(parsed.max_child_wait_sec, Some(3600));
+        assert!(parsed.child_modules.permits("alithea/peptide-qc"));
+        assert!(!parsed.child_modules.permits("alithea/other"));
+        assert_eq!(
+            parsed.effective_max_child_spend_milli_act(),
+            Some(DEFAULT_MAX_CHILD_SPEND_MILLI_ACT)
+        );
+
+        // `"caller"` follows the initiating principal's authority and round-trips as a string.
+        let caller_toml = r#"
+id = "alithea/notebook"
+name = "Notebook"
+version = "1.0.0"
+image = "local/notebook:dev"
+child_modules = "caller"
+max_child_spend_milli_act = 2500
+"#;
+        let caller = PluginManifest::from_toml_str(caller_toml, true).expect("caller child_modules");
+        assert!(caller.child_modules.is_caller());
+        assert!(caller.child_modules.permits("alithea/anything"));
+        assert_eq!(caller.effective_max_child_spend_milli_act(), Some(2500));
+        let as_json = serde_json::to_value(&caller).unwrap();
+        assert_eq!(as_json["child_modules"], json!("caller"));
+        let back: PluginManifest = serde_json::from_value(as_json).unwrap();
+        assert!(back.child_modules.is_caller());
+
+        // Any other keyword, and a cap without children, are rejected.
+        for bad in [
+            "child_modules = \"everyone\"\n",
+            "max_child_spend_milli_act = 100\n",
+            "child_modules = \"caller\"\nmax_child_spend_milli_act = -1\n",
+        ] {
+            let doc = format!(
+                "id = \"alithea/notebook\"\nname = \"N\"\nversion = \"1.0.0\"\nimage = \"local/n:dev\"\n{bad}"
+            );
+            assert!(PluginManifest::from_toml_str(&doc, true).is_err(), "{bad}");
+        }
+        // No children: no cap.
+        let plain = PluginManifest::from_toml_str(
+            "id = \"alithea/n\"\nname = \"N\"\nversion = \"1.0.0\"\nimage = \"local/n:dev\"\n",
+            true,
+        )
+        .unwrap();
+        assert!(plain.child_modules.is_empty());
+        assert_eq!(plain.effective_max_child_spend_milli_act(), None);
 
         // Self-reference rejected
         let self_ref = r#"

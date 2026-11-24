@@ -12,13 +12,15 @@
 //!   check, bounded read), consumes the request file, and atomically writes the reply into
 //!   `/in/.bc/replies/<id>.json` (mode `0644`).
 //! - Any transport/filesystem violation (symlink, FIFO, subdirectory, path traversal,
-//!   oversize payload, duplicate request ID, call-limit breach, malformed JSON, or `.bc`
-//!   directory tampering) returns a `MAILBOX_VIOLATION` error so [`crate::supervise`] kills
-//!   the container immediately.
+//!   oversize payload, call-limit breach, more than [`MAX_PENDING_REQUEST_ENTRIES`] entries,
+//!   malformed JSON, or `.bc` directory tampering) returns a `MAILBOX_VIOLATION` error so
+//!   [`crate::supervise`] kills the container immediately. A re-used request ID is answered
+//!   with a `DUPLICATE_REQUEST_ID` error reply and counts against the call limit.
 
 use biocompass_core_traits::{
     CompassError, CompassResult, PluginId, RunId, RunInput, RunStatus, canonicalize_run_inputs,
 };
+use biocompass_plugin_spec::ChildModules;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -52,6 +54,15 @@ pub const MAX_MAILBOX_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_MAILBOX_REPLY_BYTES: usize = 1_048_576;
 /// Default cap on total mailbox requests per run.
 pub const DEFAULT_MAX_MAILBOX_CALLS: usize = 64;
+/// Maximum number of directory entries tolerated in `/out/.bc/requests` at one poll.
+/// A module flooding the directory (completed, temp or garbage files) is killed.
+pub const MAX_PENDING_REQUEST_ENTRIES: usize = 128;
+/// Maximum size of a child `result_json` staged as a file when it cannot be inlined (64 MiB).
+pub const MAX_CHILD_RESULT_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// File name (inside the child's artifact alias directory) holding an oversize child `result_json`.
+pub const CHILD_RESULT_FILE_NAME: &str = ".bc-result.json";
+/// Error code written in a reply when a module re-uses a request ID.
+pub const ERR_DUPLICATE_REQUEST_ID: &str = "DUPLICATE_REQUEST_ID";
 
 /// Handles a live-query JSON frame (`{ request_id, query, params }`) for an air-gapped run.
 #[async_trait::async_trait]
@@ -109,6 +120,9 @@ pub struct ChildRunReply {
     pub receipt_hash: Option<String>,
     #[serde(default)]
     pub result_json: Option<Value>,
+    /// Container path of a JSON file holding `result_json` when it is too large to inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_path: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<ChildRunStagedArtifact>,
     #[serde(default)]
@@ -131,6 +145,7 @@ impl ChildRunReply {
             run_id: None,
             receipt_hash: None,
             result_json: None,
+            result_path: None,
             artifacts: Vec::new(),
             error_code: Some(error_code.into()),
             error: Some(error.into()),
@@ -146,6 +161,10 @@ pub struct ChildRunBrokerContext {
     pub parent_in_dir: PathBuf,
     /// Remaining parent `max_child_wait_sec` allowance at the moment this child request was accepted.
     pub remaining_child_wait_sec: u64,
+    /// Remaining bytes of child artifacts the parent may still stage under `/in/artifacts`
+    /// (bounded by the parent's signed `max_input_bytes`); `None` means unbounded. Brokers must
+    /// refuse (`INPUT_LIMIT_EXCEEDED`) a child whose artifacts exceed it before fetching them.
+    pub remaining_child_artifact_bytes: Option<u64>,
 }
 
 /// Async broker callback invoked by the file mailbox when a running parent module submits
@@ -192,8 +211,10 @@ pub struct MailboxConfig {
     pub out_dir: PathBuf,
     pub live_query: Option<Arc<dyn LiveQueryResponder>>,
     pub child_broker: Option<Arc<dyn ChildRunBroker>>,
-    pub allowed_child_modules: Vec<String>,
+    pub allowed_child_modules: ChildModules,
     pub max_child_wait_sec: Option<u64>,
+    /// Signed container runtime limit (seconds) advertised to the module in `config.json`.
+    pub max_runtime_sec: Option<u64>,
     pub max_calls: usize,
 }
 
@@ -207,6 +228,7 @@ impl std::fmt::Debug for MailboxConfig {
             .field("has_child_broker", &self.child_broker.is_some())
             .field("allowed_child_modules", &self.allowed_child_modules)
             .field("max_child_wait_sec", &self.max_child_wait_sec)
+            .field("max_runtime_sec", &self.max_runtime_sec)
             .field("max_calls", &self.max_calls)
             .finish()
     }
@@ -273,8 +295,9 @@ pub fn stage_child_artifact_bytes(
 pub fn prepare_mailbox_dirs(
     in_dir: &Path,
     out_dir: &Path,
-    allowed_child_modules: &[String],
+    allowed_child_modules: &ChildModules,
     max_child_wait_sec: Option<u64>,
+    max_runtime_sec: Option<u64>,
 ) -> CompassResult<()> {
     let out_bc = out_dir.join(MAILBOX_ROOT_REL);
     let out_requests = out_dir.join(MAILBOX_REQUESTS_REL);
@@ -304,8 +327,10 @@ pub fn prepare_mailbox_dirs(
         "requests_dir": CONTAINER_MAILBOX_REQUESTS_DIR,
         "replies_dir": CONTAINER_MAILBOX_REPLIES_DIR,
         "artifacts_dir": CONTAINER_ARTIFACTS_DIR,
-        "child_modules": allowed_child_modules,
+        "mailbox_enabled": true,
+        "child_modules": allowed_child_modules.to_json(),
         "max_child_wait_sec": max_child_wait_sec,
+        "max_runtime_sec": max_runtime_sec,
     });
     let config_bytes = serde_json::to_vec(&config_doc)
         .map_err(|e| CompassError::Internal(format!("encode mailbox config: {e}")))?;
@@ -407,6 +432,7 @@ impl FileMailbox {
             &cfg.out_dir,
             &cfg.allowed_child_modules,
             cfg.max_child_wait_sec,
+            cfg.max_runtime_sec,
         )?;
         let replies_dir = cfg.in_dir.join(MAILBOX_REPLIES_REL);
 
@@ -513,6 +539,12 @@ impl FileMailbox {
     pub fn poll_next_request(&mut self) -> CompassResult<Option<MailboxRequest>> {
         self.verify_dir_integrity()?;
         let entries = self.list_request_entries()?;
+        if entries.len() > MAX_PENDING_REQUEST_ENTRIES {
+            return Err(violation(format!(
+                "/out/.bc/requests holds {} entries (limit {MAX_PENDING_REQUEST_ENTRIES})",
+                entries.len()
+            )));
+        }
         for name in entries {
             if is_temp_entry_name(&name) {
                 self.validate_temp_entry(&name)?;
@@ -540,16 +572,34 @@ impl FileMailbox {
             let sha256: [u8; 32] = Sha256::digest(&bytes).into();
             let len = bytes.len() as u64;
             if let Some(prev) = self.seen_requests.get(stem) {
-                if prev.unlinked
-                    || prev.dev != dev
-                    || prev.ino != ino
-                    || prev.len != len
-                    || prev.sha256 != sha256
+                if !prev.unlinked
+                    && prev.dev == dev
+                    && prev.ino == ino
+                    && prev.len == len
+                    && prev.sha256 == sha256
                 {
+                    // Same file we already consumed but could not unlink.
+                    continue;
+                }
+                // A re-used request ID gets a structured error reply instead of killing the run.
+                // It still counts against the call limit so a module cannot spin on it.
+                if self.calls_used >= self.cfg.max_calls {
                     return Err(violation(format!(
-                        "duplicate mailbox request_id '{stem}' rejected"
+                        "mailbox call limit ({}) exceeded",
+                        self.cfg.max_calls
                     )));
                 }
+                self.calls_used += 1;
+                if !self.unlink_request_entry(&name) {
+                    return Err(violation(format!(
+                        "cannot consume duplicate mailbox request '{name}'"
+                    )));
+                }
+                self.write_child_reply(&ChildRunReply::error(
+                    stem,
+                    ERR_DUPLICATE_REQUEST_ID,
+                    format!("request_id '{stem}' was already used in this run"),
+                ))?;
                 continue;
             }
             if self.calls_used >= self.cfg.max_calls {
@@ -597,18 +647,56 @@ impl FileMailbox {
     }
 
     /// Atomically write a structured [`ChildRunReply`] to `/in/.bc/replies/<request_id>.json`.
+    /// A `result_json` too large to inline (reply cap 1 MiB) is staged as
+    /// `/in/artifacts/child-<request_id>/.bc-result.json` and referenced by `result_path`, so a
+    /// large child result never kills the parent. Results above [`MAX_CHILD_RESULT_FILE_BYTES`]
+    /// are replaced by a structured `CHILD_RESULT_TOO_LARGE` error reply.
     pub fn write_child_reply(&self, reply: &ChildRunReply) -> CompassResult<()> {
         let bytes = serde_json::to_vec(reply)
             .map_err(|e| CompassError::Internal(format!("encode child run reply: {e}")))?;
-        self.write_reply_bytes(&reply.request_id, &bytes)
+        if bytes.len() <= MAX_MAILBOX_REPLY_BYTES {
+            return self.write_reply_bytes(&reply.request_id, &bytes);
+        }
+        let mut spilled = reply.clone();
+        let result = spilled.result_json.take();
+        let reply_bytes = match result {
+            Some(result) => {
+                let result_bytes = serde_json::to_vec(&result)
+                    .map_err(|e| CompassError::Internal(format!("encode child result: {e}")))?;
+                if result_bytes.len() > MAX_CHILD_RESULT_FILE_BYTES {
+                    serde_json::to_vec(&ChildRunReply {
+                        status: reply.status,
+                        run_id: reply.run_id.clone(),
+                        receipt_hash: reply.receipt_hash.clone(),
+                        ..ChildRunReply::error(
+                            reply.request_id.clone(),
+                            "CHILD_RESULT_TOO_LARGE",
+                            format!(
+                                "child result_json ({} bytes) exceeds {MAX_CHILD_RESULT_FILE_BYTES} bytes",
+                                result_bytes.len()
+                            ),
+                        )
+                    })
+                } else {
+                    spilled.result_path = Some(stage_child_artifact_bytes(
+                        &self.cfg.in_dir,
+                        &child_artifact_alias(&reply.request_id),
+                        CHILD_RESULT_FILE_NAME,
+                        &result_bytes,
+                    )?);
+                    serde_json::to_vec(&spilled)
+                }
+            }
+            None => serde_json::to_vec(&spilled),
+        }
+        .map_err(|e| CompassError::Internal(format!("encode child run reply: {e}")))?;
+        self.write_reply_bytes(&reply.request_id, &reply_bytes)
     }
 
-    /// Check whether a `"run_module"` target is in `allowed_child_modules`.
+    /// Check whether a `"run_module"` target is permitted by this module's `child_modules`
+    /// (`"caller"` permits every module; the hub then authorises the initiating principal).
     pub fn is_child_module_allowed(&self, plugin_id: &PluginId) -> bool {
-        self.cfg
-            .allowed_child_modules
-            .iter()
-            .any(|allowed| allowed == plugin_id.as_str())
+        self.cfg.allowed_child_modules.permits(plugin_id.as_str())
     }
 
     #[cfg(unix)]
@@ -795,8 +883,17 @@ impl FileMailbox {
                 "mailbox request '{name}' exceeds limit ({MAX_MAILBOX_REQUEST_BYTES})"
             )));
         }
-        let file = std::fs::File::open(&path)
-            .map_err(|e| violation(format!("open '{name}': {e}")))?;
+        let file = open_no_follow(&path).map_err(|e| violation(format!("open '{name}': {e}")))?;
+        // Re-check the opened handle: a swap to a symlink/reparse point or non-file between the
+        // `symlink_metadata` and the open is rejected (no `O_NOFOLLOW` on this platform).
+        let opened = file
+            .metadata()
+            .map_err(|e| violation(format!("stat opened '{name}': {e}")))?;
+        if !opened.is_file() || opened.file_type().is_symlink() || opened.len() != meta.len() {
+            return Err(violation(format!(
+                "mailbox request '{name}' changed type while opening"
+            )));
+        }
         let mut buf = Vec::new();
         file.take((MAX_MAILBOX_REQUEST_BYTES + 1) as u64)
             .read_to_end(&mut buf)
@@ -819,6 +916,29 @@ impl FileMailbox {
     fn unlink_request_entry(&self, name: &str) -> bool {
         std::fs::remove_file(self.requests_dir.join(name)).is_ok()
     }
+}
+
+/// Open without following a final symlink / reparse point on non-Unix hosts.
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself rather than its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other("reparse point rejected"));
+        }
+    }
+    Ok(file)
 }
 
 fn is_temp_entry_name(name: &str) -> bool {
@@ -886,6 +1006,21 @@ fn parse_mailbox_request(expected_request_id: &str, bytes: &[u8]) -> CompassResu
         other => Err(violation(format!(
             "unsupported mailbox request kind '{other}' in '{expected_request_id}.json'"
         ))),
+    }
+}
+
+/// Total size in bytes of the filesystem containing `path` (best-effort via `statvfs` on Unix).
+pub fn filesystem_total_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        rustix::fs::statvfs(path)
+            .ok()
+            .map(|st| st.f_blocks.saturating_mul(st.f_frsize))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
     }
 }
 

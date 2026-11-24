@@ -17,7 +17,7 @@ mod mailbox_tests;
 
 use biocompass_core_traits::{CompassError, CompassResult, ErrorCode, OciImageRef, RunId, RunLogEvent};
 use biocompass_core_traits::types::OCI_IMAGE_PREPARATION_TIMEOUT_SECS;
-use biocompass_plugin_spec::{MAX_CHILD_WAIT_SEC, NetworkPolicy, PluginResources};
+use biocompass_plugin_spec::{ChildModules, MAX_CHILD_WAIT_SEC, NetworkPolicy, PluginResources};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -41,7 +41,7 @@ pub use mailbox::{
     LiveQueryResponder, MAILBOX_CONFIG_REL, MAILBOX_REPLIES_REL, MAILBOX_REQUESTS_REL,
     MAILBOX_ROOT_REL, MAX_LIVE_QUERY_REQUEST_BYTES, MAX_MAILBOX_REPLY_BYTES,
     MAX_MAILBOX_REQUEST_BYTES, MailboxConfig, MailboxRequest, child_artifact_alias,
-    filesystem_free_bytes, is_valid_request_id, prepare_mailbox_dirs, stage_child_artifact_bytes,
+    filesystem_free_bytes, filesystem_total_bytes, is_valid_request_id, prepare_mailbox_dirs, stage_child_artifact_bytes,
 };
 pub use registry::OciDistributionClient;
 
@@ -206,8 +206,11 @@ pub struct SuperviseOptions<'a> {
     pub cancelled: Option<&'a AtomicBool>,
     pub live_query: Option<Arc<dyn LiveQueryResponder>>,
     pub child_broker: Option<Arc<dyn ChildRunBroker>>,
-    /// Allow-listed child module IDs (`<org>/<name>`) permitted for `"run_module"` requests (`W7`).
-    pub allowed_child_modules: Vec<String>,
+    /// Child modules permitted for `"run_module"` requests (`W7`): explicit list or `"caller"`.
+    pub allowed_child_modules: ChildModules,
+    /// Cap on cumulative child artifact bytes staged into the parent's `/in` (the parent's signed
+    /// `max_input_bytes`); `None` disables the cap.
+    pub max_child_artifact_bytes: Option<u64>,
     /// Maximum cumulative seconds the parent wall clock may pause while child runs are pending (`W7`).
     pub max_child_wait_sec: Option<u64>,
     /// Cap on total file-mailbox requests processed for this run (`W2`).
@@ -233,7 +236,8 @@ impl Default for SuperviseOptions<'_> {
             cancelled: None,
             live_query: None,
             child_broker: None,
-            allowed_child_modules: Vec::new(),
+            allowed_child_modules: ChildModules::default(),
+            max_child_artifact_bytes: None,
             max_child_wait_sec: None,
             max_mailbox_calls: DEFAULT_MAX_MAILBOX_CALLS,
             started_tx: None,
@@ -307,6 +311,7 @@ pub async fn supervise(
             child_broker: opts.child_broker.clone(),
             allowed_child_modules: opts.allowed_child_modules.clone(),
             max_child_wait_sec: opts.max_child_wait_sec,
+            max_runtime_sec: Some(spec.resources.timeout_sec),
             max_calls: opts.max_mailbox_calls,
         };
         Some(Arc::new(std::sync::Mutex::new(FileMailbox::open(cfg)?)))
@@ -388,6 +393,7 @@ pub async fn supervise(
     let max_output_bytes = opts.max_output_bytes;
     let max_output_entries = opts.max_output_entries;
     let min_free_bytes = opts.min_free_bytes;
+    let max_child_artifact_bytes = opts.max_child_artifact_bytes;
 
     let watchdog = async move {
         let mut ticker = tokio::time::interval(poll_interval);
@@ -399,6 +405,7 @@ pub async fn supervise(
         let mut child_wait_elapsed = Duration::ZERO;
         let mut in_flight: Option<InFlightFuture> = None;
         let mut in_flight_is_child = false;
+        let mut staged_child_bytes: u64 = 0;
 
         let check_clocks = |parent_elapsed: Duration,
                             child_wait_elapsed: Duration,
@@ -472,6 +479,9 @@ pub async fn supervise(
                                     ChildRunReply::error(request_id.clone(), err.code(), err.to_string())
                                 }
                             };
+                            staged_child_bytes = staged_child_bytes.saturating_add(
+                                reply.artifacts.iter().map(|a| a.size_bytes).sum::<u64>(),
+                            );
                             let write_res = {
                                 let mut mb = mb_arc.lock().expect("mailbox mutex poisoned");
                                 if let Some(rh) = &reply.receipt_hash {
@@ -598,7 +608,7 @@ pub async fn supervise(
                                         req.request_id.clone(),
                                         ErrorCode::ChildModuleNotAllowed.as_str(),
                                         format!(
-                                            "child module '{}' is not declared in this module's child_modules allow-list",
+                                            "child module '{}' is not declared in this module's child_modules",
                                             req.plugin_id
                                         ),
                                     );
@@ -622,6 +632,8 @@ pub async fn supervise(
                                     parent_run_id: watchdog_run_id.clone(),
                                     parent_in_dir: watchdog_in_dir.clone(),
                                     remaining_child_wait_sec: remaining.as_secs().max(1),
+                                    remaining_child_artifact_bytes: max_child_artifact_bytes
+                                        .map(|cap| cap.saturating_sub(staged_child_bytes)),
                                 };
                                 let req_id = req.request_id.clone();
                                 in_flight = Some(Box::pin(async move {

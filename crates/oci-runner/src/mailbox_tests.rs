@@ -435,7 +435,7 @@ async fn w2_abuse_oversize_payload_kills_run_immediately() {
 }
 
 #[tokio::test]
-async fn w2_abuse_duplicate_request_id_kills_run_immediately() {
+async fn w2_reused_request_id_gets_error_reply_and_run_continues() {
     let tmp = tempfile::tempdir().unwrap();
     let spec = make_spec(tmp.path(), "run-abuse-dup", 10);
     let killed = Arc::new(AtomicBool::new(false));
@@ -445,7 +445,7 @@ async fn w2_abuse_duplicate_request_id_kills_run_immediately() {
         killed: Arc::clone(&killed),
         cancelled_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
         out_stats_override: None,
-        body: Arc::new(|in_dir, out_dir, kill| {
+        body: Arc::new(|in_dir, out_dir, _kill| {
             Box::pin(async move {
                 let req = serde_json::to_vec(&json!({
                     "request_id": "dup-1",
@@ -454,15 +454,68 @@ async fn w2_abuse_duplicate_request_id_kills_run_immediately() {
                 }))
                 .unwrap();
                 atomic_write_request(&out_dir, "dup-1", &req);
-                let _ = wait_for_reply(&in_dir, "dup-1").await;
-                // Re-submit same request_id!
-                atomic_write_request(&out_dir, "dup-1", &req);
+                let first = wait_for_reply(&in_dir, "dup-1").await;
+                assert!(first.get("error_code").is_none(), "{first}");
+                // Re-submit the same request_id with different content.
+                let req2 = serde_json::to_vec(&json!({
+                    "request_id": "dup-1",
+                    "query": "sample_roster.v2",
+                    "params": {"again": true}
+                }))
+                .unwrap();
+                atomic_write_request(&out_dir, "dup-1", &req2);
+                for _ in 0..200 {
+                    let raw = std::fs::read(in_dir.join(".bc/replies/dup-1.json")).unwrap();
+                    let v: Value = serde_json::from_slice(&raw).unwrap();
+                    if v.get("error_code").and_then(Value::as_str) == Some("DUPLICATE_REQUEST_ID") {
+                        return 0;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                7
+            })
+        }),
+    };
+
+    let report = supervise(
+        &runner,
+        &spec,
+        SuperviseOptions {
+            live_query: Some(Arc::new(StrictLiveQueryEcho {
+                calls: AtomicUsize::new(0),
+            })),
+            poll_interval: Duration::from_millis(20),
+            ..SuperviseOptions::default()
+        },
+    )
+    .await
+    .expect("a re-used request_id must not kill the run");
+    assert_eq!(report.exit_code, 0, "duplicate must be answered with DUPLICATE_REQUEST_ID");
+    assert!(!killed.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn w2_request_directory_flood_kills_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = make_spec(tmp.path(), "run-abuse-flood", 10);
+    let killed = Arc::new(AtomicBool::new(false));
+    let runner = SyntheticRunner {
+        kind: EngineKind::Kubernetes,
+        version: "1.31".into(),
+        killed: Arc::clone(&killed),
+        cancelled_runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+        out_stats_override: None,
+        body: Arc::new(|_in_dir, out_dir, kill| {
+            Box::pin(async move {
+                let dir = out_dir.join(".bc/requests");
+                for i in 0..(crate::mailbox::MAX_PENDING_REQUEST_ENTRIES + 5) {
+                    std::fs::write(dir.join(format!(".tmp-{i}.tmp")), b"{}").unwrap();
+                }
                 kill.notified().await;
                 0
             })
         }),
     };
-
     let err = supervise(
         &runner,
         &spec,
@@ -475,10 +528,63 @@ async fn w2_abuse_duplicate_request_id_kills_run_immediately() {
         },
     )
     .await
-    .expect_err("duplicate request_id must kill run");
+    .expect_err("flooding /out/.bc/requests must kill the run");
     assert!(err.to_string().contains("MAILBOX_VIOLATION"), "{err}");
-    assert!(err.to_string().contains("duplicate"), "{err}");
     assert!(killed.load(Ordering::Acquire));
+}
+
+#[test]
+fn w7_oversize_child_result_is_staged_as_result_path_and_config_advertises_caller() {
+    let tmp = tempfile::tempdir().unwrap();
+    let in_dir = tmp.path().join("in");
+    let out_dir = tmp.path().join("out");
+    std::fs::create_dir_all(&in_dir).unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let mb = FileMailbox::open(MailboxConfig {
+        run_id: RunId::from("run-big"),
+        in_dir: in_dir.clone(),
+        out_dir: out_dir.clone(),
+        live_query: None,
+        child_broker: None,
+        allowed_child_modules: biocompass_plugin_spec::ChildModules::Caller,
+        max_child_wait_sec: Some(30),
+        max_runtime_sec: Some(60),
+        max_calls: 4,
+    })
+    .unwrap();
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(in_dir.join(".bc/config.json")).unwrap()).unwrap();
+    assert_eq!(cfg["child_modules"], json!("caller"));
+    assert_eq!(cfg["max_runtime_sec"], json!(60));
+    assert_eq!(cfg["mailbox_enabled"], json!(true));
+
+    let big = "x".repeat(crate::mailbox::MAX_MAILBOX_REPLY_BYTES + 10);
+    let reply = ChildRunReply {
+        request_id: "big-1".into(),
+        ok: true,
+        status: Some(RunStatus::Succeeded),
+        run_id: Some("run-child".into()),
+        receipt_hash: Some("ab".repeat(32)),
+        result_json: Some(json!({ "blob": big })),
+        result_path: None,
+        artifacts: Vec::new(),
+        error_code: None,
+        error: None,
+    };
+    mb.write_child_reply(&reply).expect("an oversize result must not fail the parent");
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(in_dir.join(".bc/replies/big-1.json")).unwrap())
+            .unwrap();
+    assert!(written["result_json"].is_null());
+    assert_eq!(
+        written["result_path"],
+        json!("/in/artifacts/child-big-1/.bc-result.json")
+    );
+    let staged: Value = serde_json::from_slice(
+        &std::fs::read(in_dir.join("artifacts/child-big-1/.bc-result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(staged["blob"].as_str().unwrap().len(), big.len());
 }
 
 #[tokio::test]
@@ -685,6 +791,7 @@ impl ChildRunBroker for MockChildBroker {
             run_id: Some(format!("run-child-{idx}")),
             receipt_hash: Some(receipt_hash),
             result_json: Some(json!({ "plugin": request.plugin_id, "passed": true })),
+            result_path: None,
             artifacts: vec![ChildRunStagedArtifact {
                 name: "scores.csv".into(),
                 sha256: "aa".repeat(32),
@@ -739,7 +846,7 @@ async fn w7_off_list_child_module_is_rejected_without_invoking_broker() {
             &spec,
             SuperviseOptions {
                 child_broker: Some(broker.clone()),
-                allowed_child_modules: vec!["alithea/allowed".into()],
+                allowed_child_modules: biocompass_plugin_spec::ChildModules::List(vec!["alithea/allowed".into()]),
                 max_child_wait_sec: Some(60),
                 poll_interval: Duration::from_millis(20),
                 ..SuperviseOptions::default()
@@ -852,7 +959,7 @@ async fn w7_parent_deadline_pauses_during_child_run_and_enforces_max_child_wait_
             &spec,
             SuperviseOptions {
                 child_broker: Some(broker.clone()),
-                allowed_child_modules: vec!["alithea/motif".into()],
+                allowed_child_modules: biocompass_plugin_spec::ChildModules::List(vec!["alithea/motif".into()]),
                 max_child_wait_sec: Some(5),
                 poll_interval: Duration::from_millis(25),
                 ..SuperviseOptions::default()
@@ -909,7 +1016,7 @@ async fn w7_parent_deadline_pauses_during_child_run_and_enforces_max_child_wait_
                 &spec,
                 SuperviseOptions {
                     child_broker: Some(broker),
-                    allowed_child_modules: vec!["alithea/motif".into()],
+                    allowed_child_modules: biocompass_plugin_spec::ChildModules::List(vec!["alithea/motif".into()]),
                     max_child_wait_sec: Some(1),
                     poll_interval: Duration::from_millis(25),
                     ..SuperviseOptions::default()
