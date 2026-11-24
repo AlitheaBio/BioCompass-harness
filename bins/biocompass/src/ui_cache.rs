@@ -1000,8 +1000,9 @@ fn persist_bundle_to_disk(cache_root: &Path, bundle: &CachedUiBundle) -> Compass
     for (rel_path, asset) in &bundle.files {
         inventory.insert(rel_path.clone(), (asset.sha256.clone(), asset.raw.len() as u64));
         let key = sha256_hex(rel_path.as_bytes());
+        // Persist ONLY verified raw bytes on disk; gzipped representation is always derived
+        // in memory from SHA-256-verified raw bytes on reload (never trusted from unverified `.gz`).
         write_file_atomic(&files_dir.join(format!("{key}.raw")), &asset.raw)?;
-        write_file_atomic(&files_dir.join(format!("{key}.gz")), &asset.gzipped)?;
     }
     let manifest = DiskBundleManifest {
         format: 1,
@@ -1053,7 +1054,6 @@ fn load_verified_from_disk(cache_root: &Path, expected_hash: &str) -> CompassRes
         }
         let key = sha256_hex(rel_path.as_bytes());
         let raw_path = files_dir.join(format!("{key}.raw"));
-        let gz_path = files_dir.join(format!("{key}.gz"));
         let raw = std::fs::read(&raw_path).map_err(|e| {
             CompassError::ui_bundle_tampered(format!("missing cached UI asset '{rel_path}': {e}"))
         })?;
@@ -1062,10 +1062,9 @@ fn load_verified_from_disk(cache_root: &Path, expected_hash: &str) -> CompassRes
                 "cached UI asset '{rel_path}' failed integrity verification"
             )));
         }
-        let gzipped = std::fs::read(&gz_path)
-            .ok()
-            .filter(|gz| gz.len() >= 18 && gz[0] == 0x1f && gz[1] == 0x8b)
-            .unwrap_or_else(|| gzip_compress(&raw));
+        // Always derive pre-compressed gzip bytes directly from SHA-256-verified raw bytes
+        // so an attacker modifying a `.gz` sidecar on disk can never inject tampered content.
+        let gzipped = gzip_compress(&raw);
         let mime = mime_guess::from_path(rel_path)
             .first_or_octet_stream()
             .essence_str()
@@ -1701,8 +1700,27 @@ mod tests {
         let loaded = fresh.get_cached(&hash).await.unwrap().expect("disk hit");
         assert_eq!(loaded.files.len(), 2);
 
-        // Tamper a cached file on disk -> reload MUST refuse with UiBundleTampered!
+        // Plant a malicious `.gz` file on disk while `.raw` is untouched -> reload MUST ignore
+        // the unverified `.gz` and serve gzip bytes derived strictly from the verified `.raw` bytes!
         let key = sha256_hex(b"assets/main.js");
+        let evil_gz = gzip_compress(b"window.EVIL=1;");
+        std::fs::write(
+            cache_root.join(&hash).join("files").join(format!("{key}.gz")),
+            &evil_gz,
+        )
+        .unwrap();
+        let fresh_gz = UiBundleCache::new(dir.path(), true);
+        let loaded_gz = fresh_gz.get_cached(&hash).await.unwrap().expect("disk hit");
+        let asset_gz = loaded_gz.files.get("assets/main.js").unwrap();
+        assert_eq!(asset_gz.raw.as_ref(), b"window.READY=1;");
+        assert_eq!(
+            asset_gz.gzipped.as_ref(),
+            gzip_compress(b"window.READY=1;").as_slice(),
+            "gzipped payload must be derived from SHA-256-verified raw bytes, never an unverified .gz sidecar"
+        );
+        assert_ne!(asset_gz.gzipped.as_ref(), evil_gz.as_slice());
+
+        // Tamper a cached `.raw` file on disk -> reload MUST refuse with UiBundleTampered!
         std::fs::write(
             cache_root.join(&hash).join("files").join(format!("{key}.raw")),
             b"window.EVIL=1;",

@@ -2692,6 +2692,14 @@ async fn get_run_provenance_handler(
             .await;
     }
     let root_run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
+    // Ensure the requested root run exists before assembling the provenance graph.
+    let root_run = state.session_store.get_run(&root_run_id).await?;
+    let all_local_runs = state
+        .session_store
+        .list_runs(&root_run.org_id)
+        .await
+        .unwrap_or_default();
+
     let mut visited = std::collections::HashSet::<String>::new();
     let mut queue = std::collections::VecDeque::<RunId>::new();
     queue.push_back(root_run_id.clone());
@@ -2708,12 +2716,63 @@ async fn get_run_provenance_handler(
             unresolved.push(current_id.as_str().to_owned());
             continue;
         };
-        let manifest_preimage = state
-            .registry
-            .get_plugin_version(&run.plugin_id, Some(&run.plugin_version))
-            .await
-            .ok()
-            .and_then(|p| serde_json::to_value(p.manifest).ok());
+
+        let receipt_payload = run
+            .froglet_chain
+            .iter()
+            .rev()
+            .find(|doc| doc.get("artifact_type").and_then(Value::as_str) == Some("receipt"))
+            .or(run.froglet_receipt.as_ref())
+            .and_then(|doc| doc.get("payload"));
+
+        // Compute `bc.provenance.v1` result manifest preimage (`result_json_sha256` + `artifacts`)
+        // matching `core_traits::result_manifest_hash` whenever the signed receipt commits a `result_hash`.
+        let has_result_hash = receipt_payload
+            .and_then(|p| p.get("result_hash"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let manifest_preimage = if has_result_hash {
+            let result_blob_key = format!("runs/{}/result.json", run.run_id.as_str());
+            if let Ok((result_json_sha256, _)) =
+                state.blob_store.sha256_and_size(&result_blob_key).await
+            {
+                let artifacts: Vec<Value> = run
+                    .artifacts
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "name": a.name,
+                            "sha256": a.sha256,
+                            "size_bytes": a.size_bytes,
+                        })
+                    })
+                    .collect();
+                Some(json!({
+                    "result_json_sha256": result_json_sha256,
+                    "artifacts": artifacts,
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Extract signed `bc.child.v1:<hash>` references from `Receipt.payload.extension_refs`.
+        let mut child_receipt_hashes = std::collections::BTreeSet::<String>::new();
+        if let Some(refs) = receipt_payload
+            .and_then(|p| p.get("extension_refs"))
+            .and_then(Value::as_array)
+        {
+            for raw_ref in refs.iter().filter_map(Value::as_str) {
+                if let Ok(biocompass_core_traits::ParsedExtensionRef::Child {
+                    child_receipt_hash,
+                }) = biocompass_core_traits::parse_extension_ref(raw_ref)
+                {
+                    child_receipt_hashes.insert(child_receipt_hash);
+                }
+            }
+        }
 
         for input in &run.inputs {
             edges_out.push(json!({
@@ -2743,6 +2802,15 @@ async fn get_run_provenance_handler(
                 queue.push_back(pid);
             }
         }
+        if !child_receipt_hashes.is_empty() {
+            for candidate in &all_local_runs {
+                if candidate.parent_run_id.as_deref() == Some(run.run_id.as_str())
+                    && !visited.contains(candidate.run_id.as_str())
+                {
+                    queue.push_back(candidate.run_id.clone());
+                }
+            }
+        }
 
         // Note: `bc.provenance.v1` intentionally omits `params` for confidentiality.
         runs_out.push(json!({
@@ -2755,7 +2823,7 @@ async fn get_run_provenance_handler(
             "completed_at": run.completed_at,
             "manifest_preimage": manifest_preimage,
             "inputs": run.inputs,
-            "child_receipt_hashes": Value::Array(Vec::new()),
+            "child_receipt_hashes": child_receipt_hashes.into_iter().collect::<Vec<_>>(),
             "froglet_chain": run.froglet_chain,
         }));
     }
@@ -6525,5 +6593,237 @@ mod milestone_c_track_u_tests {
         assert_eq!(net_mod["can_install"], false);
         assert_eq!(net_mod["provider_label"], "Zurich Proteomics");
         assert!(net_mod["ui_entry_url"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn local_provenance_v1_exports_result_manifest_preimage_child_refs_and_omits_params() {
+        use biocompass_core_traits::{
+            ArtifactRef, CreditAmountAct, NodeId, OrgId, PluginId, RunId, RunQuote, RunRecord,
+            RunStatus, result_manifest_hash,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            crate::marketplace::MarketplaceConfig {
+                mode: DeploymentMode::Local,
+                airgapped: true,
+                explicit_hub_url: None,
+                default_hub_url: "https://hub.biocompass.alithea.bio".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let parent_id = RunId::new("run-prov-parent-1").unwrap();
+        let failed_id = RunId::new("run-prov-failed-1").unwrap();
+        let child_receipt_hash = "c".repeat(64);
+
+        let result_bytes = br#"{"status":"ok","hits":42}"#;
+        let result_blob_key = format!("runs/{}/result.json", parent_id.as_str());
+        state
+            .blob_store
+            .put_bytes(&result_blob_key, result_bytes)
+            .await
+            .unwrap();
+        let (result_sha, _) = state
+            .blob_store
+            .sha256_and_size(&result_blob_key)
+            .await
+            .unwrap();
+
+        let artifact = ArtifactRef {
+            name: "summary.csv".to_owned(),
+            blob_key: format!("runs/{}/artifacts/summary.csv", parent_id.as_str()),
+            media_type: "text/csv".to_owned(),
+            size_bytes: 128,
+            sha256: "a".repeat(64),
+        };
+        let expected_result_hash =
+            result_manifest_hash(&result_sha, std::slice::from_ref(&artifact)).unwrap();
+
+        let build_receipt = |result_hash: Option<String>, extension_refs: Vec<String>| {
+            json!({
+                "protocol": "froglet/v1",
+                "artifact_type": "receipt",
+                "hash": "4".repeat(64),
+                "signer": "provider-local",
+                "timestamp": 1_700_000_005,
+                "signature": "5".repeat(128),
+                "payload": {
+                    "provider_id": "provider-local",
+                    "requester_id": "requester-local",
+                    "quote_hash": "1".repeat(64),
+                    "deal_hash": "2".repeat(64),
+                    "started_at": 1_700_000_000,
+                    "finished_at": 1_700_000_005,
+                    "deal_state": if result_hash.is_some() { "succeeded" } else { "failed" },
+                    "execution_state": if result_hash.is_some() { "succeeded" } else { "failed" },
+                    "settlement_state": "none",
+                    "result_hash": result_hash,
+                    "result_format": "application/json",
+                    "result_ref": format!("blob://{result_blob_key}"),
+                    "extension_refs": extension_refs,
+                }
+            })
+        };
+
+        let make_quote = |run_id: &RunId| RunQuote {
+            run_id: run_id.clone(),
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            image_ref: format!("alithea/demo@sha256:{}", "6".repeat(64)),
+            target_node_id: NodeId::new("local").unwrap(),
+            offer_id: "default".into(),
+            offer_name: "Default".into(),
+            base_fee_act: CreditAmountAct::ZERO,
+            estimated_cost_act: CreditAmountAct::ZERO,
+            max_input_bytes: 1024,
+            max_output_bytes: 1024,
+            max_runtime_sec: 60,
+            max_memory_mb: 256,
+            workload_hash: "7".repeat(64),
+            dataset_grant_summary: None,
+            froglet_quote: json!({}),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        };
+
+        let succeeded_receipt = build_receipt(
+            Some(expected_result_hash.clone()),
+            vec![format!("bc.child.v1:{child_receipt_hash}")],
+        );
+        let parent_run = RunRecord {
+            run_id: parent_id.clone(),
+            org_id: OrgId::new("local").unwrap(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            status: RunStatus::Succeeded,
+            admission: None,
+            params: json!({ "secret_patient_token": "DO_NOT_LEAK_IN_PROVENANCE" }),
+            grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
+            quote: make_quote(&parent_id),
+            result_json: Some(json!({ "status": "ok", "hits": 42 })),
+            artifacts: vec![artifact.clone()],
+            froglet_receipt: Some(succeeded_receipt.clone()),
+            froglet_chain: vec![succeeded_receipt],
+            receipt_verified: true,
+            logs: Vec::new(),
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        state.session_store.save_run(&parent_run).await.unwrap();
+
+        let failed_receipt = build_receipt(None, Vec::new());
+        let failed_run = RunRecord {
+            run_id: failed_id.clone(),
+            org_id: OrgId::new("local").unwrap(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            status: RunStatus::Failed,
+            admission: None,
+            params: json!({ "secret_failed_param": "ALSO_DO_NOT_LEAK" }),
+            grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
+            quote: make_quote(&failed_id),
+            result_json: None,
+            artifacts: Vec::new(),
+            froglet_receipt: Some(failed_receipt.clone()),
+            froglet_chain: vec![failed_receipt],
+            receipt_verified: false,
+            logs: Vec::new(),
+            error_message: Some("boom".into()),
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        state.session_store.save_run(&failed_run).await.unwrap();
+
+        let app = build_router(state);
+
+        // 1. Succeeded run: exact `manifest_preimage` (`result_json_sha256` + `artifacts`),
+        //    extracted `child_receipt_hashes`, and ZERO `params`!
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/provenance", parent_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw_bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let raw_text = std::str::from_utf8(&raw_bytes).unwrap();
+        assert!(
+            !raw_text.contains("DO_NOT_LEAK_IN_PROVENANCE"),
+            "provenance bundle must never leak private run params"
+        );
+        let bundle: Value = serde_json::from_slice(&raw_bytes).unwrap();
+        assert_eq!(bundle["schema"], "bc.provenance.v1");
+        assert_eq!(bundle["root_run_id"], parent_id.as_str());
+        let entry = &bundle["runs"][0];
+        assert!(
+            entry.get("params").is_none(),
+            "bc.provenance.v1 run entry must omit 'params'"
+        );
+        assert_eq!(entry["child_receipt_hashes"], json!([child_receipt_hash]));
+        assert_eq!(
+            entry["manifest_preimage"],
+            json!({
+                "result_json_sha256": result_sha,
+                "artifacts": [{
+                    "name": "summary.csv",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 128
+                }]
+            })
+        );
+        // Verify preimage hashes back to the exact signed `receipt.payload.result_hash`.
+        let recomputed = result_manifest_hash(
+            entry["manifest_preimage"]["result_json_sha256"]
+                .as_str()
+                .unwrap(),
+            std::slice::from_ref(&artifact),
+        )
+        .unwrap();
+        assert_eq!(recomputed, expected_result_hash);
+
+        // 2. Failed run without signed `result_hash` -> `manifest_preimage` MUST be `null`.
+        let resp_failed = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/provenance", failed_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_failed.status(), StatusCode::OK);
+        let failed_bundle: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_failed.into_body(), 256 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(failed_bundle["runs"][0]["manifest_preimage"].is_null());
+        assert!(failed_bundle["runs"][0].get("params").is_none());
     }
 }
