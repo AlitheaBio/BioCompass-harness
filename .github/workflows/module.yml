@@ -655,7 +655,7 @@ jobs:
     name: Verify Multi-Arch Digest, Manifest & Signatures
     needs:
       - build-and-publish
-    if: ${{ inputs.publish }}
+    if: ${{ always() && needs.build-and-publish.result == 'success' && inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

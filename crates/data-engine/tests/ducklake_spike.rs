@@ -59,9 +59,7 @@ fn open_offline_duckdb() -> Connection {
         "DuckDB extension signature verification MUST remain enabled"
     );
 
-    conn.execute_batch("LOAD parquet;")
-        .expect("load built-in parquet extension");
-    for ext in ["httpfs", "postgres_scanner", "ducklake"] {
+    for ext in ["parquet", "httpfs", "postgres_scanner", "ducklake"] {
         let p = vendor_ext_path(ext);
         assert!(
             p.is_file(),
