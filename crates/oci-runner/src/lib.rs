@@ -1363,6 +1363,49 @@ impl OciContainerRunner {
         Ok(())
     }
 
+    /// Remove a run stage directory cleanly, falling back to `podman unshare rm -rf -- <dir>`
+    /// on Linux rootless Podman when container-created UID-65532 subdirectories (`out/artifacts`)
+    /// are owned by a subordinate UID that the host UID cannot unlink directly.
+    pub fn cleanup_stage_dir_sync(&self, stage_dir: &Path) -> CompassResult<()> {
+        if !stage_dir.exists() {
+            return Ok(());
+        }
+        match std::fs::remove_dir_all(stage_dir) {
+            Ok(()) => Ok(()),
+            Err(err)
+                if cfg!(target_os = "linux")
+                    && self.engine.kind == EngineKind::Podman
+                    && self.engine.rootless
+                    && stage_dir.parent().is_some() =>
+            {
+                let out = std::process::Command::new(&self.engine.binary_path)
+                    .args(["unshare", "rm", "-rf", "--"])
+                    .arg(stage_dir)
+                    .stdin(Stdio::null())
+                    .output()
+                    .map_err(|e| {
+                        CompassError::Storage(format!(
+                            "remove stage dir {} (podman unshare fallback spawn): {e}",
+                            stage_dir.display()
+                        ))
+                    })?;
+                if out.status.success() && !stage_dir.exists() {
+                    Ok(())
+                } else {
+                    Err(CompassError::Storage(format!(
+                        "remove stage dir {}: {err}; podman unshare rm failed: {}",
+                        stage_dir.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )))
+                }
+            }
+            Err(err) => Err(CompassError::Storage(format!(
+                "remove stage dir {}: {err}",
+                stage_dir.display()
+            ))),
+        }
+    }
+
     /// Execute a hardened OCI container, streaming `stdout`/`stderr` lines and enforcing `timeout_sec`.
     pub async fn execute(
         &self,
@@ -1579,6 +1622,14 @@ impl ContainerRunner for OciContainerRunner {
             Some(name) => self.force_remove_container(&name).await,
             None => Ok(()),
         }
+    }
+
+    async fn cleanup_stage_dir(&self, stage_dir: &Path) -> CompassResult<()> {
+        let runner = self.clone();
+        let path = stage_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || runner.cleanup_stage_dir_sync(&path))
+            .await
+            .map_err(|e| CompassError::Storage(format!("stage dir cleanup task: {e}")))?
     }
 }
 

@@ -163,14 +163,22 @@ fn write_seed_file(path: &Path, key: &NodeSigningKey) -> CompassResult<()> {
     Ok(())
 }
 
-/// RAII cleanup guard ensuring ephemeral `/in` & `/out` host stage directories never leak.
+/// RAII cleanup guard ensuring ephemeral `/in` & `/out` host stage directories never leak,
+/// including cross-subuid directories created by UID `65532:65532` under Linux rootless Podman.
 struct StageDirGuard {
     path: PathBuf,
+    oci_runner: Arc<OciContainerRunner>,
 }
 
 impl Drop for StageDirGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if let Err(err) = self.oci_runner.cleanup_stage_dir_sync(&self.path) {
+            tracing::warn!(
+                path = %self.path.display(),
+                %err,
+                "failed removing ephemeral run stage directory"
+            );
+        }
     }
 }
 
@@ -1175,6 +1183,7 @@ impl InProcessNodeRuntime {
             .join(format!("stage-{}-{}", run_id.as_str(), Uuid::new_v4().simple()));
         let _stage_guard = StageDirGuard {
             path: stage_dir.clone(),
+            oci_runner: Arc::clone(&self.oci_runner),
         };
         let in_dir = stage_dir.join("in");
         let out_dir = stage_dir.join("out");
