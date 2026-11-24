@@ -10,6 +10,7 @@ pub mod dataset_store;
 mod native_import;
 pub mod server;
 pub mod state;
+pub mod ui_cache;
 pub mod workspace;
 
 #[cfg(test)]

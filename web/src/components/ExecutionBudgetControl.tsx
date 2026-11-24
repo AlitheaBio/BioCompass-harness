@@ -14,14 +14,14 @@ export function readExecutionBudget(form: HTMLFormElement): ExecutionBudget | un
       return { mode, limit_milli_act: milliAct };
     }
   }
-  throw new Error("Enter a positive ACT amount with up to three decimal places.");
+  throw new Error("Enter a positive EUR amount with up to three decimal places.");
 }
 
 export function ExecutionBudgetControl({ disabled }: { disabled: boolean }) {
   const [mode, setMode] = useState("ask");
   return (
     <>
-      <label className="bc-composer-control" title="Total Org ACT the agent may spend on this message">
+      <label className="bc-composer-control" title="Total Org EUR budget the agent may spend on this message">
         Budget
         <select
           className="bc-composer-select"
@@ -32,7 +32,7 @@ export function ExecutionBudgetControl({ disabled }: { disabled: boolean }) {
           disabled={disabled}
           onChange={(event) => setMode(event.target.value)}
         >
-          <option value="ask">Ask first (0 ACT)</option>
+          <option value="ask">Ask first (€0.00)</option>
           <option value="finite">Set total…</option>
           <option value="unlimited">Unlimited</option>
         </select>
@@ -42,18 +42,18 @@ export function ExecutionBudgetControl({ disabled }: { disabled: boolean }) {
           <input
             name="execution-budget-amount"
             data-testid="execution-budget-amount"
-            aria-label="Total ACT for this execution"
+            aria-label="Total EUR for this execution"
             className="bc-composer-budget-amount mono"
             type="text"
             inputMode="decimal"
             pattern="[0-9]+(\.[0-9]{1,3})?"
             maxLength={17}
-            title="Total for this execution, in ACT with up to three decimal places"
+            title="Total for this execution, in EUR with up to three decimal places"
             disabled={disabled}
             required
             autoFocus
           />
-          ACT
+          EUR
         </label>
       )}
     </>

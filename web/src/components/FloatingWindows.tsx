@@ -18,6 +18,7 @@ import {
   ModuleRunsTab,
 } from "./ModuleTabs";
 import { SandboxedPluginFrame } from "./SandboxedPluginFrame";
+import { resolveModuleCardActions } from "../moduleListPolicy";
 import type {
   DatasetGrant,
   RunVerification,
@@ -58,6 +59,7 @@ export function FloatingWindowsLayer({
   pendingQuote,
   pendingQuoteParams = null,
   isConfirmingRun,
+  isLocalPlayLedger = false,
   liveLogs,
   verifyReport,
   onFocusWindow,
@@ -89,6 +91,7 @@ export function FloatingWindowsLayer({
   pendingQuote: RunQuote | null;
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
+  isLocalPlayLedger?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocusWindow: (winId: string) => void;
@@ -202,6 +205,7 @@ export function FloatingWindowsLayer({
             pendingQuote={hasPendingQuote ? pendingQuote : null}
             pendingQuoteParams={hasPendingQuote ? pendingQuoteParams : null}
             isConfirmingRun={isConfirmingRun && hasPendingQuote}
+            isLocalPlayLedger={isLocalPlayLedger}
             liveLogs={liveLogs}
             verifyReport={isFocused ? verifyReport : null}
             onFocus={() => onFocusWindow(win.id)}
@@ -307,6 +311,7 @@ export function ModuleFloatingWindow({
   pendingQuote,
   pendingQuoteParams = null,
   isConfirmingRun,
+  isLocalPlayLedger = false,
   liveLogs,
   verifyReport,
   onFocus,
@@ -340,6 +345,7 @@ export function ModuleFloatingWindow({
   pendingQuote: RunQuote | null;
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
+  isLocalPlayLedger?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocus: () => void;
@@ -616,11 +622,46 @@ export function ModuleFloatingWindow({
       {/* Window Body */}
       <div className="bc-window-body">
         {/* Keep custom UI iframe mounted so postMessage run updates stay seamless */}
-        {plugin.has_custom_ui && (
+        {plugin.has_custom_ui && (() => {
+          const actions = resolveModuleCardActions(plugin, isLocalPlayLedger);
+          return (
           <div
             className="bc-window-iframe-pane"
             style={{ display: win.activeTab === "ui" ? "flex" : "none" }}
           >
+            {actions.isNetworkRunOnly && (
+              <div
+                data-testid="network-run-handoff-banner"
+                style={{
+                  padding: "8px 12px",
+                  borderBottom: "1px solid var(--bc-border)",
+                  background: "var(--bc-bg-subtle)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  fontSize: 12.5,
+                }}
+              >
+                <span>
+                  <span className="bc-badge bc-badge-accent" style={{ marginRight: 8 }}>
+                    {actions.runsAtProviderLabel ?? "Runs at provider"}
+                  </span>
+                  UI served from this workspace&apos;s verified cache. Execution runs on the provider&apos;s hub.
+                </span>
+                {actions.safeHandoffUrl && (
+                  <a
+                    className="bc-btn bc-btn-secondary bc-btn-sm"
+                    href={actions.safeHandoffUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="network-run-handoff-link"
+                  >
+                    Run at {plugin.provider_label ?? "provider"} ↗
+                  </a>
+                )}
+              </div>
+            )}
             {terminalProblem && (
               <div role="alert" className="bc-error-banner" data-testid="module-run-problem" data-run-id={terminalProblem.run_id}>
                 <div className="bc-error-banner-body">
@@ -650,7 +691,8 @@ export function ModuleFloatingWindow({
               onSyncDraftParams={onSyncDraftParams}
             />
           </div>
-        )}
+          );
+        })()}
 
         {win.activeTab === "run" && (
           <ModuleApiTab
@@ -661,6 +703,7 @@ export function ModuleFloatingWindow({
             sessionId={sessionId}
             isFocused={isFocused}
             isConfirmingRun={isConfirmingRun}
+            isLocalPlayLedger={isLocalPlayLedger}
             onSyncDraftParams={onSyncDraftParams}
             onRunApiTest={onRunApiTest}
             onQuoteConfirmed={onQuoteConfirmed}
@@ -675,6 +718,7 @@ export function ModuleFloatingWindow({
             requestedRunId={win.requestedRunId}
             isFocused={isFocused}
             isConfirmingRun={isConfirmingRun}
+            isLocalPlayLedger={isLocalPlayLedger}
             liveLogs={liveLogs}
             verifyReport={verifyReport}
             onClearRequestedRunId={() => onChangeTab("results")}
@@ -684,7 +728,11 @@ export function ModuleFloatingWindow({
         )}
 
         {win.activeTab === "about" && (
-          <ModuleAboutTab plugin={plugin} isFocused={isFocused} />
+          <ModuleAboutTab
+            plugin={plugin}
+            isFocused={isFocused}
+            isLocalPlayLedger={isLocalPlayLedger}
+          />
         )}
       </div>
 

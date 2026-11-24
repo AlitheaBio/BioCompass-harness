@@ -8,8 +8,13 @@ use crate::llm_backends::{
     test_llm_connection,
 };
 use crate::state::{AppState, DeploymentMode, local_catalog_dir, save_saved_llm_config};
+use crate::ui_cache::{
+    CachedIcon, OPEN_TICKET_LIFETIME_SECS, RemoteUiSource, U1_TICKET_PREFIX, UiBundleCache,
+    UiOpenGrant, caller_auth_scope, extract_browser_session_sha256, icon_cache_scope_for_headers,
+    render_cached_ui_asset,
+};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path as AxumPath, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -452,6 +457,10 @@ fn build_cors_layer(state: &AppState) -> CorsLayer {
 
 pub fn build_router(state: AppState) -> Router {
     let cors = build_cors_layer(&state);
+    let ui_cache = Arc::new(UiBundleCache::new(
+        &state.data_dir,
+        state.mode == DeploymentMode::Local,
+    ));
     let prepare = post(prepare_run_handler);
     let (prepare, run_events) = if let Some(hub) = &state.hub_client {
         (
@@ -478,11 +487,26 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::workspace::routes())
         .route("/v1/feed", get(proxy_public_marketplace_handler))
         .route("/v1/artifacts/:hash", get(proxy_public_marketplace_artifact_handler))
+        .route("/api/v1/ui-bundles/:hash", get(proxy_public_marketplace_artifact_handler))
         .route("/v1/registrations", post(proxy_public_marketplace_handler))
         .route("/api/v1/health", get(get_health))
         .route("/api/v1/marketplace/status", get(get_marketplace_status_handler))
         .route("/api/v1/marketplace/consent", put(update_marketplace_consent_handler))
         .route("/api/v1/marketplace/sync", post(sync_marketplace_handler))
+        .route(
+            "/api/v1/workspace/hub",
+            get(get_workspace_hub_handler).put(update_workspace_hub_handler),
+        )
+        .route("/api/v1/workspace/hub/login", post(login_workspace_hub_handler))
+        .route("/api/v1/workspace/hub/logout", post(logout_workspace_hub_handler))
+        .route(
+            "/api/v1/workspace/network-offers",
+            get(list_subscribed_network_offers_handler).post(subscribe_network_offer_handler),
+        )
+        .route(
+            "/api/v1/workspace/network-offers/:offer_id",
+            delete(unsubscribe_network_offer_handler),
+        )
         .route("/api/v1/app-distribution", get(crate::app_distribution::discover))
         .route("/api/v1/app-distribution/download", get(crate::app_distribution::download))
         .route("/api/v1/auth/whoami", get(get_whoami_handler))
@@ -492,6 +516,25 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/audit-logs", get(proxy_cloud_route_handler))
         .route("/api/v1/billing/*path", any(proxy_cloud_route_handler))
         .route("/api/v1/admin/*path", any(proxy_cloud_route_handler))
+        .route(
+            "/api/v1/agent-credentials",
+            get(proxy_cloud_route_handler).post(proxy_cloud_route_handler),
+        )
+        .route("/api/v1/agent-credentials/*path", any(proxy_cloud_route_handler))
+        .route(
+            "/api/v1/webhooks",
+            get(proxy_cloud_route_handler).post(proxy_cloud_route_handler),
+        )
+        .route("/api/v1/webhooks/*path", any(proxy_cloud_route_handler))
+        .route(
+            "/api/v1/documents",
+            get(proxy_cloud_route_handler).post(proxy_cloud_route_handler),
+        )
+        .route("/api/v1/documents/*path", any(proxy_cloud_route_handler))
+        .route(
+            "/api/v1/mcp",
+            post(proxy_cloud_route_handler).delete(proxy_cloud_route_handler),
+        )
         .route("/api/v1/nodes", get(proxy_cloud_route_handler))
         .route("/api/v1/nodes/*path", any(proxy_cloud_route_handler))
         .route(
@@ -579,6 +622,14 @@ pub fn build_router(state: AppState) -> Router {
             post(pin_catalog_snapshot_handler),
         )
         .route(
+            "/api/v1/catalogs/:ns/:name/placement",
+            patch(proxy_cloud_route_handler),
+        )
+        .route(
+            "/api/v1/catalogs/:ns/:name/licensed-copy-manifest",
+            get(proxy_cloud_route_handler),
+        )
+        .route(
             "/api/v1/plugins",
             get(list_plugins_handler).post(proxy_cloud_route_handler),
         )
@@ -604,6 +655,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/runs/:run_id/cancel", post(proxy_cloud_route_handler))
         .route("/api/v1/runs/:run_id/events", run_events)
         .route("/api/v1/runs/:run_id/chain", get(get_run_chain_handler))
+        .route("/api/v1/runs/:run_id/provenance", get(get_run_provenance_handler))
         .route(
             "/api/v1/runs/:run_id/artifacts/*artifact_name",
             get(get_run_artifact_handler),
@@ -645,6 +697,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/plugin-ui-access/:ticket/*asset_path", get(serve_plugin_ui_access))
         .route("/plugin-icon/:ns/:slug", get(serve_plugin_icon))
         .fallback(serve_embedded_spa)
+        .layer(Extension(ui_cache))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             local_loopback_guard_middleware,
@@ -703,6 +756,12 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         .unwrap_or_default();
     let plugins = state.registry.list_plugins().await.unwrap_or_default();
     let marketplace = state.marketplace.status().await;
+    let workspace_hub = state.marketplace.workspace_hub_status().await;
+    let workspace_hub_url = state
+        .installed_workspace
+        .as_deref()
+        .map(|w| w.hub_url().to_owned())
+        .or_else(|| workspace_hub.hub_url.clone());
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -715,7 +774,8 @@ async fn get_health(State(state): State<AppState>) -> Json<Value> {
         "llm_model": state.agent.llm_model_name().await,
         "catalog_count": catalogs.len(),
         "plugin_count": plugins.len(),
-        "workspace_hub_url": state.installed_workspace.as_deref().map(|w| w.hub_url()),
+        "workspace_hub_url": workspace_hub_url,
+        "workspace_hub": workspace_hub,
         "marketplace_prompt_required": marketplace.prompt_required,
         "marketplace_status": marketplace,
     }))
@@ -739,6 +799,7 @@ struct UpdateMarketplaceConsentRequest {
 
 async fn update_marketplace_consent_handler(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
     Json(req): Json<UpdateMarketplaceConsentRequest>,
 ) -> ApiResult<Response> {
@@ -752,11 +813,13 @@ async fn update_marketplace_consent_handler(
         .marketplace
         .set_consent(req.decision, req.hub_url, req.sync_now)
         .await?;
+    prefetch_offers_ui_bundles(&ui_cache, &snapshot.hub_url, &snapshot.offers_preview).await;
     Ok(Json(snapshot).into_response())
 }
 
 async fn sync_marketplace_handler(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     if let Err(resp) = require_json_content_type(&headers) {
@@ -766,7 +829,198 @@ async fn sync_marketplace_handler(
         crate::native_import::operator::authorize(&state, &headers)?;
     }
     let snapshot = state.marketplace.sync_now().await?;
+    prefetch_offers_ui_bundles(&ui_cache, &snapshot.hub_url, &snapshot.offers_preview).await;
     Ok(Json(snapshot).into_response())
+}
+
+async fn prefetch_offers_ui_bundles(
+    ui_cache: &Arc<UiBundleCache>,
+    hub_url: &str,
+    offers: &[crate::marketplace::MarketplaceOfferSummary],
+) {
+    if hub_url.trim().is_empty() {
+        return;
+    }
+    for offer in offers {
+        if let Some(hash) = offer.ui_bundle_hash.as_deref() {
+            if let (Some(plugin_id), Some(version)) =
+                (offer.plugin_id.as_deref(), offer.version.as_deref())
+            {
+                ui_cache
+                    .register_remote_ui(
+                        "local",
+                        plugin_id,
+                        version,
+                        RemoteUiSource {
+                            hub_origin: hub_url.to_owned(),
+                            ui_bundle_hash: hash.to_owned(),
+                            entry: "index.html".to_owned(),
+                        },
+                    )
+                    .await;
+            }
+            ui_cache.prefetch_background(hash.to_owned(), hub_url.to_owned(), None);
+        }
+    }
+}
+
+async fn get_workspace_hub_handler(
+    State(state): State<AppState>,
+) -> Json<crate::marketplace::WorkspaceHubStatus> {
+    Json(state.marketplace.workspace_hub_status().await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateWorkspaceHubRequest {
+    mode: crate::marketplace::WorkspaceHubMode,
+    #[serde(default)]
+    hub_url: Option<String>,
+    #[serde(default)]
+    auth_bearer: Option<String>,
+}
+
+async fn update_workspace_hub_handler(
+    State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateWorkspaceHubRequest>,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let status = state
+        .marketplace
+        .set_workspace_hub(req.mode, req.hub_url, req.auth_bearer)
+        .await?;
+    // Drop stale module UI pointers from the previous hub so switched-away modules cannot
+    // resolve via cached `(plugin_id, version)` lookups.
+    ui_cache.clear_remote_ui_scope("local").await;
+    if let Some((hub_origin, auth)) = state.marketplace.active_hub_origin_and_auth().await {
+        let remote_modules = state
+            .marketplace
+            .list_remote_and_subscribed_modules(auth.as_ref())
+            .await;
+        for m in &remote_modules {
+            if let Some(hash) = m.ui_bundle_hash.as_deref() {
+                let entry = m
+                    .manifest
+                    .ui
+                    .as_ref()
+                    .and_then(|u| Path::new(&u.entry).file_name()?.to_str())
+                    .unwrap_or("index.html")
+                    .to_owned();
+                let same_hub_auth = (m.hub_origin == hub_origin)
+                    .then(|| auth.clone())
+                    .flatten();
+                ui_cache
+                    .register_remote_ui(
+                        "local",
+                        m.manifest.id.as_str(),
+                        &m.manifest.version,
+                        RemoteUiSource {
+                            hub_origin: m.hub_origin.clone(),
+                            ui_bundle_hash: hash.to_owned(),
+                            entry,
+                        },
+                    )
+                    .await;
+                ui_cache.prefetch_background(
+                    hash.to_owned(),
+                    m.hub_origin.clone(),
+                    same_hub_auth,
+                );
+            }
+        }
+    }
+    Ok(Json(status).into_response())
+}
+
+async fn login_workspace_hub_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let status = state.marketplace.login_workspace_hub(payload).await?;
+    Ok(Json(status).into_response())
+}
+
+async fn logout_workspace_hub_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let status = state.marketplace.logout_workspace_hub().await;
+    Ok(Json(status).into_response())
+}
+
+async fn list_subscribed_network_offers_handler(State(state): State<AppState>) -> Json<Value> {
+    let subscribed = state.marketplace.list_subscribed_network_offers().await;
+    let status = state.marketplace.status().await;
+    Json(json!({
+        "subscribed": subscribed,
+        "available": status.offers_preview,
+        "hub_url": status.hub_url,
+    }))
+}
+
+async fn subscribe_network_offer_handler(
+    State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
+    headers: HeaderMap,
+    Json(offer): Json<crate::marketplace::SubscribedNetworkOffer>,
+) -> ApiResult<Response> {
+    if let Err(resp) = require_json_content_type(&headers) {
+        return Ok(*resp);
+    }
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let validated_hub = offer.hub_url.clone();
+    let validated_plugin_id = offer.plugin_id.clone();
+    let validated_version = offer.version.clone();
+    let validated_hash = offer.ui_bundle_hash.clone();
+    // Validate SSRF/airgap/plugin_id/version/hash BEFORE touching cache or launching prefetch.
+    let subscribed = state.marketplace.subscribe_network_offer(offer).await?;
+    if let Some(hash) = validated_hash {
+        ui_cache
+            .register_remote_ui(
+                "local",
+                &validated_plugin_id,
+                &validated_version,
+                RemoteUiSource {
+                    hub_origin: validated_hub.clone(),
+                    ui_bundle_hash: hash.clone(),
+                    entry: "index.html".to_owned(),
+                },
+            )
+            .await;
+        ui_cache.prefetch_background(hash, validated_hub, None);
+    }
+    Ok(Json(json!({ "subscribed": subscribed })).into_response())
+}
+
+async fn unsubscribe_network_offer_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(offer_id): AxumPath<String>,
+) -> ApiResult<Response> {
+    if state.mode == DeploymentMode::Local {
+        crate::native_import::operator::authorize(&state, &headers)?;
+    }
+    let subscribed = state.marketplace.unsubscribe_network_offer(&offer_id).await?;
+    Ok(Json(json!({ "subscribed": subscribed })).into_response())
 }
 
 async fn proxy_public_marketplace_handler(
@@ -1034,6 +1288,12 @@ struct PluginSummaryDto {
     installed_locally: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    marketplace_offer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hub_origin: Option<String>,
     requires_catalog_level: GrantLevel,
     removable: bool,
     removable_versions: Vec<String>,
@@ -1107,23 +1367,87 @@ fn resolve_safe_plugin_icon(plugin: &LoadedPlugin) -> Option<std::path::PathBuf>
 
 async fn to_plugin_dto(
     state: &AppState,
+    ui_cache: Option<&Arc<UiBundleCache>>,
     plugin: LoadedPlugin,
-    hub_meta: crate::cloud_client::HubPluginMeta,
+    mut hub_meta: crate::cloud_client::HubPluginMeta,
 ) -> PluginSummaryDto {
+    let mut ui_bundle_hash = hub_meta.ui_bundle_hash.take();
+    let mut ui_bundle_size_bytes = hub_meta.ui_bundle_size_bytes.take();
+    if let Some(cache) = ui_cache {
+        if let (Some(hash), Some(origin)) = (ui_bundle_hash.as_deref(), hub_meta.hub_origin.as_deref())
+        {
+            let entry = plugin
+                .manifest
+                .ui
+                .as_ref()
+                .and_then(|ui| Path::new(&ui.entry).file_name()?.to_str())
+                .unwrap_or("index.html")
+                .to_owned();
+            let (scope, auth) = if state.hub_client.is_some() {
+                let caller = current_caller_auth();
+                (caller_auth_scope(&caller), Some(caller))
+            } else {
+                let active = state
+                    .marketplace
+                    .active_hub_origin_and_auth()
+                    .await
+                    .and_then(|(active_origin, a)| (active_origin == origin).then_some(a))
+                    .flatten();
+                ("local".to_owned(), active)
+            };
+            cache
+                .register_remote_ui(
+                    &scope,
+                    plugin.manifest.id.as_str(),
+                    &plugin.manifest.version,
+                    RemoteUiSource {
+                        hub_origin: origin.to_owned(),
+                        ui_bundle_hash: hash.to_owned(),
+                        entry,
+                    },
+                )
+                .await;
+            cache.prefetch_background(hash.to_owned(), origin.to_owned(), auth);
+        } else if ui_bundle_hash.is_none()
+            && let Some((ui, root)) = plugin.manifest.ui.as_ref().zip(plugin.root_dir.as_ref())
+        {
+            let entry_rel = Path::new(&ui.entry);
+            let ui_dist_dir = entry_rel
+                .parent()
+                .map(|p| root.join(p))
+                .unwrap_or_else(|| root.to_path_buf());
+            let entry_name = entry_rel
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("index.html");
+            if ui_dist_dir.is_dir()
+                && let Ok(local_bundle) = cache.load_local_dir(&ui_dist_dir, entry_name).await
+            {
+                ui_bundle_hash = Some(local_bundle.ui_bundle_hash.clone());
+                ui_bundle_size_bytes = Some(local_bundle.total_raw_bytes);
+            }
+        }
+    }
+
     let has_ui_bundle = if let Some(ready) = hub_meta.has_ui_bundle {
-        ready && plugin.manifest.ui.is_some()
+        ready && (plugin.manifest.ui.is_some() || ui_bundle_hash.is_some())
     } else if let Some((ui, root)) = plugin.manifest.ui.as_ref().zip(plugin.root_dir.as_ref()) {
         root.join(&ui.entry).is_file()
+    } else if ui_bundle_hash.is_some() {
+        true
     } else {
         // Older hubs sent only a manifest.
         state.mode == DeploymentMode::CloudWeb && plugin.manifest.ui.is_some()
     };
-    let ui_entry_url = plugin
+    let ui_entry_name = plugin
         .manifest
         .ui
         .as_ref()
-        .filter(|_| has_ui_bundle)
         .and_then(|ui| Path::new(&ui.entry).file_name()?.to_str())
+        .or_else(|| ui_bundle_hash.is_some().then_some("index.html"));
+    let ui_entry_url = has_ui_bundle
+        .then_some(ui_entry_name)
+        .flatten()
         .map(|entry| pinned_ui_path(&plugin.manifest.id, &plugin.manifest.version, entry));
     let icon_url = if resolve_safe_plugin_icon(&plugin).is_some() || hub_meta.has_remote_icon {
         Some(format!("/plugin-icon/{}", plugin.manifest.id))
@@ -1131,9 +1455,27 @@ async fn to_plugin_dto(
         None
     };
     let author = resolve_plugin_author(&plugin.manifest);
-    let (execution_target, execution_label) = resolve_execution_target(state, &plugin.manifest);
-    let installed = match (&state.oci_runner, execution_target) {
-        (Some(runner), "local") => {
+    let (mut execution_target, mut execution_label) = resolve_execution_target(state, &plugin.manifest);
+    let source = hub_meta.source.unwrap_or(match state.mode {
+        DeploymentMode::Local => biocompass_core_traits::ModuleSource::Workspace,
+        DeploymentMode::CloudWeb => biocompass_core_traits::ModuleSource::OrgCloud,
+    });
+    let runs_in = hub_meta.runs_in.unwrap_or(match execution_target {
+        "local" => biocompass_core_traits::ModuleRunsIn::Local,
+        "froglet_node" => biocompass_core_traits::ModuleRunsIn::ProviderEdge,
+        _ => biocompass_core_traits::ModuleRunsIn::Cloud,
+    });
+    if source == biocompass_core_traits::ModuleSource::NetworkProvider
+        || runs_in == biocompass_core_traits::ModuleRunsIn::NetworkProvider
+    {
+        execution_target = "froglet_node";
+        execution_label = "Network Provider";
+    } else if runs_in == biocompass_core_traits::ModuleRunsIn::Cloud {
+        execution_target = "alithea_cloud";
+        execution_label = "Cloud Workspace";
+    }
+    let installed = match (&state.oci_runner, runs_in) {
+        (Some(runner), biocompass_core_traits::ModuleRunsIn::Local) => {
             if runner.has_local_image(&plugin.manifest.image).await {
                 true
             } else if let Some(rt) = &state.local_runtime {
@@ -1156,17 +1498,12 @@ async fn to_plugin_dto(
             .collect(),
         _ => Vec::new(),
     };
-    let source = hub_meta.source.unwrap_or(match state.mode {
-        DeploymentMode::Local => biocompass_core_traits::ModuleSource::Workspace,
-        DeploymentMode::CloudWeb => biocompass_core_traits::ModuleSource::OrgCloud,
-    });
-    let runs_in = hub_meta.runs_in.unwrap_or(match execution_target {
-        "local" => biocompass_core_traits::ModuleRunsIn::Local,
-        "froglet_node" => biocompass_core_traits::ModuleRunsIn::ProviderEdge,
-        _ => biocompass_core_traits::ModuleRunsIn::Cloud,
-    });
     let installed_locally =
         hub_meta.installed_locally || (installed && runs_in == biocompass_core_traits::ModuleRunsIn::Local);
+    let can_install = hub_meta.can_install
+        || (state.mode == DeploymentMode::Local
+            && source == biocompass_core_traits::ModuleSource::Workspace
+            && !installed_locally);
     let views = plugin.manifest.views.clone();
     let effective_offers = plugin.manifest.effective_offers();
     PluginSummaryDto {
@@ -1182,11 +1519,14 @@ async fn to_plugin_dto(
         execution_label: execution_label.into(),
         source,
         runs_in,
-        ui_bundle_hash: hub_meta.ui_bundle_hash,
-        ui_bundle_size_bytes: hub_meta.ui_bundle_size_bytes,
-        can_install: hub_meta.can_install,
+        ui_bundle_hash,
+        ui_bundle_size_bytes,
+        can_install,
         installed_locally,
         provider_label: hub_meta.provider_label,
+        launch_url: hub_meta.launch_url,
+        marketplace_offer_id: hub_meta.marketplace_offer_id,
+        hub_origin: hub_meta.hub_origin,
         requires_catalog_level,
         removable,
         removable_versions,
@@ -1197,18 +1537,22 @@ async fn to_plugin_dto(
 
 async fn offered_run_module_handler(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     AxumPath(offer_id): AxumPath<String>,
 ) -> ApiResult<Response> {
     let hub = state.hub_client.as_ref().ok_or_else(|| {
         CompassError::AccessDenied("module offers require a hosted workspace".into())
     })?;
     let (plugin, published_ui) = hub.offered_run_module(&offer_id).await?;
-    let mut response = Json(to_plugin_dto(&state, plugin, published_ui).await).into_response();
+    let mut response = Json(to_plugin_dto(&state, Some(&ui_cache), plugin, published_ui).await).into_response();
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     Ok(response)
 }
 
-async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn list_plugins_handler(
+    State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
+) -> ApiResult<Json<Value>> {
     let plugins = if let Some(hub) = &state.hub_client {
         hub.list_plugins_with_ui().await?
     } else {
@@ -1223,13 +1567,57 @@ async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<V
     let dtos = futures::future::join_all(
         plugins
             .into_iter()
-            .map(|(p, meta)| to_plugin_dto(&state, p, meta)),
+            .map(|(p, meta)| to_plugin_dto(&state, Some(&ui_cache), p, meta)),
     )
     .await;
     let mut by_id: std::collections::BTreeMap<_, _> = dtos
         .into_iter()
         .map(|dto| (dto.manifest.id.as_str().to_owned(), dto))
         .collect();
+
+    // U3 / U2: When local mode is connected to a cloud hub (or has subscribed network offers),
+    // merge remote hub modules and pre-fetch their verified U1 UI bundles.
+    if state.mode == DeploymentMode::Local {
+        let caller = current_caller_auth();
+        let remote_modules = state
+            .marketplace
+            .list_remote_and_subscribed_modules(Some(&caller))
+            .await;
+        for remote in remote_modules {
+            let id_key = remote.manifest.id.as_str().to_owned();
+            if let Some(existing) = by_id.get_mut(&id_key) {
+                if existing.ui_bundle_hash.is_none() {
+                    existing.ui_bundle_hash = remote.ui_bundle_hash.clone();
+                }
+                if existing.provider_label.is_none() {
+                    existing.provider_label = remote.provider_label.clone();
+                }
+                continue;
+            }
+            let meta = crate::cloud_client::HubPluginMeta {
+                has_ui_bundle: Some(remote.has_ui_bundle),
+                has_remote_icon: remote.has_remote_icon,
+                source: Some(remote.source),
+                runs_in: Some(remote.runs_in),
+                ui_bundle_hash: remote.ui_bundle_hash,
+                ui_bundle_size_bytes: remote.ui_bundle_size_bytes,
+                can_install: remote.can_install,
+                installed_locally: false,
+                provider_label: remote.provider_label,
+                launch_url: remote.launch_url,
+                marketplace_offer_id: remote.offer_id,
+                hub_origin: Some(remote.hub_origin),
+            };
+            let loaded = LoadedPlugin {
+                manifest: remote.manifest,
+                skill: remote.skill,
+                root_dir: None,
+            };
+            let dto = to_plugin_dto(&state, Some(&ui_cache), loaded, meta).await;
+            by_id.insert(id_key, dto);
+        }
+    }
+
     let mut detached = std::collections::BTreeMap::<String, Vec<LoadedPlugin>>::new();
     for plugin in crate::package_install::removal::detached(&state)? {
         detached
@@ -1243,11 +1631,13 @@ async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<V
         } else {
             let mut card = to_plugin_dto(
                 &state,
+                Some(&ui_cache),
                 versions.last().expect("nonempty source releases").clone(),
                 crate::cloud_client::HubPluginMeta::default(),
             )
             .await;
             card.installed = false;
+            card.installed_locally = false;
             card.removable = false;
             card.has_custom_ui = false;
             card.ui_entry_url = None;
@@ -1256,9 +1646,9 @@ async fn list_plugins_handler(State(state): State<AppState>) -> ApiResult<Json<V
         };
         card.detached_versions = versions.into_iter().map(|p| p.manifest.version).collect();
     }
-    Ok(Json(
-        json!({ "plugins": by_id.into_values().collect::<Vec<_>>() }),
-    ))
+    Ok(Json(json!({
+        "plugins": by_id.into_values().collect::<Vec<_>>(),
+    })))
 }
 
 #[derive(Default, Deserialize)]
@@ -1368,7 +1758,7 @@ async fn install_plugin_handler(
             }
         }
     };
-    let mut dto = to_plugin_dto(&state, plugin, crate::cloud_client::HubPluginMeta::default()).await;
+    let mut dto = to_plugin_dto(&state, None, plugin, crate::cloud_client::HubPluginMeta::default()).await;
     dto.detached_versions = crate::package_install::removal::detached(&state)?
         .into_iter()
         .filter(|p| p.manifest.id == plugin_id)
@@ -2291,6 +2681,169 @@ async fn get_run_chain_handler(
     Ok(resp)
 }
 
+async fn get_run_provenance_handler(
+    State(state): State<AppState>,
+    AxumPath(run_id_raw): AxumPath<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if state.hub_client.is_some() {
+        return proxy_cloud_route_handler(State(state), Method::GET, uri, headers, Bytes::new())
+            .await;
+    }
+    let root_run_id = RunId::new(run_id_raw).map_err(CompassError::Validation)?;
+    // Ensure the requested root run exists before assembling the provenance graph.
+    let root_run = state.session_store.get_run(&root_run_id).await?;
+    let all_local_runs = state
+        .session_store
+        .list_runs(&root_run.org_id)
+        .await
+        .unwrap_or_default();
+
+    let mut visited = std::collections::HashSet::<String>::new();
+    let mut queue = std::collections::VecDeque::<RunId>::new();
+    queue.push_back(root_run_id.clone());
+
+    let mut runs_out = Vec::<Value>::new();
+    let mut edges_out = Vec::<Value>::new();
+    let mut unresolved = Vec::<String>::new();
+
+    while let Some(current_id) = queue.pop_front() {
+        if !visited.insert(current_id.as_str().to_owned()) {
+            continue;
+        }
+        let Ok(run) = state.session_store.get_run(&current_id).await else {
+            unresolved.push(current_id.as_str().to_owned());
+            continue;
+        };
+
+        let receipt_payload = run
+            .froglet_chain
+            .iter()
+            .rev()
+            .find(|doc| doc.get("artifact_type").and_then(Value::as_str) == Some("receipt"))
+            .or(run.froglet_receipt.as_ref())
+            .and_then(|doc| doc.get("payload"));
+
+        // Compute `bc.provenance.v1` result manifest preimage (`result_json_sha256` + `artifacts`)
+        // matching `core_traits::result_manifest_hash` whenever the signed receipt commits a `result_hash`.
+        let has_result_hash = receipt_payload
+            .and_then(|p| p.get("result_hash"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let manifest_preimage = if has_result_hash {
+            let result_blob_key = format!("runs/{}/result.json", run.run_id.as_str());
+            if let Ok((result_json_sha256, _)) =
+                state.blob_store.sha256_and_size(&result_blob_key).await
+            {
+                let artifacts: Vec<Value> = run
+                    .artifacts
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "name": a.name,
+                            "sha256": a.sha256,
+                            "size_bytes": a.size_bytes,
+                        })
+                    })
+                    .collect();
+                Some(json!({
+                    "result_json_sha256": result_json_sha256,
+                    "artifacts": artifacts,
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Extract signed `bc.child.v1:<hash>` references from `Receipt.payload.extension_refs`.
+        let mut child_receipt_hashes = std::collections::BTreeSet::<String>::new();
+        if let Some(refs) = receipt_payload
+            .and_then(|p| p.get("extension_refs"))
+            .and_then(Value::as_array)
+        {
+            for raw_ref in refs.iter().filter_map(Value::as_str) {
+                if let Ok(biocompass_core_traits::ParsedExtensionRef::Child {
+                    child_receipt_hash,
+                }) = biocompass_core_traits::parse_extension_ref(raw_ref)
+                {
+                    child_receipt_hashes.insert(child_receipt_hash);
+                }
+            }
+        }
+
+        for input in &run.inputs {
+            edges_out.push(json!({
+                "run_id": run.run_id,
+                "source_kind": "run_artifact",
+                "source_ref": format!("{}:{}", input.source_run_id, input.name),
+                "target_kind": "run_input",
+                "target_ref": input.alias,
+            }));
+            if let Ok(src_id) = RunId::new(input.source_run_id.clone())
+                && !visited.contains(src_id.as_str())
+            {
+                queue.push_back(src_id);
+            }
+        }
+        if let Some(parent_id) = &run.parent_run_id {
+            edges_out.push(json!({
+                "run_id": run.run_id,
+                "source_kind": "parent_run",
+                "source_ref": parent_id,
+                "target_kind": "child_run",
+                "target_ref": run.run_id,
+            }));
+            if let Ok(pid) = RunId::new(parent_id.clone())
+                && !visited.contains(pid.as_str())
+            {
+                queue.push_back(pid);
+            }
+        }
+        if !child_receipt_hashes.is_empty() {
+            for candidate in &all_local_runs {
+                if candidate.parent_run_id.as_deref() == Some(run.run_id.as_str())
+                    && !visited.contains(candidate.run_id.as_str())
+                {
+                    queue.push_back(candidate.run_id.clone());
+                }
+            }
+        }
+
+        // Note: `bc.provenance.v1` intentionally omits `params` for confidentiality.
+        runs_out.push(json!({
+            "run_id": run.run_id,
+            "plugin_id": run.plugin_id,
+            "plugin_version": run.plugin_version,
+            "status": run.status,
+            "parent_run_id": run.parent_run_id,
+            "created_at": run.created_at,
+            "completed_at": run.completed_at,
+            "manifest_preimage": manifest_preimage,
+            "inputs": run.inputs,
+            "child_receipt_hashes": child_receipt_hashes.into_iter().collect::<Vec<_>>(),
+            "froglet_chain": run.froglet_chain,
+        }));
+    }
+
+    let bundle = json!({
+        "schema": "bc.provenance.v1",
+        "exported_at": chrono::Utc::now(),
+        "root_run_id": root_run_id,
+        "runs": runs_out,
+        "edges": edges_out,
+        "unresolved_ancestors": unresolved,
+    });
+    let mut resp = Json(bundle).into_response();
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(resp)
+}
+
 async fn get_run_artifact_handler(
     State(state): State<AppState>,
     AxumPath((run_id_raw, artifact_name)): AxumPath<(String, String)>,
@@ -2357,7 +2910,9 @@ async fn get_ledger_handler(
     Ok(Json(json!({
         "org_id": state.default_org_id,
         "available_milli_act": bal.milli_act(),
-        "available_display": bal.display_act(),
+        "available_display": bal.display_local_credits(),
+        "is_local_play_ledger": true,
+        "currency_label": "local play credits",
         "transactions": txs,
     }))
     .into_response())
@@ -2660,10 +3215,32 @@ fn apply_plugin_ui_sandbox_headers(resp: &mut Response) {
 
 async fn serve_plugin_ui_access(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
+    AxumPath((ticket, asset_path)): AxumPath<(String, String)>,
     uri: Uri,
 ) -> ApiResult<Response> {
     reject_top_level_plugin_ui_navigation(&headers)?;
+    if ticket.starts_with(U1_TICKET_PREFIX) {
+        let grant = ui_cache
+            .verify_open_ticket(&ticket, &headers, &asset_path)
+            .await?;
+        let bundle = if let Some(hash) = grant.ui_bundle_hash.as_deref() {
+            ui_cache
+                .get_cached(hash)
+                .await?
+                .ok_or_else(|| {
+                    CompassError::NotFound(format!("cached UI bundle '{hash}' evicted; reopen module"))
+                })?
+        } else if let Some(local_root) = grant.local_ui_root.as_deref() {
+            ui_cache.load_local_dir(local_root, &grant.entry).await?
+        } else {
+            return Err(CompassError::NotFound("module UI bundle unavailable".into()).into());
+        };
+        let mut resp = render_cached_ui_asset(&bundle, &asset_path, &headers)?;
+        apply_plugin_ui_sandbox_headers(&mut resp);
+        return Ok(resp);
+    }
     let mut resp =
         proxy_cloud_route_handler(State(state), Method::GET, uri, headers, Bytes::new()).await?;
     if resp.status().is_success() {
@@ -2674,23 +3251,28 @@ async fn serve_plugin_ui_access(
 
 async fn serve_pinned_plugin_ui(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
     AxumPath((ns, slug, version, asset)): AxumPath<(String, String, String, String)>,
 ) -> ApiResult<Response> {
     reject_top_level_plugin_ui_navigation(&headers)?;
     let version = version.strip_prefix('v')
         .ok_or_else(|| CompassError::Validation("invalid UI release path".into()))?;
-    serve_plugin_asset(&state, &headers, ns, slug, asset, Some(version)).await
+    serve_plugin_asset(&state, &ui_cache, &headers, ns, slug, asset, Some(version)).await
 }
 
 async fn serve_plugin_ui_asset(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
     AxumPath((ns, slug, asset)): AxumPath<(String, String, String)>,
     Query(selection): Query<UiAssetSelection>,
     uri: Uri,
 ) -> ApiResult<Response> {
     reject_top_level_plugin_ui_navigation(&headers)?;
+    if let Some(version) = selection.version.as_deref() {
+        return serve_plugin_asset(&state, &ui_cache, &headers, ns, slug, asset, Some(version)).await;
+    }
     if let Some(hub) = &state.hub_client {
         let mut resp = hub.proxy_raw(reqwest::Method::GET,
             uri.path_and_query().map_or(uri.path(), |pq| pq.as_str()), &headers, Vec::new()).await?;
@@ -2699,12 +3281,37 @@ async fn serve_plugin_ui_asset(
         }
         return Ok(resp);
     }
-    serve_plugin_asset(&state, &headers, ns, slug, asset, selection.version.as_deref()).await
+    serve_plugin_asset(&state, &ui_cache, &headers, ns, slug, asset, None).await
+}
+
+fn redirect_to_u1_ticket(ticket: &str, rel_asset: &str) -> ApiResult<Response> {
+    let mut location = reqwest::Url::parse("http://localhost/").expect("valid base for relative path");
+    {
+        let mut segments = location.path_segments_mut().expect("hierarchical URL");
+        segments.push("plugin-ui-access").push(ticket);
+        for part in rel_asset.split('/') {
+            if part.is_empty() || matches!(part, "." | "..") || part.contains('\\') {
+                return Err(CompassError::AccessDenied("unsafe path traversal in plugin UI asset".into()).into());
+            }
+            segments.push(part);
+        }
+    }
+    let mut resp = axum::response::Redirect::temporary(location.path()).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    resp.headers_mut()
+        .insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    Ok(resp)
 }
 
 async fn serve_plugin_asset(
-    state: &AppState, headers: &HeaderMap, ns: String, slug: String,
-    asset_path: String, version: Option<&str>,
+    state: &AppState,
+    ui_cache: &Arc<UiBundleCache>,
+    headers: &HeaderMap,
+    ns: String,
+    slug: String,
+    asset_path: String,
+    version: Option<&str>,
 ) -> ApiResult<Response> {
     reject_top_level_plugin_ui_navigation(headers)?;
     let requested = asset_path.trim_start_matches('/');
@@ -2716,58 +3323,146 @@ async fn serve_plugin_asset(
 
     let plugin_id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
     biocompass_core_traits::validate_requested_plugin_version(version)?;
+
+    // U1 cloud-web path: authorize ONCE per open via hub, verify & cache the full bundle from
+    // `/v1/artifacts/<ui_bundle_hash>` (0 requests warm, 1 request cold), then serve ALL
+    // subsequent HTML/JS/CSS assets directly from workspace U1 cache under a short-lived viewer-bound ticket.
     if let (Some(version), Some(hub)) = (version, state.hub_client.as_ref()) {
-        // The hub authorizes the exact version and returns a release-scoped redirect.
-        let mut resp = hub.proxy_raw(reqwest::Method::GET, &pinned_ui_path(&plugin_id, version, rel), headers, Vec::new()).await?;
-        if resp.status().is_success() {
+        let mut auth_headers = headers.clone();
+        auth_headers.remove(header::ACCEPT_ENCODING);
+        let mut resp = hub
+            .proxy_raw(
+                reqwest::Method::GET,
+                &pinned_ui_path(&plugin_id, version, rel),
+                &auth_headers,
+                Vec::new(),
+            )
+            .await?;
+        let status = resp.status();
+        if status.is_redirection() || status.is_success() {
+            let header_hash = resp
+                .headers()
+                .get("x-biocompass-ui-bundle-hash")
+                .and_then(|v| v.to_str().ok())
+                .filter(|h| crate::ui_cache::is_sha256_hex(h))
+                .map(str::to_owned);
+            let caller = current_caller_auth();
+            let scope = caller_auth_scope(&caller);
+            let known_source = ui_cache
+                .lookup_remote_ui(&scope, plugin_id.as_str(), version)
+                .await;
+            let resolved_hash = header_hash.or_else(|| known_source.as_ref().map(|s| s.ui_bundle_hash.clone()));
+
+            if let Some(hash) = resolved_hash {
+                let bundle = ui_cache
+                    .get_or_fetch(&hash, hub.base_url(), Some(&caller))
+                    .await?;
+                let ticket = ui_cache
+                    .issue_open_ticket(UiOpenGrant {
+                        org_id: None,
+                        session_sha256: extract_browser_session_sha256(headers),
+                        plugin_id: plugin_id.as_str().to_owned(),
+                        version: version.to_owned(),
+                        ui_bundle_hash: Some(bundle.ui_bundle_hash.clone()),
+                        local_ui_root: None,
+                        entry: bundle.entry.clone(),
+                        expires_at: chrono::Utc::now().timestamp() + OPEN_TICKET_LIFETIME_SECS,
+                    })
+                    .await;
+                return redirect_to_u1_ticket(&ticket, rel);
+            }
+        }
+        if status.is_success() {
             apply_plugin_ui_sandbox_headers(&mut resp);
         }
         return Ok(resp);
     }
-    let plugin = state.registry.get_plugin_version(&plugin_id, version).await?;
-    let ui_spec = plugin.manifest.ui.as_ref().ok_or_else(|| {
-        CompassError::NotFound(format!("plugin '{plugin_id}' has no custom UI declared"))
-    })?;
-    let root_dir = plugin.root_dir.as_ref().ok_or_else(|| {
-        CompassError::NotFound(format!("plugin '{plugin_id}' has no on-disk bundle directory"))
-    })?;
 
-    // Resolve UI dist directory from `ui.entry` (e.g. `ui/dist/index.html` -> `ui/dist`).
-    let entry_rel = Path::new(&ui_spec.entry);
-    let ui_dist_dir = entry_rel
-        .parent()
-        .map(|p| root_dir.join(p))
-        .unwrap_or_else(|| root_dir.to_path_buf());
+    // U1 local mode: check locally registered/bundled module first (served pre-compressed from
+    // memory cache); if not present locally, serve connected U3 cloud/network module from verified disk/memory U1 cache.
+    if let Ok(plugin) = state.registry.get_plugin_version(&plugin_id, version).await
+        && let Some(ui_spec) = plugin.manifest.ui.as_ref()
+        && let Some(root_dir) = plugin.root_dir.as_ref()
+    {
+        let entry_rel = Path::new(&ui_spec.entry);
+        let ui_dist_dir = entry_rel
+            .parent()
+            .map(|p| root_dir.join(p))
+            .unwrap_or_else(|| root_dir.to_path_buf());
+        let entry_name = entry_rel
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("index.html");
 
-    let mut target = ui_dist_dir.clone();
-    for comp in Path::new(rel).components() {
-        match comp {
-            Component::Normal(seg) => target.push(seg),
-            _ => {
-                return Err(
-                    CompassError::AccessDenied("unsafe path traversal in plugin UI asset".into())
-                        .into(),
-                );
+        if !crate::ui_cache::is_safe_relative_path(rel) {
+            return Err(
+                CompassError::AccessDenied("unsafe path traversal in plugin UI asset".into())
+                    .into(),
+            );
+        }
+        let bundle = ui_cache.load_local_dir(&ui_dist_dir, entry_name).await?;
+        let mut resp = render_cached_ui_asset(&bundle, rel, headers)?;
+        apply_plugin_ui_sandbox_headers(&mut resp);
+        return Ok(resp);
+    }
+
+    if let Some(ver) = version {
+        let remote = match ui_cache.lookup_remote_ui("local", plugin_id.as_str(), ver).await {
+            Some(found) => Some(found),
+            None => {
+                // Cold lookup if the module was opened directly before `GET /api/v1/plugins`.
+                let caller = current_caller_auth();
+                let remotes = state
+                    .marketplace
+                    .list_remote_and_subscribed_modules(Some(&caller))
+                    .await;
+                remotes
+                    .into_iter()
+                    .find(|m| m.manifest.id == plugin_id && m.manifest.version == ver)
+                    .and_then(|m| {
+                        let hash = m.ui_bundle_hash?;
+                        let entry = m
+                            .manifest
+                            .ui
+                            .as_ref()
+                            .and_then(|u| Path::new(&u.entry).file_name()?.to_str())
+                            .unwrap_or("index.html")
+                            .to_owned();
+                        Some(RemoteUiSource {
+                            hub_origin: m.hub_origin,
+                            ui_bundle_hash: hash,
+                            entry,
+                        })
+                    })
             }
+        };
+        if let Some(source) = remote {
+            let active_auth = state
+                .marketplace
+                .active_hub_origin_and_auth()
+                .await
+                .and_then(|(origin, a)| (origin == source.hub_origin).then_some(a))
+                .flatten();
+            let bundle = ui_cache
+                .get_or_fetch(&source.ui_bundle_hash, &source.hub_origin, active_auth.as_ref())
+                .await?;
+            let ticket = ui_cache
+                .issue_open_ticket(UiOpenGrant {
+                    org_id: None,
+                    session_sha256: extract_browser_session_sha256(headers),
+                    plugin_id: plugin_id.as_str().to_owned(),
+                    version: ver.to_owned(),
+                    ui_bundle_hash: Some(bundle.ui_bundle_hash.clone()),
+                    local_ui_root: None,
+                    entry: bundle.entry.clone(),
+                    expires_at: chrono::Utc::now().timestamp() + OPEN_TICKET_LIFETIME_SECS,
+                })
+                .await;
+            return redirect_to_u1_ticket(&ticket, rel);
         }
     }
 
-    if !target.is_file() {
-        return Err(
-            CompassError::NotFound(format!("plugin UI asset '{rel}' not found")).into(),
-        );
-    }
-
-    let bytes = std::fs::read(&target)
-        .map_err(|e| CompassError::Storage(format!("read plugin UI asset: {e}")))?;
-    let mime = mime_guess::from_path(&target).first_or_octet_stream();
-
-    let mut resp = (StatusCode::OK, bytes).into_response();
-    if let Ok(ct) = HeaderValue::from_str(mime.as_ref()) {
-        resp.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
-    apply_plugin_ui_sandbox_headers(&mut resp);
-    Ok(resp)
+    Err(CompassError::NotFound(format!("plugin UI '{plugin_id}/{rel}' not found")).into())
 }
 
 fn apply_plugin_icon_headers(resp: &mut Response) {
@@ -2789,10 +3484,69 @@ fn apply_plugin_icon_headers(resp: &mut Response) {
 
 async fn serve_plugin_icon(
     State(state): State<AppState>,
+    Extension(ui_cache): Extension<Arc<UiBundleCache>>,
     headers: HeaderMap,
     AxumPath((ns, slug)): AxumPath<(String, String)>,
 ) -> ApiResult<Response> {
     let plugin_id = PluginId::new(format!("{ns}/{slug}")).map_err(CompassError::Validation)?;
+
+    // U1 fix: In `cloud-web` mode, NEVER call `state.registry.get_plugin` (which re-fetched the
+    // entire `/api/v1/plugins` list on every icon request!). Serve from bounded tenant-scoped icon
+    // cache or fetch directly by `(ns, slug)` while preserving SEC-17 SVG validation & headers.
+    if let Some(hub) = &state.hub_client {
+        let scope = icon_cache_scope_for_headers(&headers);
+        if let Some(cached) = ui_cache.get_cached_icon(&scope, &ns, &slug).await {
+            let mut resp = (StatusCode::OK, cached.bytes).into_response();
+            if let Ok(ct) = HeaderValue::from_str(&cached.content_type) {
+                resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+            }
+            apply_plugin_icon_headers(&mut resp);
+            return Ok(resp);
+        }
+
+        let mut clean_headers = headers.clone();
+        clean_headers.remove(header::ACCEPT_ENCODING);
+        let mut resp = hub
+            .proxy_raw(
+                reqwest::Method::GET,
+                &format!("/plugin-icon/{ns}/{slug}"),
+                &clean_headers,
+                Vec::new(),
+            )
+            .await?;
+        if resp.status().is_success() {
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_owned();
+            let (parts, body) = resp.into_parts();
+            let bytes = axum::body::to_bytes(body, 256 * 1024)
+                .await
+                .map_err(|e| CompassError::Validation(format!("proxied icon exceeds 256 KiB limit: {e}")))?;
+            if ct.to_ascii_lowercase().starts_with("image/svg") {
+                validate_safe_svg_icon(&bytes)?;
+            }
+            ui_cache
+                .put_cached_icon(
+                    &scope,
+                    &ns,
+                    &slug,
+                    CachedIcon {
+                        content_type: ct,
+                        bytes: bytes.clone(),
+                        cached_at: std::time::Instant::now(),
+                    },
+                )
+                .await;
+            resp = Response::from_parts(parts, axum::body::Body::from(bytes));
+            apply_plugin_icon_headers(&mut resp);
+        }
+        return Ok(resp);
+    }
+
+    // Local mode: fast in-memory local registry lookup (zero HTTP) before falling back to U3 hub icon.
     let plugin_opt = state.registry.get_plugin(&plugin_id).await.ok();
     if let Some(plugin) = plugin_opt.as_ref()
         && let Some(target) = resolve_safe_plugin_icon(plugin)
@@ -2827,34 +3581,47 @@ async fn serve_plugin_icon(
         apply_plugin_icon_headers(&mut resp);
         return Ok(resp);
     }
-    if let Some(hub) = &state.hub_client {
-        let mut resp = hub
-            .proxy_raw(
-                reqwest::Method::GET,
-                &format!("/plugin-icon/{ns}/{slug}"),
-                &headers,
-                Vec::new(),
-            )
-            .await?;
-        if resp.status().is_success() {
-            let ct = resp
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if ct.starts_with("image/svg") {
-                let (parts, body) = resp.into_parts();
-                let bytes = axum::body::to_bytes(body, 256 * 1024 + 1)
-                    .await
-                    .map_err(|e| CompassError::Storage(format!("read proxied icon: {e}")))?;
-                validate_safe_svg_icon(&bytes)?;
-                resp = Response::from_parts(parts, axum::body::Body::from(bytes));
+
+    if let Some((hub_origin, auth)) = state.marketplace.active_hub_origin_and_auth().await {
+        let auth_scope = auth
+            .as_ref()
+            .map(caller_auth_scope)
+            .unwrap_or_else(|| "anon".to_owned());
+        let scope = format!("u3:{hub_origin}:{auth_scope}");
+        if let Some(cached) = ui_cache.get_cached_icon(&scope, &ns, &slug).await {
+            let mut resp = (StatusCode::OK, cached.bytes).into_response();
+            if let Ok(ct) = HeaderValue::from_str(&cached.content_type) {
+                resp.headers_mut().insert(header::CONTENT_TYPE, ct);
             }
             apply_plugin_icon_headers(&mut resp);
+            return Ok(resp);
         }
-        return Ok(resp);
+        let url = format!("{hub_origin}/plugin-icon/{ns}/{slug}");
+        if let Some((ct, bytes)) = ui_cache.fetch_bounded_icon(&url, auth.as_ref()).await? {
+            if ct.to_ascii_lowercase().starts_with("image/svg") {
+                validate_safe_svg_icon(&bytes)?;
+            }
+            ui_cache
+                .put_cached_icon(
+                    &scope,
+                    &ns,
+                    &slug,
+                    CachedIcon {
+                        content_type: ct.clone(),
+                        bytes: bytes.clone(),
+                        cached_at: std::time::Instant::now(),
+                    },
+                )
+                .await;
+            let mut resp = (StatusCode::OK, bytes).into_response();
+            if let Ok(hv) = HeaderValue::from_str(&ct) {
+                resp.headers_mut().insert(header::CONTENT_TYPE, hv);
+            }
+            apply_plugin_icon_headers(&mut resp);
+            return Ok(resp);
+        }
     }
+
     if plugin_opt.is_none() {
         return Err(CompassError::NotFound(format!("plugin '{plugin_id}' is not registered")).into());
     }
@@ -4985,5 +5752,1078 @@ mod milestone_b_tests {
             serde_json::to_string(&MarketplaceConsentDecision::Accepted).unwrap(),
             "\"accepted\""
         );
+    }
+}
+
+#[cfg(test)]
+mod milestone_c_track_u_tests {
+    use super::*;
+    use crate::cloud_client::{CompassHubClient, CompassHubConfig};
+    use crate::marketplace::MarketplaceConfig;
+    use crate::ui_cache::encode_ui_bundle_archive_json;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct MockHubCounters {
+        plugins_list: AtomicUsize,
+        ui_enter: AtomicUsize,
+        ui_archive: AtomicUsize,
+        icon_get: AtomicUsize,
+        c1_proxy: AtomicUsize,
+    }
+
+    async fn spawn_c1_mock_hub(
+        valid_hash: String,
+        valid_archive: Vec<u8>,
+        tampered_hash: String,
+        tampered_archive: Vec<u8>,
+    ) -> (String, Arc<MockHubCounters>) {
+        let counters = Arc::new(MockHubCounters::default());
+        let counters_bg = Arc::clone(&counters);
+
+        let router = Router::new()
+            .route(
+                "/api/v1/health",
+                get(|| async {
+                    Json(json!({
+                        "node_id": "hub-c1-test",
+                        "provider_id": "provider-alithea",
+                        "requester_id": "requester-alithea",
+                        "container_engine": "kube-runner",
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/plugins",
+                get({
+                    let c = Arc::clone(&counters_bg);
+                    let valid_hash = valid_hash.clone();
+                    let tampered_hash = tampered_hash.clone();
+                    move || {
+                        let c = Arc::clone(&c);
+                        let valid_hash = valid_hash.clone();
+                        let tampered_hash = tampered_hash.clone();
+                        async move {
+                            c.plugins_list.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "plugins": [
+                                    {
+                                        "manifest": {
+                                            "id": "org-alpha/fast-ui",
+                                            "name": "Fast UI Module",
+                                            "version": "1.0.0",
+                                            "description": "Cloud module with signed U1 bundle",
+                                            "category": "Immunopeptidomics",
+                                            "execution": "cloud_only",
+                                            "image": "registry.example.org/fast@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                                            "price_milli_act": 1500,
+                                            "ui": { "entry": "ui/dist/index.html" }
+                                        },
+                                        "has_ui_bundle": true,
+                                        "icon_url": "/plugin-icon/org-alpha/fast-ui",
+                                        "source": "org_cloud",
+                                        "runs_in": "cloud",
+                                        "ui_bundle_hash": valid_hash,
+                                        "ui_bundle_size_bytes": 512,
+                                        "can_install": false,
+                                        "installed_locally": false
+                                    },
+                                    {
+                                        "manifest": {
+                                            "id": "org-alpha/tampered-ui",
+                                            "name": "Tampered UI Module",
+                                            "version": "1.0.0",
+                                            "description": "Module with tampered archive",
+                                            "category": "Security",
+                                            "execution": "cloud_only",
+                                            "image": "registry.example.org/tamp@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                                            "price_milli_act": 0,
+                                            "ui": { "entry": "ui/dist/index.html" }
+                                        },
+                                        "has_ui_bundle": true,
+                                        "source": "org_cloud",
+                                        "runs_in": "cloud",
+                                        "ui_bundle_hash": tampered_hash,
+                                        "ui_bundle_size_bytes": 512,
+                                        "can_install": false,
+                                        "installed_locally": false
+                                    }
+                                ]
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/plugin-ui-version/:ns/:slug/:ver/*asset",
+                get({
+                    let c = Arc::clone(&counters_bg);
+                    let valid_hash = valid_hash.clone();
+                    let tampered_hash = tampered_hash.clone();
+                    move |AxumPath((_ns, slug, _ver, asset)): AxumPath<(String, String, String, String)>| {
+                        let c = Arc::clone(&c);
+                        let valid_hash = valid_hash.clone();
+                        let tampered_hash = tampered_hash.clone();
+                        async move {
+                            c.ui_enter.fetch_add(1, Ordering::SeqCst);
+                            let hash = if slug == "tampered-ui" {
+                                tampered_hash
+                            } else {
+                                valid_hash
+                            };
+                            let mut resp = axum::response::Redirect::temporary(&format!(
+                                "/plugin-ui-access/legacy-hub-ticket/{asset}"
+                            ))
+                            .into_response();
+                            resp.headers_mut().insert(
+                                axum::http::HeaderName::from_static("x-biocompass-ui-bundle-hash"),
+                                HeaderValue::from_str(&hash).unwrap(),
+                            );
+                            resp
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/artifacts/:hash",
+                get({
+                    let c = Arc::clone(&counters_bg);
+                    let valid_hash = valid_hash.clone();
+                    let valid_archive = valid_archive.clone();
+                    let tampered_hash = tampered_hash.clone();
+                    let tampered_archive = tampered_archive.clone();
+                    move |AxumPath(hash): AxumPath<String>| {
+                        let c = Arc::clone(&c);
+                        let valid_hash = valid_hash.clone();
+                        let valid_archive = valid_archive.clone();
+                        let tampered_hash = tampered_hash.clone();
+                        let tampered_archive = tampered_archive.clone();
+                        async move {
+                            c.ui_archive.fetch_add(1, Ordering::SeqCst);
+                            if hash == valid_hash {
+                                (
+                                    StatusCode::OK,
+                                    [(header::CONTENT_TYPE, "application/json")],
+                                    valid_archive,
+                                )
+                                    .into_response()
+                            } else if hash == tampered_hash {
+                                (
+                                    StatusCode::OK,
+                                    [(header::CONTENT_TYPE, "application/json")],
+                                    tampered_archive,
+                                )
+                                    .into_response()
+                            } else {
+                                StatusCode::NOT_FOUND.into_response()
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/plugin-icon/:ns/:slug",
+                get({
+                    let c = Arc::clone(&counters_bg);
+                    move || {
+                        let c = Arc::clone(&c);
+                        async move {
+                            c.icon_get.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::OK,
+                                [(header::CONTENT_TYPE, "image/svg+xml")],
+                                b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"6\"/></svg>".to_vec(),
+                            )
+                                .into_response()
+                        }
+                    }
+                }),
+            )
+            .fallback({
+                let c = Arc::clone(&counters_bg);
+                move |uri: Uri, method: Method| {
+                    let c = Arc::clone(&c);
+                    async move {
+                        c.c1_proxy.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({
+                            "proxied": true,
+                            "method": method.as_str(),
+                            "path": uri.path_and_query().map_or(uri.path(), |pq| pq.as_str()),
+                        }))
+                    }
+                }
+            });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{addr}"), counters)
+    }
+
+    #[tokio::test]
+    async fn u1_cold_warm_subsecond_single_auth_gzip_sec17_tamper_refusal_and_icon_cache() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "index.html".to_owned(),
+            b"<!doctype html><html><head><link rel=\"stylesheet\" href=\"assets/app.css\"></head><body><div id=\"root\">Ready</div><script src=\"assets/app.js\"></script></body></html>".to_vec(),
+        );
+        files.insert(
+            "assets/app.js".to_owned(),
+            "console.log('biocompass u1 verified');\n".repeat(200).into_bytes(),
+        );
+        files.insert(
+            "assets/app.css".to_owned(),
+            "body{font-family:sans-serif;color:#111;}\n".repeat(100).into_bytes(),
+        );
+        let (valid_hash, valid_archive) =
+            encode_ui_bundle_archive_json(&files, Some("index.html")).unwrap();
+
+        let tampered_hash = "f".repeat(64);
+        let tampered_archive = valid_archive.clone(); // valid JSON but hash != tampered_hash!
+
+        let (hub_url, counters) =
+            spawn_c1_mock_hub(valid_hash.clone(), valid_archive, tampered_hash, tampered_archive)
+                .await;
+        let tmp = tempfile::tempdir().unwrap();
+
+        let (hub_client, default_org_id, engine_label) = CompassHubClient::connect(
+            CompassHubConfig {
+                base_url: hub_url.clone(),
+                bundled_plugins_dir: tmp.path().join("bundled"),
+            },
+            std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let hub = Arc::new(hub_client);
+
+        let mut state = AppState::bootstrap(tmp.path(), DeploymentMode::Local, true)
+            .await
+            .unwrap();
+        state.mode = DeploymentMode::CloudWeb;
+        state.default_org_id = default_org_id;
+        state.container_engine_label = engine_label;
+        state.hub_client = Some(Arc::clone(&hub));
+        state.registry = hub.clone();
+        state.dispatcher = hub.clone();
+        state.session_store = hub.clone();
+        state.blob_store = hub.clone();
+        state.payment_gateway = hub;
+        state.marketplace = Arc::new(
+            crate::marketplace::MarketplaceClient::new(
+                tmp.path(),
+                MarketplaceConfig {
+                    mode: DeploymentMode::CloudWeb,
+                    default_hub_url: hub_url.clone(),
+                    explicit_hub_url: Some(hub_url),
+                    airgapped: false,
+                },
+            )
+            .unwrap(),
+        );
+        let app = build_router(state);
+
+        // 1. Icon route MUST NOT call `/api/v1/plugins`, caches on repeat, and keeps SEC-17 SVG CSP!
+        let icon1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/org-alpha/fast-ui")
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(icon1.status(), StatusCode::OK);
+        assert_eq!(
+            icon1.headers().get(header::CONTENT_SECURITY_POLICY).and_then(|v| v.to_str().ok()),
+            Some(PLUGIN_ICON_CSP)
+        );
+        assert_eq!(
+            icon1.headers().get("cross-origin-resource-policy").and_then(|v| v.to_str().ok()),
+            Some("same-origin")
+        );
+        assert_eq!(counters.plugins_list.load(Ordering::SeqCst), 0, "serve_plugin_icon must NEVER re-fetch /api/v1/plugins");
+        assert_eq!(counters.icon_get.load(Ordering::SeqCst), 1);
+
+        let icon2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-icon/org-alpha/fast-ui")
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(icon2.status(), StatusCode::OK);
+        assert_eq!(counters.icon_get.load(Ordering::SeqCst), 1, "second icon fetch must hit cache");
+
+        // 2. Cold open: 1 hub auth + 1 single `/v1/artifacts/<hash>` fetch, then ALL assets served from U1 cache with gzip + SEC-17 in <1000ms!
+        let cold_start = Instant::now();
+        let enter_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-ui-version/org-alpha/fast-ui/v1.0.0/index.html")
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enter_resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = enter_resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("redirect location")
+            .to_owned();
+        assert!(
+            location.starts_with("/plugin-ui-access/u1-") && location.ends_with("/index.html"),
+            "expected U1 workspace ticket redirect, got {location}"
+        );
+        assert_eq!(counters.ui_enter.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.ui_archive.load(Ordering::SeqCst), 1);
+
+        let ticket_prefix = location.strip_suffix("/index.html").unwrap();
+        for asset in ["index.html", "assets/app.js", "assets/app.css"] {
+            let mut req = Request::builder()
+                .uri(format!("{ticket_prefix}/{asset}"))
+                .header(header::ACCEPT_ENCODING, "gzip");
+            if asset == "index.html" {
+                req = req
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .header("sec-fetch-dest", "iframe");
+            }
+            let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "asset {asset}");
+            assert_eq!(
+                resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+                Some("gzip"),
+                "asset {asset} must be served pre-compressed gzip"
+            );
+            assert_eq!(
+                resp.headers().get(header::CONTENT_SECURITY_POLICY).and_then(|v| v.to_str().ok()),
+                Some(PLUGIN_SANDBOX_CSP),
+                "asset {asset} must preserve SEC-17 PLUGIN_SANDBOX_CSP"
+            );
+        }
+        assert!(
+            cold_start.elapsed().as_millis() < 1000,
+            "cold click-to-usable UI exceeded 1000ms: {:?}",
+            cold_start.elapsed()
+        );
+        assert_eq!(counters.ui_archive.load(Ordering::SeqCst), 1, "subresources must NOT re-fetch archive");
+        assert_eq!(counters.ui_enter.load(Ordering::SeqCst), 1, "subresources must NOT re-auth");
+
+        // 3. SEC-17 preservation: top-level document nav blocked, wrong viewer session blocked!
+        let doc_nav = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&location)
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .header("sec-fetch-dest", "document")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc_nav.status(), StatusCode::FORBIDDEN);
+
+        let wrong_viewer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&location)
+                    .header(header::COOKIE, "bc_session=viewer-b")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_viewer.status(), StatusCode::FORBIDDEN);
+
+        // 4. Warm open: 0 archive fetches, <1000ms!
+        let warm_start = Instant::now();
+        let warm_enter = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-ui-version/org-alpha/fast-ui/v1.0.0/index.html")
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warm_enter.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(counters.ui_archive.load(Ordering::SeqCst), 1, "warm open must hit U1 cache with 0 archive fetches");
+        assert!(warm_start.elapsed().as_millis() < 1000);
+
+        // 5. Tampered UI bundle MUST fail closed with 409 + ErrorCode::UiBundleTampered!
+        let tampered = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-ui-version/org-alpha/tampered-ui/v1.0.0/index.html")
+                    .header(header::COOKIE, "bc_session=viewer-a")
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tampered.status(), StatusCode::CONFLICT);
+        let tampered_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(tampered.into_body(), 64 * 1024).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tampered_json["code"], "UI_BUNDLE_TAMPERED");
+
+        // 6. C1 Enterprise proxy routes forward cleanly in cloud-web mode!
+        for (method, path) in [
+            (Method::GET, "/api/v1/agent-credentials"),
+            (Method::POST, "/api/v1/agent-credentials"),
+            (Method::GET, "/api/v1/billing/statement?from=2026-01-01"),
+            (Method::GET, "/api/v1/webhooks"),
+            (Method::POST, "/api/v1/webhooks"),
+            (Method::GET, "/api/v1/documents"),
+            (Method::POST, "/api/v1/documents"),
+            (Method::GET, "/api/v1/runs/run-123/provenance"),
+            (Method::PATCH, "/api/v1/catalogs/org/study/placement"),
+            (Method::GET, "/api/v1/catalogs/org/study/licensed-copy-manifest"),
+            (Method::POST, "/api/v1/admin/federation/register-outbound"),
+            (Method::POST, "/api/v1/admin/federation/import-module"),
+            (Method::POST, "/api/v1/admin/federation/import-catalog"),
+            (Method::POST, "/api/v1/mcp"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "proxy failed for {method} {path}");
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["proxied"], true, "expected hub proxy for {method} {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn u3_and_h3_local_client_switches_two_hubs_opens_verified_ui_and_uses_play_credits() {
+        let mut files_a = BTreeMap::new();
+        files_a.insert("index.html".to_owned(), b"<h1>Hub A Verified UI</h1>".to_vec());
+        let (hash_a, archive_a) = encode_ui_bundle_archive_json(&files_a, Some("index.html")).unwrap();
+
+        let mut files_b = BTreeMap::new();
+        files_b.insert("index.html".to_owned(), b"<h1>Hub B Verified UI</h1>".to_vec());
+        let (hash_b, archive_b) = encode_ui_bundle_archive_json(&files_b, Some("index.html")).unwrap();
+
+        async fn spawn_hub(plugin_id: &'static str, name: &'static str, hash: String, archive: Vec<u8>) -> String {
+            let app = Router::new()
+                .route(
+                    "/api/v1/plugins",
+                    get({
+                        let hash = hash.clone();
+                        move || {
+                            let hash = hash.clone();
+                            async move {
+                                Json(json!({
+                                    "plugins": [{
+                                        "manifest": {
+                                            "id": plugin_id,
+                                            "name": name,
+                                            "version": "1.0.0",
+                                            "description": "Remote hub module",
+                                            "category": "Cloud",
+                                            "execution": "cloud_only",
+                                            "image": "registry.example.org/m@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                                            "price_milli_act": 2000,
+                                            "ui": { "entry": "ui/dist/index.html" }
+                                        },
+                                        "has_ui_bundle": true,
+                                        "source": "org_cloud",
+                                        "runs_in": "cloud",
+                                        "ui_bundle_hash": hash,
+                                        "can_install": false
+                                    }]
+                                }))
+                            }
+                        }
+                    }),
+                )
+                .route("/v1/feed", get(|| async { Json(json!({ "artifacts": [], "active_offer_hashes": [], "has_more": false })) }))
+                .route(
+                    "/v1/artifacts/:h",
+                    get(move |AxumPath(h): AxumPath<String>| {
+                        let hash = hash.clone();
+                        let archive = archive.clone();
+                        async move {
+                            if h == hash {
+                                (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], archive).into_response()
+                            } else {
+                                StatusCode::NOT_FOUND.into_response()
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            format!("http://{addr}")
+        }
+
+        let hub_a = spawn_hub("hub-a/module-one", "Hub A Module", hash_a.clone(), archive_a).await;
+        let hub_b = spawn_hub("hub-b/module-two", "Hub B Module", hash_b.clone(), archive_b).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_a.clone(),
+            explicit_hub_url: None,
+            airgapped: false,
+        };
+        let mut state = AppState::bootstrap_with_marketplace(tmp.path(), DeploymentMode::Local, true, cfg)
+            .await
+            .unwrap();
+        let listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18442);
+        let owner_link = state.enable_local_owner(listen_addr).unwrap().unwrap();
+        let host = format!("127.0.0.1:{}", listen_addr.port());
+        let app = build_router(state);
+        let raw_link_token = owner_link.split("#local-owner=").nth(1).unwrap();
+        let redeem = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/local/owner-session")
+                    .header(header::HOST, &host)
+                    .header(header::ORIGIN, format!("http://{host}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "ticket": raw_link_token }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redeem.status(), StatusCode::OK);
+        let redeem_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(redeem.into_body(), 16 * 1024).await.unwrap(),
+        )
+        .unwrap();
+        let owner_token = redeem_json["owner_session"].as_str().unwrap().to_owned();
+
+        // 1. H3 Local Play Ledger MUST NOT be labelled euros!
+        let ledger_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ledger")
+                    .header(header::HOST, &host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger_resp.status(), StatusCode::OK);
+        let ledger_json: Value = serde_json::from_slice(
+            &axum::body::to_bytes(ledger_resp.into_body(), 64 * 1024).await.unwrap(),
+        )
+        .unwrap();
+        let display = ledger_json["available_display"].as_str().unwrap();
+        assert_eq!(ledger_json["is_local_play_ledger"], true);
+        assert!(!display.contains('€') && !display.to_ascii_uppercase().contains("EUR"));
+        assert!(display.ends_with(" credits"), "expected play credits label, got {display}");
+
+        // 2. Switch local client to Alithea Cloud (Hub A), list modules, and open Hub A's UI via U1 verified cache!
+        let sw_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/workspace/hub")
+                    .header(header::HOST, &host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "mode": "alithea_cloud" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sw_a.status(), StatusCode::OK);
+
+        let plugins_a: Value = serde_json::from_slice(
+            &axum::body::to_bytes(
+                app.clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/plugins")
+                            .header(header::HOST, &host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .into_body(),
+                256 * 1024,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let list_a = plugins_a["plugins"].as_array().unwrap();
+        let mod_a = list_a
+            .iter()
+            .find(|p| p["manifest"]["id"] == "hub-a/module-one")
+            .expect("Hub A module listed");
+        assert_eq!(mod_a["source"], "org_cloud");
+        assert_eq!(mod_a["runs_in"], "cloud");
+        assert_eq!(mod_a["ui_bundle_hash"], hash_a);
+
+        let ui_entry_a = mod_a["ui_entry_url"].as_str().unwrap();
+        let open_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(ui_entry_a)
+                    .header(header::HOST, &host)
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(open_a.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc_a = open_a.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+        let doc_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&loc_a)
+                    .header(header::HOST, &host)
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc_a.status(), StatusCode::OK);
+        assert_eq!(
+            doc_a.headers().get(header::CONTENT_SECURITY_POLICY).and_then(|v| v.to_str().ok()),
+            Some(PLUGIN_SANDBOX_CSP)
+        );
+        let body_a = axum::body::to_bytes(doc_a.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(&body_a[..], b"<h1>Hub A Verified UI</h1>");
+
+        // 3. Switch to Custom Cloud (Hub B) in-app -> lists & opens Hub B's module cleanly!
+        let sw_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/workspace/hub")
+                    .header(header::HOST, &host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "mode": "custom_cloud", "hub_url": hub_b }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sw_b.status(), StatusCode::OK);
+
+        let plugins_b: Value = serde_json::from_slice(
+            &axum::body::to_bytes(
+                app.clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/plugins")
+                            .header(header::HOST, &host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .into_body(),
+                256 * 1024,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let list_b = plugins_b["plugins"].as_array().unwrap();
+        assert!(list_b.iter().any(|p| p["manifest"]["id"] == "hub-b/module-two"));
+        assert!(!list_b.iter().any(|p| p["manifest"]["id"] == "hub-a/module-one"));
+
+        let mod_b = list_b
+            .iter()
+            .find(|p| p["manifest"]["id"] == "hub-b/module-two")
+            .unwrap();
+        let open_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(mod_b["ui_entry_url"].as_str().unwrap())
+                    .header(header::HOST, &host)
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(open_b.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc_b = open_b.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+        let doc_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&loc_b)
+                    .header(header::HOST, &host)
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(doc_b.status(), StatusCode::OK);
+        let body_b = axum::body::to_bytes(doc_b.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(&body_b[..], b"<h1>Hub B Verified UI</h1>");
+
+        // Stale Hub A module UI pointer MUST be cleared after switching to Hub B.
+        let stale_hub_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin-ui-version/hub-a/proteomics/v1.0.0/index.html")
+                    .header(header::HOST, &host)
+                    .header("sec-fetch-dest", "iframe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale_hub_a.status(), StatusCode::NOT_FOUND);
+
+        // 4. Subscribe ("Add") a network run-only offer -> appears with Open + provider_label + can_install=false!
+        let sub_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/workspace/network-offers")
+                    .header(header::HOST, &host)
+                    .header("x-biocompass-local-owner", &owner_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "offer_id": "mo-zurich-run",
+                            "hub_url": hub_b,
+                            "plugin_id": "zurich/proteomics-net",
+                            "version": "1.0.0",
+                            "title": "Zurich Proteomics Run",
+                            "description": "Runs at Zurich Proteomics",
+                            "kind": "run",
+                            "provider_label": "Zurich Proteomics",
+                            "ui_bundle_hash": hash_b,
+                            "launch_url": "https://zurich.example.org/run/mo-zurich-run",
+                            "price_milli_act": 3000
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sub_resp.status(), StatusCode::OK);
+
+        let plugins_net: Value = serde_json::from_slice(
+            &axum::body::to_bytes(
+                app.clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/plugins")
+                            .header(header::HOST, &host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .into_body(),
+                256 * 1024,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let net_mod = plugins_net["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["manifest"]["id"] == "zurich/proteomics-net")
+            .expect("subscribed network module listed");
+        assert_eq!(net_mod["source"], "network_provider");
+        assert_eq!(net_mod["runs_in"], "network_provider");
+        assert_eq!(net_mod["can_install"], false);
+        assert_eq!(net_mod["provider_label"], "Zurich Proteomics");
+        assert!(net_mod["ui_entry_url"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn local_provenance_v1_exports_result_manifest_preimage_child_refs_and_omits_params() {
+        use biocompass_core_traits::{
+            ArtifactRef, CreditAmountAct, NodeId, OrgId, PluginId, RunId, RunQuote, RunRecord,
+            RunStatus, result_manifest_hash,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::bootstrap_with_marketplace(
+            tmp.path(),
+            DeploymentMode::Local,
+            true,
+            crate::marketplace::MarketplaceConfig {
+                mode: DeploymentMode::Local,
+                airgapped: true,
+                explicit_hub_url: None,
+                default_hub_url: "https://hub.biocompass.alithea.bio".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let parent_id = RunId::new("run-prov-parent-1").unwrap();
+        let failed_id = RunId::new("run-prov-failed-1").unwrap();
+        let child_receipt_hash = "c".repeat(64);
+
+        let result_bytes = br#"{"status":"ok","hits":42}"#;
+        let result_blob_key = format!("runs/{}/result.json", parent_id.as_str());
+        state
+            .blob_store
+            .put_bytes(&result_blob_key, result_bytes)
+            .await
+            .unwrap();
+        let (result_sha, _) = state
+            .blob_store
+            .sha256_and_size(&result_blob_key)
+            .await
+            .unwrap();
+
+        let artifact = ArtifactRef {
+            name: "summary.csv".to_owned(),
+            blob_key: format!("runs/{}/artifacts/summary.csv", parent_id.as_str()),
+            media_type: "text/csv".to_owned(),
+            size_bytes: 128,
+            sha256: "a".repeat(64),
+        };
+        let expected_result_hash =
+            result_manifest_hash(&result_sha, std::slice::from_ref(&artifact)).unwrap();
+
+        let build_receipt = |result_hash: Option<String>, extension_refs: Vec<String>| {
+            json!({
+                "protocol": "froglet/v1",
+                "artifact_type": "receipt",
+                "hash": "4".repeat(64),
+                "signer": "provider-local",
+                "timestamp": 1_700_000_005,
+                "signature": "5".repeat(128),
+                "payload": {
+                    "provider_id": "provider-local",
+                    "requester_id": "requester-local",
+                    "quote_hash": "1".repeat(64),
+                    "deal_hash": "2".repeat(64),
+                    "started_at": 1_700_000_000,
+                    "finished_at": 1_700_000_005,
+                    "deal_state": if result_hash.is_some() { "succeeded" } else { "failed" },
+                    "execution_state": if result_hash.is_some() { "succeeded" } else { "failed" },
+                    "settlement_state": "none",
+                    "result_hash": result_hash,
+                    "result_format": "application/json",
+                    "result_ref": format!("blob://{result_blob_key}"),
+                    "extension_refs": extension_refs,
+                }
+            })
+        };
+
+        let make_quote = |run_id: &RunId| RunQuote {
+            run_id: run_id.clone(),
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            image_ref: format!("alithea/demo@sha256:{}", "6".repeat(64)),
+            target_node_id: NodeId::new("local").unwrap(),
+            offer_id: "default".into(),
+            offer_name: "Default".into(),
+            base_fee_act: CreditAmountAct::ZERO,
+            estimated_cost_act: CreditAmountAct::ZERO,
+            max_input_bytes: 1024,
+            max_output_bytes: 1024,
+            max_runtime_sec: 60,
+            max_memory_mb: 256,
+            workload_hash: "7".repeat(64),
+            dataset_grant_summary: None,
+            froglet_quote: json!({}),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        };
+
+        let succeeded_receipt = build_receipt(
+            Some(expected_result_hash.clone()),
+            vec![format!("bc.child.v1:{child_receipt_hash}")],
+        );
+        let parent_run = RunRecord {
+            run_id: parent_id.clone(),
+            org_id: OrgId::new("local").unwrap(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            status: RunStatus::Succeeded,
+            admission: None,
+            params: json!({ "secret_patient_token": "DO_NOT_LEAK_IN_PROVENANCE" }),
+            grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
+            quote: make_quote(&parent_id),
+            result_json: Some(json!({ "status": "ok", "hits": 42 })),
+            artifacts: vec![artifact.clone()],
+            froglet_receipt: Some(succeeded_receipt.clone()),
+            froglet_chain: vec![succeeded_receipt],
+            receipt_verified: true,
+            logs: Vec::new(),
+            error_message: None,
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        state.session_store.save_run(&parent_run).await.unwrap();
+
+        let failed_receipt = build_receipt(None, Vec::new());
+        let failed_run = RunRecord {
+            run_id: failed_id.clone(),
+            org_id: OrgId::new("local").unwrap(),
+            session_id: None,
+            plugin_id: PluginId::new("alithea/demo").unwrap(),
+            plugin_version: "1.0.0".into(),
+            status: RunStatus::Failed,
+            admission: None,
+            params: json!({ "secret_failed_param": "ALSO_DO_NOT_LEAK" }),
+            grant: None,
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            module_fee_milli_act: None,
+            dataset_fee_milli_act: None,
+            quote: make_quote(&failed_id),
+            result_json: None,
+            artifacts: Vec::new(),
+            froglet_receipt: Some(failed_receipt.clone()),
+            froglet_chain: vec![failed_receipt],
+            receipt_verified: false,
+            logs: Vec::new(),
+            error_message: Some("boom".into()),
+            created_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        state.session_store.save_run(&failed_run).await.unwrap();
+
+        let app = build_router(state);
+
+        // 1. Succeeded run: exact `manifest_preimage` (`result_json_sha256` + `artifacts`),
+        //    extracted `child_receipt_hashes`, and ZERO `params`!
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/provenance", parent_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw_bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let raw_text = std::str::from_utf8(&raw_bytes).unwrap();
+        assert!(
+            !raw_text.contains("DO_NOT_LEAK_IN_PROVENANCE"),
+            "provenance bundle must never leak private run params"
+        );
+        let bundle: Value = serde_json::from_slice(&raw_bytes).unwrap();
+        assert_eq!(bundle["schema"], "bc.provenance.v1");
+        assert_eq!(bundle["root_run_id"], parent_id.as_str());
+        let entry = &bundle["runs"][0];
+        assert!(
+            entry.get("params").is_none(),
+            "bc.provenance.v1 run entry must omit 'params'"
+        );
+        assert_eq!(entry["child_receipt_hashes"], json!([child_receipt_hash]));
+        assert_eq!(
+            entry["manifest_preimage"],
+            json!({
+                "result_json_sha256": result_sha,
+                "artifacts": [{
+                    "name": "summary.csv",
+                    "sha256": "a".repeat(64),
+                    "size_bytes": 128
+                }]
+            })
+        );
+        // Verify preimage hashes back to the exact signed `receipt.payload.result_hash`.
+        let recomputed = result_manifest_hash(
+            entry["manifest_preimage"]["result_json_sha256"]
+                .as_str()
+                .unwrap(),
+            std::slice::from_ref(&artifact),
+        )
+        .unwrap();
+        assert_eq!(recomputed, expected_result_hash);
+
+        // 2. Failed run without signed `result_hash` -> `manifest_preimage` MUST be `null`.
+        let resp_failed = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/runs/{}/provenance", failed_id.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_failed.status(), StatusCode::OK);
+        let failed_bundle: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp_failed.into_body(), 256 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(failed_bundle["runs"][0]["manifest_preimage"].is_null());
+        assert!(failed_bundle["runs"][0].get("params").is_none());
     }
 }

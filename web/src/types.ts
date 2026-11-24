@@ -2,12 +2,48 @@ export type MarketplaceSyncState = "air-gapped" | "disconnected" | "connected" |
 
 export type MarketplaceConsentDecision = "unset" | "accepted" | "declined";
 
+export type WorkspaceHubMode = "offline" | "alithea_cloud" | "custom_cloud";
+
+export interface WorkspaceHubStatus {
+  mode: WorkspaceHubMode;
+  hub_url?: string | null;
+  default_hub_url: string;
+  connected: boolean;
+  airgapped: boolean;
+  authenticated: boolean;
+  auth_actor?: string | null;
+  remote_module_count: number;
+  last_error?: string | null;
+  recent_hubs?: string[];
+}
+
+export interface SubscribedNetworkOffer {
+  offer_id: string;
+  hub_url: string;
+  plugin_id: string;
+  version: string;
+  title: string;
+  description?: string;
+  kind: "run" | "download" | string;
+  provider_label: string;
+  ui_bundle_hash?: string | null;
+  ui_bundle_size_bytes?: number | null;
+  launch_url?: string | null;
+  price_milli_act?: number;
+}
+
 export interface MarketplaceOfferSummary {
   id: string;
   kind: string;
   title: string;
   version?: string | null;
   provider_org?: string | null;
+  plugin_id?: string | null;
+  ui_bundle_hash?: string | null;
+  ui_bundle_size_bytes?: number | null;
+  launch_url?: string | null;
+  price_milli_act?: number | null;
+  description?: string | null;
 }
 
 export interface MarketplaceStatus {
@@ -38,6 +74,7 @@ export interface HealthStatus {
   catalog_count: number;
   plugin_count: number;
   workspace_hub_url?: string | null;
+  workspace_hub?: WorkspaceHubStatus | null;
   marketplace_prompt_required?: boolean;
   marketplace_status?: MarketplaceStatus | null;
 }
@@ -300,7 +337,12 @@ export interface ModuleOffer {
   action: ModuleOfferAction;
   scope: ModuleOfferScope;
   approval_required: boolean;
+  serving_org_id?: string | null;
+  target_node_id?: string | null;
   access?: ModuleOfferAccess;
+  negotiated_price?: NegotiatedModuleOfferPrice | null;
+  ui_bundle_hash?: string | null;
+  ui_bundle_size_bytes?: number | null;
 }
 
 export interface FederatedOfferSummary {
@@ -355,6 +397,8 @@ export interface PluginSummary {
   can_install?: boolean;
   installed_locally?: boolean;
   provider_label?: string | null;
+  launch_url?: string | null;
+  hub_origin?: string | null;
   installed: boolean;
   removable_versions?: string[];
   detached_versions?: string[];
@@ -499,6 +543,8 @@ export interface LedgerState {
   tier_id?: string;
   available_milli_act: number;
   available_display: string;
+  is_local_play_ledger?: boolean;
+  currency_label?: string;
   daily_act_spent_milli?: number;
   daily_act_breaker_milli?: number | null;
   expires_at?: string | null;
@@ -631,8 +677,37 @@ export interface TestLlmConnectionResponse {
   per_model_controls?: Record<string, ProviderControlSpec[]>;
 }
 
+function splitRoundedCents(milliUnits: number): { sign: string; whole: number; frac: string } {
+  const abs = Math.abs(milliUnits);
+  const totalCents = Math.floor((abs + 5) / 10);
+  const sign = milliUnits < 0 && totalCents > 0 ? "-" : "";
+  const whole = Math.floor(totalCents / 100);
+  const frac = String(totalCents % 100).padStart(2, "0");
+  return { sign, whole, frac };
+}
+
+/** Format milli-EUR / milli-ACT as euros to the cent (`€1.00`, `€0.05`, `€12.34`). */
+export function formatMilliEur(milliAct: number): string {
+  const { sign, whole, frac } = splitRoundedCents(milliAct);
+  return `${sign}€${whole}.${frac}`;
+}
+
+/** Format cloud/hub credit amounts in euros to the cent (`1 ACT = 1 EUR`). */
 export function formatMilliAct(milliAct: number): string {
-  return `${(milliAct / 1000).toFixed(milliAct % 10 === 0 ? 2 : 3)} ACT`;
+  return formatMilliEur(milliAct);
+}
+
+/**
+ * Format local workstation play-ledger amounts (NEVER labelled `€` or `EUR` per Plan Default #3).
+ */
+export function formatLocalPlayCredits(milliAct: number): string {
+  const { sign, whole, frac } = splitRoundedCents(milliAct);
+  return `${sign}${whole}.${frac} credits`;
+}
+
+/** Format an amount using either the local play-credits unit or EUR depending on workspace mode. */
+export function formatWorkspaceAmount(milliAct: number, isLocalPlayLedger: boolean): string {
+  return isLocalPlayLedger ? formatLocalPlayCredits(milliAct) : formatMilliEur(milliAct);
 }
 
 export type OrgRole = "owner" | "admin" | "developer" | "member" | "viewer";
@@ -1002,4 +1077,240 @@ export function hasMinOrgRole(actualRole: string | undefined, required: OrgRole)
     owner: 5,
   };
   return (rank[actualRole ?? ""] ?? 0) >= (rank[required] ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Milestone C1 Enterprise Types (H1, H3, H4, H5, U4)
+// ---------------------------------------------------------------------------
+
+export type AgentCredentialRole = "viewer" | "member" | "developer";
+
+export interface AgentCredentialRecord {
+  credential_id: string;
+  org_id: string;
+  label: string;
+  role: AgentCredentialRole;
+  token_prefix: string;
+  allowed_catalogs: string[] | null;
+  allowed_modules: string[] | null;
+  daily_ceiling_milli_act: number | null;
+  total_ceiling_milli_act: number | null;
+  spent_total_milli_act: number;
+  spent_today_milli_act?: number;
+  burst_per_minute: number;
+  expires_at: string;
+  created_by: string;
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface CreateAgentCredentialInput {
+  label: string;
+  role?: AgentCredentialRole;
+  expires_at?: string;
+  expires_in_days?: number;
+  allowed_catalogs?: string[] | null;
+  allowed_modules?: string[] | null;
+  daily_ceiling_milli_act?: number | null;
+  total_ceiling_milli_act?: number | null;
+  burst_per_minute?: number;
+}
+
+export interface CreatedAgentCredential {
+  credential: AgentCredentialRecord;
+  raw_token: string;
+}
+
+export interface NegotiatedModuleOfferPrice {
+  offer_id: string;
+  manifest_offer_id: string;
+  price_milli_act: number;
+  base_fee_milli_act: number;
+  updated_at: string;
+}
+
+export interface BillingStatementTotals {
+  run_count: number;
+  total_milli_eur: number;
+  module_fee_milli_eur: number;
+  dataset_fee_milli_eur: number;
+  refunded_milli_eur: number;
+}
+
+export interface BillingStatementModuleBreakdown {
+  plugin_id: string;
+  run_count: number;
+  total_milli_eur: number;
+  module_fee_milli_eur: number;
+}
+
+export interface BillingStatementDatasetBreakdown {
+  catalog_id: string;
+  run_count: number;
+  dataset_fee_milli_eur: number;
+}
+
+export interface BillingStatementCredentialBreakdown {
+  credential_id?: string | null;
+  label: string;
+  run_count: number;
+  total_milli_eur: number;
+}
+
+export interface BillingStatementEntry {
+  run_id: string;
+  plugin_id: string;
+  plugin_version: string;
+  catalog_id?: string | null;
+  agent_credential_id?: string | null;
+  agent_credential_label?: string | null;
+  status: string;
+  settled_milli_eur: number;
+  refunded_milli_eur: number;
+  module_fee_milli_eur: number;
+  dataset_fee_milli_eur: number;
+  receipt_hash?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface BillingStatement {
+  org_id: string;
+  currency: "EUR" | string;
+  from?: string | null;
+  to?: string | null;
+  totals: BillingStatementTotals;
+  by_module: BillingStatementModuleBreakdown[];
+  by_dataset: BillingStatementDatasetBreakdown[];
+  by_credential: BillingStatementCredentialBreakdown[];
+  entries: BillingStatementEntry[];
+}
+
+export interface WebhookEndpointRecord {
+  endpoint_id: string;
+  org_id: string;
+  label: string;
+  url: string;
+  event_types: string[];
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  disabled_at?: string | null;
+}
+
+export interface CreatedWebhookEndpoint {
+  webhook: WebhookEndpointRecord;
+  signing_secret: string;
+}
+
+export interface WebhookDeliveryRecord {
+  delivery_id: string;
+  event_id: number;
+  endpoint_id: string;
+  event_type: string;
+  status: "pending" | "delivered" | "failed" | "dead_letter" | string;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at?: string | null;
+  last_http_status?: number | null;
+  last_error?: string | null;
+  delivered_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModuleDocumentRecord {
+  id: string;
+  org_id: string;
+  project_id?: string | null;
+  plugin_id: string;
+  title: string;
+  latest_version: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModuleDocumentVersionRecord {
+  doc_id: string;
+  version: number;
+  content_sha256: string;
+  base_version: number;
+  author_user_id?: string | null;
+  author_credential_id?: string | null;
+  created_at: string;
+}
+
+export interface ModuleDocumentDetail extends ModuleDocumentRecord {
+  version: number;
+  content: Record<string, unknown>;
+  content_sha256: string;
+  base_version: number;
+  author_user_id?: string | null;
+  author_credential_id?: string | null;
+  version_created_at: string;
+}
+
+export interface ProvenanceLineageEdge {
+  run_id: string;
+  source_kind: string;
+  source_ref: string;
+  target_kind: string;
+  target_ref: string;
+}
+
+export interface ProvenanceRunEntry {
+  run_id: string;
+  plugin_id: string;
+  plugin_version: string;
+  status: string;
+  parent_run_id?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+  manifest_preimage?: Record<string, unknown> | null;
+  inputs: RunInput[];
+  child_receipt_hashes: string[];
+  froglet_chain: Record<string, unknown>[];
+}
+
+export interface ProvenanceBundle {
+  schema: "bc.provenance.v1" | string;
+  exported_at: string;
+  root_run_id: string;
+  runs: ProvenanceRunEntry[];
+  edges: ProvenanceLineageEdge[];
+  unresolved_ancestors: string[];
+}
+
+export type CatalogDataPlacement = "stays_with_alithea" | "licensable_copy";
+
+export interface OutboundRegistrationResult {
+  registered: boolean;
+  target_hub_url: string;
+  local_peer_id: string;
+  local_peer_pubkey: string;
+  recorded_provider_peer_id?: string | null;
+  remote_response: Record<string, unknown>;
+}
+
+export interface ImportedFederatedModuleResult {
+  imported: boolean;
+  plugin_id: string;
+  version: string;
+  image_digest: string;
+  ui_bundle_hash?: string | null;
+  visibility: string;
+}
+
+export interface ImportedFederatedCatalogResult {
+  imported: boolean;
+  catalog: {
+    id: string;
+    name?: string;
+    latest_snapshot_id?: number;
+    dataset_digest?: string;
+  };
+  shard_count: number;
 }

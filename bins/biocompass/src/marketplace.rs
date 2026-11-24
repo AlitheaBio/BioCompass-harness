@@ -1,8 +1,15 @@
 //! Opt-in Global Default Marketplace client, persisted first-run consent (`[A1]`),
-//! `--airgapped` enforcement, and sync status tracking (`DEV-07`).
+//! in-app Workspace Hub Chooser (`U3`), `--airgapped` enforcement, and sync status tracking (`DEV-07`).
 
+use crate::cloud_client::CallerAuth;
 use crate::state::DeploymentMode;
-use biocompass_core_traits::{CompassError, CompassResult};
+use biocompass_core_traits::{
+    CompassError, CompassResult, ModuleRunsIn, ModuleSource, PluginId,
+};
+use biocompass_plugin_spec::{
+    NetworkPolicy, PluginExecutionPlane, PluginInputs, PluginManifest, PluginResources,
+    PluginUiSpec, SkillDoc,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::StreamExt;
 use reqwest::Client;
@@ -18,9 +25,12 @@ use tokio::sync::RwLock;
 pub const DEFAULT_MARKETPLACE_HUB_URL: &str = "https://hub.biocompass.alithea.bio";
 
 const CONSENT_FILE_NAME: &str = "marketplace_consent.json";
+const WORKSPACE_HUB_FILE_NAME: &str = "workspace_hub.json";
 const STALE_AFTER_SECS: i64 = 15 * 60;
 const MAX_FEED_BODY_BYTES: usize = 8 * 1024 * 1024;
-const MAX_OFFERS_PREVIEW: usize = 25;
+const MAX_OFFERS_PREVIEW: usize = 50;
+const MAX_RECENT_HUBS: usize = 8;
+const UI_BUNDLE_HASH_CAP_PREFIX: &str = "biocompass.ui_bundle_hash.v1:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +38,14 @@ pub enum MarketplaceConsentDecision {
     Unset,
     Accepted,
     Declined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceHubMode {
+    Offline,
+    AlitheaCloud,
+    CustomCloud,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +69,78 @@ pub struct MarketplaceOfferSummary {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_org: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_milli_act: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Network offer explicitly subscribed ("Add" button, `U2`) in a local workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscribedNetworkOffer {
+    pub offer_id: String,
+    pub hub_url: String,
+    pub plugin_id: String,
+    pub version: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// `"run"` or `"download"`.
+    pub kind: String,
+    pub provider_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_bundle_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_url: Option<String>,
+    #[serde(default)]
+    pub price_milli_act: i64,
+}
+
+/// Status snapshot for the in-app Workspace Hub Chooser (`U3`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHubStatus {
+    pub mode: WorkspaceHubMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_url: Option<String>,
+    pub default_hub_url: String,
+    pub connected: bool,
+    pub airgapped: bool,
+    pub authenticated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_actor: Option<String>,
+    pub remote_module_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_hubs: Vec<String>,
+}
+
+/// Module discovered from a connected cloud hub (`U3`) or subscribed network offer (`U2`).
+#[derive(Debug, Clone)]
+pub struct RemoteHubModule {
+    pub manifest: PluginManifest,
+    pub skill: Option<SkillDoc>,
+    pub source: ModuleSource,
+    pub runs_in: ModuleRunsIn,
+    pub has_ui_bundle: bool,
+    pub has_remote_icon: bool,
+    pub ui_bundle_hash: Option<String>,
+    pub ui_bundle_size_bytes: Option<u64>,
+    pub can_install: bool,
+    pub provider_label: Option<String>,
+    pub launch_url: Option<String>,
+    pub offer_id: Option<String>,
+    pub hub_origin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,16 +210,33 @@ struct PersistedMarketplaceConsent {
     decided_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedWorkspaceHub {
+    mode: WorkspaceHubMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hub_url: Option<String>,
+    #[serde(default)]
+    recent_hubs: Vec<String>,
+    #[serde(default)]
+    subscribed_network_offers: Vec<SubscribedNetworkOffer>,
+}
+
 #[derive(Debug, Clone)]
 struct MarketplaceRuntimeState {
     decision: MarketplaceConsentDecision,
     consent_source: String,
+    hub_mode: WorkspaceHubMode,
     hub_url: String,
     decided_at: Option<DateTime<Utc>>,
     last_synced_at: Option<DateTime<Utc>>,
     last_error: Option<String>,
     feed_offer_count: usize,
     offers_preview: Vec<MarketplaceOfferSummary>,
+    recent_hubs: Vec<String>,
+    subscribed_network_offers: Vec<SubscribedNetworkOffer>,
+    hub_session_bearer: Option<String>,
+    hub_session_actor: Option<String>,
+    cached_remote_modules: Vec<RemoteHubModule>,
 }
 
 pub struct MarketplaceClient {
@@ -140,7 +247,7 @@ pub struct MarketplaceClient {
 }
 
 impl MarketplaceClient {
-    /// Initialize marketplace state from `<data_dir>/marketplace_consent.json`.
+    /// Initialize marketplace and workspace-hub state from `<data_dir>`.
     ///
     /// **Invariant (`[A1]`):** Never performs any outbound network request during initialization.
     pub fn new(data_dir: impl AsRef<Path>, cfg: MarketplaceConfig) -> CompassResult<Self> {
@@ -154,7 +261,8 @@ impl MarketplaceClient {
             .map_err(|e| CompassError::Internal(format!("build marketplace HTTP client: {e}")))?;
 
         let persisted = load_persisted_consent(&data_dir);
-        let state = compute_initial_state(&cfg, persisted);
+        let persisted_hub = load_persisted_workspace_hub(&data_dir);
+        let state = compute_initial_state(&cfg, persisted, persisted_hub);
 
         Ok(Self {
             data_dir,
@@ -172,6 +280,402 @@ impl MarketplaceClient {
     pub async fn status(&self) -> MarketplaceStatusSnapshot {
         let guard = self.inner.read().await;
         self.snapshot_from_guard(&guard)
+    }
+
+    /// Return the current in-app Workspace Hub Chooser snapshot (`U3`) without triggering network I/O.
+    pub async fn workspace_hub_status(&self) -> WorkspaceHubStatus {
+        let guard = self.inner.read().await;
+        self.workspace_hub_status_from_guard(&guard)
+    }
+
+    fn workspace_hub_status_from_guard(&self, guard: &MarketplaceRuntimeState) -> WorkspaceHubStatus {
+        let active_url = if self.cfg.airgapped || guard.hub_mode == WorkspaceHubMode::Offline {
+            None
+        } else {
+            Some(guard.hub_url.clone())
+        };
+        let connected = active_url.is_some()
+            && guard.decision == MarketplaceConsentDecision::Accepted
+            && guard.last_error.is_none();
+        WorkspaceHubStatus {
+            mode: if self.cfg.airgapped {
+                WorkspaceHubMode::Offline
+            } else {
+                guard.hub_mode
+            },
+            hub_url: active_url,
+            default_hub_url: self.cfg.default_hub_url.clone(),
+            connected,
+            airgapped: self.cfg.airgapped,
+            authenticated: guard.hub_session_bearer.is_some(),
+            auth_actor: guard.hub_session_actor.clone(),
+            remote_module_count: guard.cached_remote_modules.len(),
+            last_error: guard.last_error.clone(),
+            recent_hubs: guard.recent_hubs.clone(),
+        }
+    }
+
+    /// Return the currently selected remote hub URL and in-memory auth (if any) in `local` mode.
+    pub async fn active_hub_origin_and_auth(&self) -> Option<(String, Option<CallerAuth>)> {
+        if self.cfg.airgapped || self.cfg.mode != DeploymentMode::Local {
+            return None;
+        }
+        let guard = self.inner.read().await;
+        if guard.hub_mode == WorkspaceHubMode::Offline
+            || guard.decision != MarketplaceConsentDecision::Accepted
+            || guard.hub_url.is_empty()
+        {
+            return None;
+        }
+        let auth = guard.hub_session_bearer.as_ref().map(|token| CallerAuth {
+            cookie: None,
+            authorization: Some(format!("Bearer {token}")),
+            api_key: None,
+        });
+        Some((guard.hub_url.clone(), auth))
+    }
+
+    /// Switch the local client's connected cloud workspace hub in-app (`U3`):
+    /// Alithea Cloud, a custom Customer Cloud URL, or Offline.
+    ///
+    /// Persisted in `<data_dir>/workspace_hub.json`. Switching to a different hub immediately clears
+    /// any in-memory session token belonging to the previous hub so credentials never cross hubs.
+    pub async fn set_workspace_hub(
+        &self,
+        mode: WorkspaceHubMode,
+        custom_hub_url: Option<String>,
+        auth_bearer: Option<String>,
+    ) -> CompassResult<WorkspaceHubStatus> {
+        if self.cfg.mode != DeploymentMode::Local {
+            return Err(CompassError::AccessDenied(
+                "workspace hub switcher is only available in local workstation mode".into(),
+            ));
+        }
+        if self.cfg.airgapped && mode != WorkspaceHubMode::Offline {
+            return Err(CompassError::AccessDenied(
+                "remote hub connections are disabled in --airgapped mode".into(),
+            ));
+        }
+
+        let resolved_url = match mode {
+            WorkspaceHubMode::Offline => None,
+            WorkspaceHubMode::AlitheaCloud => {
+                Some(validate_marketplace_hub_url(&self.cfg.default_hub_url)?)
+            }
+            WorkspaceHubMode::CustomCloud => {
+                let raw = custom_hub_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        CompassError::Validation(
+                            "custom_cloud mode requires a valid hub_url".into(),
+                        )
+                    })?;
+                Some(validate_marketplace_hub_url(raw)?)
+            }
+        };
+
+        let now = Utc::now();
+        {
+            let mut guard = self.inner.write().await;
+            let previous_url = guard.hub_url.clone();
+            guard.hub_mode = mode;
+
+            match &resolved_url {
+                None => {
+                    guard.decision = MarketplaceConsentDecision::Declined;
+                    guard.consent_source = "user_setting".to_owned();
+                    guard.decided_at = Some(now);
+                    guard.hub_session_bearer = None;
+                    guard.hub_session_actor = None;
+                    guard.last_error = None;
+                    guard.feed_offer_count = 0;
+                    guard.offers_preview.clear();
+                    guard.cached_remote_modules.clear();
+                }
+                Some(url) => {
+                    if previous_url != *url {
+                        // Never carry an auth token from one hub to another.
+                        guard.hub_session_bearer = None;
+                        guard.hub_session_actor = None;
+                        guard.cached_remote_modules.clear();
+                        guard.offers_preview.clear();
+                        guard.feed_offer_count = 0;
+                    }
+                    if let Some(token) = auth_bearer
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                    {
+                        guard.hub_session_bearer = Some(token.to_owned());
+                    }
+                    guard.hub_url = url.clone();
+                    guard.decision = MarketplaceConsentDecision::Accepted;
+                    guard.consent_source = "user_setting".to_owned();
+                    guard.decided_at = Some(now);
+                    guard.last_error = None;
+                    push_recent_hub(&mut guard.recent_hubs, url);
+                }
+            }
+
+            let persisted_hub = PersistedWorkspaceHub {
+                mode: guard.hub_mode,
+                hub_url: resolved_url.clone(),
+                recent_hubs: guard.recent_hubs.clone(),
+                subscribed_network_offers: guard.subscribed_network_offers.clone(),
+            };
+            save_persisted_workspace_hub(&self.data_dir, &persisted_hub)?;
+
+            let persisted_consent = PersistedMarketplaceConsent {
+                decision: guard.decision,
+                hub_url: Some(guard.hub_url.clone()),
+                decided_at: Some(now),
+            };
+            save_persisted_consent(&self.data_dir, &persisted_consent)?;
+        }
+
+        if resolved_url.is_some() {
+            let _ = self.refresh_connected_hub(None).await;
+        }
+        Ok(self.workspace_hub_status().await)
+    }
+
+    /// Sign into the currently selected cloud workspace hub (`POST <hub_url>/api/v1/auth/login`).
+    pub async fn login_workspace_hub(
+        &self,
+        login_body: Value,
+    ) -> CompassResult<WorkspaceHubStatus> {
+        let (hub_url, _) = self.active_hub_origin_and_auth().await.ok_or_else(|| {
+            CompassError::Validation(
+                "select Alithea Cloud or a Customer Cloud URL before signing in".into(),
+            )
+        })?;
+        let url = format!("{hub_url}/api/v1/auth/login");
+        let resp = self
+            .http
+            .post(&url)
+            .json(&login_body)
+            .send()
+            .await
+            .map_err(|e| {
+                CompassError::Storage(format!(
+                    "hub login request failed: {}",
+                    e.without_url()
+                ))
+            })?;
+        if !resp.status().is_success() {
+            return Err(crate::cloud_client::map_http_error(resp).await);
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| CompassError::Protocol(format!("decode hub login JSON: {e}")))?;
+        let token = body
+            .get("session_token")
+            .or_else(|| body.get("token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                CompassError::Protocol("hub login response omitted session_token".into())
+            })?
+            .to_owned();
+        let actor = body
+            .get("email")
+            .or_else(|| body.get("actor"))
+            .or_else(|| body.pointer("/principal/email"))
+            .or_else(|| body.pointer("/principal/actor"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        {
+            let mut guard = self.inner.write().await;
+            if guard.hub_url == hub_url {
+                guard.hub_session_bearer = Some(token);
+                guard.hub_session_actor = actor;
+            }
+        }
+        let _ = self.refresh_connected_hub(None).await;
+        Ok(self.workspace_hub_status().await)
+    }
+
+    /// Clear the in-memory session token for the connected cloud workspace hub.
+    pub async fn logout_workspace_hub(&self) -> WorkspaceHubStatus {
+        {
+            let mut guard = self.inner.write().await;
+            guard.hub_session_bearer = None;
+            guard.hub_session_actor = None;
+        }
+        self.workspace_hub_status().await
+    }
+
+    /// Refresh feed + remote module catalog from the currently connected hub (`U3`).
+    pub async fn refresh_connected_hub(
+        &self,
+        caller_auth: Option<&CallerAuth>,
+    ) -> CompassResult<Vec<RemoteHubModule>> {
+        let Some((hub_url, stored_auth)) = self.active_hub_origin_and_auth().await else {
+            return Ok(Vec::new());
+        };
+        let validated_hub_url = validate_marketplace_hub_url(&hub_url)?;
+        let effective_auth = merge_hub_auth(caller_auth, stored_auth.as_ref());
+
+        // 1. Fetch public feed (`/v1/feed`) for discovery offers & signed UI bundle hashes.
+        let feed_url = format!("{validated_hub_url}/v1/feed");
+        let feed_result = fetch_marketplace_feed(&self.http, &feed_url).await;
+
+        // 2. Fetch authenticated/accessible org modules (`/api/v1/plugins`) if reachable.
+        let plugins_result =
+            fetch_hub_plugins(&self.http, &validated_hub_url, effective_auth.as_ref()).await;
+
+        let mut modules: Vec<RemoteHubModule> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::<String>::new();
+
+        if let Ok(org_plugins) = &plugins_result {
+            for m in org_plugins {
+                seen_ids.insert(m.manifest.id.as_str().to_owned());
+                modules.push(m.clone());
+            }
+        }
+
+        let mut last_error: Option<String> = None;
+        let (feed_count, feed_offers) = match feed_result {
+            Ok((count, offers)) => (count, offers),
+            Err(err) => {
+                if plugins_result.is_err() {
+                    last_error = Some(err.to_string());
+                }
+                (0, Vec::new())
+            }
+        };
+
+        // Include public module offers from the connected hub's feed if not already listed from `/api/v1/plugins`.
+        for offer in &feed_offers {
+            if !matches!(offer.kind.as_str(), "run" | "download") {
+                continue;
+            }
+            if let Some(m) = synthesize_module_from_offer(offer, &validated_hub_url)
+                && seen_ids.insert(m.manifest.id.as_str().to_owned())
+            {
+                modules.push(m);
+            }
+        }
+
+        let mut guard = self.inner.write().await;
+        if guard.hub_url == validated_hub_url {
+            guard.last_synced_at = if last_error.is_none() {
+                Some(Utc::now())
+            } else {
+                guard.last_synced_at
+            };
+            guard.last_error = last_error;
+            if feed_count > 0 || !feed_offers.is_empty() {
+                guard.feed_offer_count = feed_count;
+                guard.offers_preview = feed_offers;
+            }
+            guard.cached_remote_modules = modules.clone();
+        }
+        Ok(modules)
+    }
+
+    /// Return the last fetched remote modules plus any explicitly subscribed network offers (`U2`/`U3`).
+    pub async fn list_remote_and_subscribed_modules(
+        &self,
+        caller_auth: Option<&CallerAuth>,
+    ) -> Vec<RemoteHubModule> {
+        let mut out = if self.active_hub_origin_and_auth().await.is_some() {
+            match self.refresh_connected_hub(caller_auth).await {
+                Ok(mods) => mods,
+                Err(_) => self.inner.read().await.cached_remote_modules.clone(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut seen: std::collections::HashSet<String> = out
+            .iter()
+            .map(|m| m.manifest.id.as_str().to_owned())
+            .collect();
+
+        let subscribed = self.inner.read().await.subscribed_network_offers.clone();
+        for sub in subscribed {
+            if let Some(module) = synthesize_module_from_subscription(&sub)
+                && seen.insert(module.manifest.id.as_str().to_owned())
+            {
+                out.push(module);
+            }
+        }
+        out
+    }
+
+    /// List explicitly subscribed network offers (`Add` button in `U2`).
+    pub async fn list_subscribed_network_offers(&self) -> Vec<SubscribedNetworkOffer> {
+        self.inner.read().await.subscribed_network_offers.clone()
+    }
+
+    /// Subscribe to a network offer (`U2` "Add" button) so it appears in the module list.
+    pub async fn subscribe_network_offer(
+        &self,
+        offer: SubscribedNetworkOffer,
+    ) -> CompassResult<Vec<SubscribedNetworkOffer>> {
+        if self.cfg.airgapped {
+            return Err(CompassError::AccessDenied(
+                "subscribing to network offers is disabled in --airgapped mode".into(),
+            ));
+        }
+        validate_marketplace_hub_url(&offer.hub_url)?;
+        PluginId::new(offer.plugin_id.clone()).map_err(CompassError::Validation)?;
+        if offer.version.trim().is_empty() {
+            return Err(CompassError::Validation("offer version is required".into()));
+        }
+        biocompass_core_traits::validate_requested_plugin_version(Some(&offer.version))?;
+        if let Some(hash) = offer.ui_bundle_hash.as_deref()
+            && !crate::ui_cache::is_sha256_hex(hash)
+        {
+            return Err(CompassError::Validation(
+                "offer ui_bundle_hash must be a 64-character lowercase hex SHA-256 digest".into(),
+            ));
+        }
+        if let Some(launch_url) = offer.launch_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            validate_marketplace_hub_url(launch_url)?;
+        }
+        let mut guard = self.inner.write().await;
+        if let Some(existing) = guard
+            .subscribed_network_offers
+            .iter_mut()
+            .find(|item| item.offer_id == offer.offer_id || item.plugin_id == offer.plugin_id)
+        {
+            *existing = offer;
+        } else {
+            guard.subscribed_network_offers.push(offer);
+        }
+        let persisted = PersistedWorkspaceHub {
+            mode: guard.hub_mode,
+            hub_url: (guard.hub_mode != WorkspaceHubMode::Offline).then(|| guard.hub_url.clone()),
+            recent_hubs: guard.recent_hubs.clone(),
+            subscribed_network_offers: guard.subscribed_network_offers.clone(),
+        };
+        save_persisted_workspace_hub(&self.data_dir, &persisted)?;
+        Ok(guard.subscribed_network_offers.clone())
+    }
+
+    /// Remove a subscribed network offer from the local module list.
+    pub async fn unsubscribe_network_offer(
+        &self,
+        offer_id: &str,
+    ) -> CompassResult<Vec<SubscribedNetworkOffer>> {
+        let mut guard = self.inner.write().await;
+        guard
+            .subscribed_network_offers
+            .retain(|item| item.offer_id != offer_id && item.plugin_id != offer_id);
+        let persisted = PersistedWorkspaceHub {
+            mode: guard.hub_mode,
+            hub_url: (guard.hub_mode != WorkspaceHubMode::Offline).then(|| guard.hub_url.clone()),
+            recent_hubs: guard.recent_hubs.clone(),
+            subscribed_network_offers: guard.subscribed_network_offers.clone(),
+        };
+        save_persisted_workspace_hub(&self.data_dir, &persisted)?;
+        Ok(guard.subscribed_network_offers.clone())
     }
 
     /// Persist user consent choice (`accepted` or `declined`) and optional hub URL override.
@@ -226,15 +730,39 @@ impl MarketplaceClient {
 
         {
             let mut guard = self.inner.write().await;
+            let url_changed = guard.hub_url != resolved_url;
             guard.decision = decision;
             guard.consent_source = "user_setting".to_owned();
-            guard.hub_url = resolved_url;
+            guard.hub_url = resolved_url.clone();
             guard.decided_at = Some(now);
             if decision == MarketplaceConsentDecision::Declined {
+                guard.hub_mode = WorkspaceHubMode::Offline;
+                guard.hub_session_bearer = None;
+                guard.hub_session_actor = None;
                 guard.last_error = None;
                 guard.feed_offer_count = 0;
                 guard.offers_preview.clear();
+                guard.cached_remote_modules.clear();
+            } else {
+                if url_changed {
+                    guard.hub_session_bearer = None;
+                    guard.hub_session_actor = None;
+                }
+                guard.hub_mode = if resolved_url == self.cfg.default_hub_url {
+                    WorkspaceHubMode::AlitheaCloud
+                } else {
+                    WorkspaceHubMode::CustomCloud
+                };
+                push_recent_hub(&mut guard.recent_hubs, &resolved_url);
             }
+            let persisted_hub = PersistedWorkspaceHub {
+                mode: guard.hub_mode,
+                hub_url: (guard.hub_mode != WorkspaceHubMode::Offline)
+                    .then(|| guard.hub_url.clone()),
+                recent_hubs: guard.recent_hubs.clone(),
+                subscribed_network_offers: guard.subscribed_network_offers.clone(),
+            };
+            let _ = save_persisted_workspace_hub(&self.data_dir, &persisted_hub);
         }
 
         if decision == MarketplaceConsentDecision::Accepted && sync_immediately {
@@ -329,14 +857,40 @@ impl MarketplaceClient {
     }
 }
 
+fn push_recent_hub(list: &mut Vec<String>, url: &str) {
+    list.retain(|existing| existing != url);
+    list.insert(0, url.to_owned());
+    list.truncate(MAX_RECENT_HUBS);
+}
+
+fn merge_hub_auth(caller: Option<&CallerAuth>, stored: Option<&CallerAuth>) -> Option<CallerAuth> {
+    if let Some(c) = caller
+        && (c.authorization.is_some() || c.api_key.is_some() || c.cookie.is_some())
+    {
+        return Some(c.clone());
+    }
+    stored.cloned()
+}
+
 fn compute_initial_state(
     cfg: &MarketplaceConfig,
     persisted: Option<PersistedMarketplaceConsent>,
+    persisted_hub: Option<PersistedWorkspaceHub>,
 ) -> MarketplaceRuntimeState {
+    let recent_hubs = persisted_hub
+        .as_ref()
+        .map(|h| h.recent_hubs.clone())
+        .unwrap_or_default();
+    let subscribed_network_offers = persisted_hub
+        .as_ref()
+        .map(|h| h.subscribed_network_offers.clone())
+        .unwrap_or_default();
+
     if cfg.airgapped {
         return MarketplaceRuntimeState {
             decision: MarketplaceConsentDecision::Declined,
             consent_source: "airgapped".to_owned(),
+            hub_mode: WorkspaceHubMode::Offline,
             hub_url: cfg
                 .explicit_hub_url
                 .clone()
@@ -346,66 +900,143 @@ fn compute_initial_state(
             last_error: None,
             feed_offer_count: 0,
             offers_preview: Vec::new(),
+            recent_hubs,
+            subscribed_network_offers,
+            hub_session_bearer: None,
+            hub_session_actor: None,
+            cached_remote_modules: Vec::new(),
         };
     }
 
     if cfg.mode == DeploymentMode::CloudWeb {
+        let url = cfg
+            .explicit_hub_url
+            .clone()
+            .unwrap_or_else(|| cfg.default_hub_url.clone());
         return MarketplaceRuntimeState {
             decision: MarketplaceConsentDecision::Accepted,
             consent_source: "cloud_web".to_owned(),
-            hub_url: cfg
-                .explicit_hub_url
-                .clone()
-                .unwrap_or_else(|| cfg.default_hub_url.clone()),
+            hub_mode: if url == cfg.default_hub_url {
+                WorkspaceHubMode::AlitheaCloud
+            } else {
+                WorkspaceHubMode::CustomCloud
+            },
+            hub_url: url,
             decided_at: None,
             last_synced_at: None,
             last_error: None,
             feed_offer_count: 0,
             offers_preview: Vec::new(),
+            recent_hubs,
+            subscribed_network_offers,
+            hub_session_bearer: None,
+            hub_session_actor: None,
+            cached_remote_modules: Vec::new(),
+        };
+    }
+
+    if let Some(saved_hub) = persisted_hub {
+        let decision = match saved_hub.mode {
+            WorkspaceHubMode::Offline => MarketplaceConsentDecision::Declined,
+            WorkspaceHubMode::AlitheaCloud | WorkspaceHubMode::CustomCloud => {
+                MarketplaceConsentDecision::Accepted
+            }
+        };
+        let url = saved_hub
+            .hub_url
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| cfg.explicit_hub_url.clone())
+            .unwrap_or_else(|| cfg.default_hub_url.clone());
+        return MarketplaceRuntimeState {
+            decision,
+            consent_source: "user_setting".to_owned(),
+            hub_mode: saved_hub.mode,
+            hub_url: url,
+            decided_at: persisted.and_then(|p| p.decided_at),
+            last_synced_at: None,
+            last_error: None,
+            feed_offer_count: 0,
+            offers_preview: Vec::new(),
+            recent_hubs,
+            subscribed_network_offers,
+            hub_session_bearer: None,
+            hub_session_actor: None,
+            cached_remote_modules: Vec::new(),
         };
     }
 
     if let Some(saved) = persisted
         && saved.decision != MarketplaceConsentDecision::Unset
     {
+        let url = saved
+            .hub_url
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| cfg.explicit_hub_url.clone())
+            .unwrap_or_else(|| cfg.default_hub_url.clone());
+        let hub_mode = if saved.decision == MarketplaceConsentDecision::Declined {
+            WorkspaceHubMode::Offline
+        } else if url == cfg.default_hub_url {
+            WorkspaceHubMode::AlitheaCloud
+        } else {
+            WorkspaceHubMode::CustomCloud
+        };
         return MarketplaceRuntimeState {
             decision: saved.decision,
             consent_source: "user_setting".to_owned(),
-            hub_url: saved
-                .hub_url
-                .filter(|u| !u.trim().is_empty())
-                .or_else(|| cfg.explicit_hub_url.clone())
-                .unwrap_or_else(|| cfg.default_hub_url.clone()),
+            hub_mode,
+            hub_url: url,
             decided_at: saved.decided_at,
             last_synced_at: None,
             last_error: None,
             feed_offer_count: 0,
             offers_preview: Vec::new(),
+            recent_hubs,
+            subscribed_network_offers,
+            hub_session_bearer: None,
+            hub_session_actor: None,
+            cached_remote_modules: Vec::new(),
         };
     }
 
     if let Some(explicit_url) = &cfg.explicit_hub_url {
+        let hub_mode = if *explicit_url == cfg.default_hub_url {
+            WorkspaceHubMode::AlitheaCloud
+        } else {
+            WorkspaceHubMode::CustomCloud
+        };
         return MarketplaceRuntimeState {
             decision: MarketplaceConsentDecision::Accepted,
             consent_source: "env_hub_url".to_owned(),
+            hub_mode,
             hub_url: explicit_url.clone(),
             decided_at: None,
             last_synced_at: None,
             last_error: None,
             feed_offer_count: 0,
             offers_preview: Vec::new(),
+            recent_hubs,
+            subscribed_network_offers,
+            hub_session_bearer: None,
+            hub_session_actor: None,
+            cached_remote_modules: Vec::new(),
         };
     }
 
     MarketplaceRuntimeState {
         decision: MarketplaceConsentDecision::Unset,
         consent_source: "unset".to_owned(),
+        hub_mode: WorkspaceHubMode::Offline,
         hub_url: cfg.default_hub_url.clone(),
         decided_at: None,
         last_synced_at: None,
         last_error: None,
         feed_offer_count: 0,
         offers_preview: Vec::new(),
+        recent_hubs,
+        subscribed_network_offers,
+        hub_session_bearer: None,
+        hub_session_actor: None,
+        cached_remote_modules: Vec::new(),
     }
 }
 
@@ -610,12 +1241,50 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 .or_else(|| entry.get("actor_id").and_then(Value::as_str))
                 .map(str::to_owned);
 
+            let ui_bundle_hash = payload
+                .and_then(|p| p.pointer("/execution_profile/capabilities"))
+                .and_then(Value::as_array)
+                .and_then(|caps| {
+                    caps.iter().filter_map(Value::as_str).find_map(|cap| {
+                        cap.strip_prefix(UI_BUNDLE_HASH_CAP_PREFIX)
+                            .filter(|h| crate::ui_cache::is_sha256_hex(h))
+                            .map(str::to_owned)
+                    })
+                })
+                .or_else(|| {
+                    payload
+                        .and_then(|p| p.get("ui_bundle_hash"))
+                        .and_then(Value::as_str)
+                        .filter(|h| crate::ui_cache::is_sha256_hex(h))
+                        .map(str::to_owned)
+                });
+            let ui_bundle_size_bytes = payload
+                .and_then(|p| p.get("ui_bundle_size_bytes"))
+                .and_then(Value::as_u64);
+            let launch_url = payload
+                .and_then(|p| p.get("launch_url"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let price_milli_act = payload
+                .and_then(|p| p.pointer("/pricing/price_milli_act").or_else(|| p.get("price_milli_act")))
+                .and_then(Value::as_i64);
+            let plugin_id = match kind.as_str() {
+                "run" | "download" if title.contains('/') => Some(title.clone()),
+                _ => None,
+            };
+
             preview.push(MarketplaceOfferSummary {
                 id,
                 kind,
                 title,
                 version,
                 provider_org,
+                plugin_id,
+                ui_bundle_hash,
+                ui_bundle_size_bytes,
+                launch_url,
+                price_milli_act,
+                description: None,
             });
         }
 
@@ -678,17 +1347,269 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 .or_else(|| item.get("org_id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            let plugin_id = item
+                .get("plugin_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| title.contains('/').then(|| title.clone()));
+            let ui_bundle_hash = item
+                .get("ui_bundle_hash")
+                .and_then(Value::as_str)
+                .filter(|h| crate::ui_cache::is_sha256_hex(h))
+                .map(str::to_owned);
+            let ui_bundle_size_bytes = item.get("ui_bundle_size_bytes").and_then(Value::as_u64);
+            let launch_url = item
+                .get("launch_url")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let price_milli_act = item.get("price_milli_act").and_then(Value::as_i64);
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             MarketplaceOfferSummary {
                 id,
                 kind,
                 title,
                 version,
                 provider_org,
+                plugin_id,
+                ui_bundle_hash,
+                ui_bundle_size_bytes,
+                launch_url,
+                price_milli_act,
+                description,
             }
         })
         .collect();
 
     (items.len(), preview)
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHubPluginEnvelope {
+    plugins: Vec<RemoteHubPluginWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHubPluginWire {
+    manifest: PluginManifest,
+    #[serde(default)]
+    skill: Option<SkillDoc>,
+    #[serde(default)]
+    has_ui_bundle: Option<bool>,
+    #[serde(default)]
+    icon_url: Option<String>,
+    #[serde(default)]
+    source: Option<ModuleSource>,
+    #[serde(default)]
+    runs_in: Option<ModuleRunsIn>,
+    #[serde(default)]
+    ui_bundle_hash: Option<String>,
+    #[serde(default)]
+    ui_bundle_size_bytes: Option<u64>,
+    #[serde(default)]
+    can_install: bool,
+    #[serde(default)]
+    provider_label: Option<String>,
+    #[serde(default)]
+    launch_url: Option<String>,
+    #[serde(default)]
+    marketplace_offer_id: Option<String>,
+}
+
+async fn fetch_hub_plugins(
+    http: &Client,
+    hub_url: &str,
+    auth: Option<&CallerAuth>,
+) -> CompassResult<Vec<RemoteHubModule>> {
+    let url = format!("{hub_url}/api/v1/plugins");
+    let mut req = http
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(caller) = auth {
+        if let Some(bearer) = caller.authorization.as_deref().filter(|s| !s.is_empty()) {
+            req = req.header("Authorization", bearer);
+        }
+        if let Some(key) = caller.api_key.as_deref().filter(|s| !s.is_empty()) {
+            req = req.header("X-API-Key", key);
+        }
+        if let Some(cookie) = caller.cookie.as_deref().filter(|s| !s.is_empty()) {
+            req = req.header("Cookie", cookie);
+        }
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CompassError::Storage(format!("fetch hub plugins failed: {}", e.without_url())))?;
+    if !resp.status().is_success() {
+        return Err(crate::cloud_client::map_http_error(resp).await);
+    }
+    let body: RemoteHubPluginEnvelope = resp
+        .json()
+        .await
+        .map_err(|e| CompassError::Protocol(format!("decode hub plugins JSON: {e}")))?;
+
+    Ok(body
+        .plugins
+        .into_iter()
+        .map(|dto| {
+            let has_ui = dto
+                .has_ui_bundle
+                .unwrap_or_else(|| dto.ui_bundle_hash.is_some() || dto.manifest.ui.is_some());
+            RemoteHubModule {
+                manifest: dto.manifest,
+                skill: dto.skill,
+                source: dto.source.unwrap_or(ModuleSource::OrgCloud),
+                runs_in: dto.runs_in.unwrap_or(ModuleRunsIn::Cloud),
+                has_ui_bundle: has_ui,
+                has_remote_icon: dto.icon_url.is_some(),
+                ui_bundle_hash: dto.ui_bundle_hash,
+                ui_bundle_size_bytes: dto.ui_bundle_size_bytes,
+                can_install: dto.can_install,
+                provider_label: dto.provider_label,
+                launch_url: dto.launch_url,
+                offer_id: dto.marketplace_offer_id,
+                hub_origin: hub_url.to_owned(),
+            }
+        })
+        .collect())
+}
+
+fn synthesize_module_from_offer(
+    offer: &MarketplaceOfferSummary,
+    hub_origin: &str,
+) -> Option<RemoteHubModule> {
+    let raw_id = offer
+        .plugin_id
+        .as_deref()
+        .or_else(|| offer.title.contains('/').then_some(offer.title.as_str()))?;
+    let plugin_id = PluginId::new(raw_id.to_owned()).ok()?;
+    let version = offer
+        .version
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "1.0.0".to_owned());
+    let can_install = offer.kind == "download";
+    let provider_label = offer
+        .provider_org
+        .clone()
+        .unwrap_or_else(|| "Network provider".to_owned());
+    let has_ui = offer.ui_bundle_hash.is_some();
+    let manifest = PluginManifest {
+        id: plugin_id,
+        name: offer.title.clone(),
+        version,
+        author: Some(provider_label.clone()),
+        description: offer.description.clone().unwrap_or_else(|| {
+            if can_install {
+                format!("Downloadable network module from {provider_label}.")
+            } else {
+                format!("Remote network module running at {provider_label}.")
+            }
+        }),
+        category: "Marketplace".to_owned(),
+        icon: None,
+        execution: if can_install {
+            PluginExecutionPlane::Either
+        } else {
+            PluginExecutionPlane::CloudOnly
+        },
+        requires_catalog_level: biocompass_core_traits::GrantLevel::default(),
+        dataset_input_contract: None,
+        runtime_queries: Vec::new(),
+        runtime_join_queries: std::collections::BTreeMap::new(),
+        child_modules: Vec::new(),
+        max_child_wait_sec: None,
+        image: format!("network://{hub_origin}/offers/{}", offer.id),
+        network: NetworkPolicy::default(),
+        price_milli_act: offer.price_milli_act.unwrap_or(0),
+        offers: Vec::new(),
+        resources: PluginResources::default(),
+        inputs: PluginInputs::default(),
+        views: Vec::new(),
+        ui: has_ui.then(|| PluginUiSpec {
+            entry: "ui/dist/index.html".to_owned(),
+        }),
+        documentation_url: None,
+        video_url: None,
+        publication_url: None,
+    };
+    Some(RemoteHubModule {
+        manifest,
+        skill: None,
+        source: ModuleSource::NetworkProvider,
+        runs_in: ModuleRunsIn::NetworkProvider,
+        has_ui_bundle: has_ui,
+        has_remote_icon: false,
+        ui_bundle_hash: offer.ui_bundle_hash.clone(),
+        ui_bundle_size_bytes: offer.ui_bundle_size_bytes,
+        can_install,
+        provider_label: Some(provider_label),
+        launch_url: offer
+            .launch_url
+            .clone()
+            .or_else(|| Some(format!("{hub_origin}/module-offers/{}", offer.id))),
+        offer_id: Some(offer.id.clone()),
+        hub_origin: hub_origin.to_owned(),
+    })
+}
+
+fn synthesize_module_from_subscription(sub: &SubscribedNetworkOffer) -> Option<RemoteHubModule> {
+    let offer = MarketplaceOfferSummary {
+        id: sub.offer_id.clone(),
+        kind: sub.kind.clone(),
+        title: sub.title.clone(),
+        version: Some(sub.version.clone()),
+        provider_org: Some(sub.provider_label.clone()),
+        plugin_id: Some(sub.plugin_id.clone()),
+        ui_bundle_hash: sub.ui_bundle_hash.clone(),
+        ui_bundle_size_bytes: sub.ui_bundle_size_bytes,
+        launch_url: sub.launch_url.clone(),
+        price_milli_act: Some(sub.price_milli_act),
+        description: (!sub.description.is_empty()).then(|| sub.description.clone()),
+    };
+    synthesize_module_from_offer(&offer, &sub.hub_url)
+}
+
+fn load_persisted_workspace_hub(data_dir: &Path) -> Option<PersistedWorkspaceHub> {
+    let path = data_dir.join(WORKSPACE_HUB_FILE_NAME);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<PersistedWorkspaceHub>(&raw) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "ignoring malformed workspace_hub.json");
+            None
+        }
+    }
+}
+
+fn save_persisted_workspace_hub(
+    data_dir: &Path,
+    hub: &PersistedWorkspaceHub,
+) -> CompassResult<()> {
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| CompassError::Storage(format!("create data_dir {}: {e}", data_dir.display())))?;
+    let encoded = serde_json::to_string_pretty(hub)
+        .map_err(|e| CompassError::Internal(format!("encode workspace hub config: {e}")))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(data_dir)
+        .map_err(|e| CompassError::Storage(format!("create temp workspace hub file: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| CompassError::Storage(format!("chmod temp workspace hub file: {e}")))?;
+    }
+    tmp.write_all(encoded.as_bytes())
+        .map_err(|e| CompassError::Storage(format!("write temp workspace hub file: {e}")))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| CompassError::Storage(format!("sync temp workspace hub file: {e}")))?;
+    let dest = data_dir.join(WORKSPACE_HUB_FILE_NAME);
+    tmp.persist(&dest)
+        .map_err(|e| CompassError::Storage(format!("persist {}: {}", dest.display(), e.error)))?;
+    Ok(())
 }
 
 fn load_persisted_consent(data_dir: &Path) -> Option<PersistedMarketplaceConsent> {
@@ -1035,5 +1956,161 @@ mod tests {
         assert_eq!(offers[2].kind, "dataset");
         assert_eq!(offers[2].title, "alithea/hla-atlas-v2026.1");
         assert_eq!(offers[2].version, None);
+    }
+
+    async fn spawn_mock_hub_server(
+        plugin_id: &'static str,
+        plugin_name: &'static str,
+        ui_bundle_hash: String,
+    ) -> (String, Arc<tokio::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let seen_auth = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let seen_auth_bg = Arc::clone(&seen_auth);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                for line in req.lines() {
+                    if line.to_ascii_lowercase().starts_with("authorization:") {
+                        seen_auth_bg.lock().await.push(line.to_owned());
+                    }
+                }
+                let first_line = req.lines().next().unwrap_or("");
+                let body = if first_line.starts_with("GET /api/v1/plugins") {
+                    serde_json::json!({
+                        "plugins": [{
+                            "manifest": {
+                                "id": plugin_id,
+                                "name": plugin_name,
+                                "version": "1.0.0",
+                                "description": format!("Hosted module from {plugin_name}"),
+                                "category": "Proteomics",
+                                "execution": "cloud_only",
+                                "image": "registry.example.org/mod@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "price_milli_act": 2500,
+                                "ui": { "entry": "ui/dist/index.html" }
+                            },
+                            "has_ui_bundle": true,
+                            "source": "org_cloud",
+                            "runs_in": "cloud",
+                            "ui_bundle_hash": ui_bundle_hash,
+                            "ui_bundle_size_bytes": 128,
+                            "can_install": false,
+                            "installed_locally": false
+                        }]
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "artifacts": [{
+                            "cursor": 1,
+                            "artifact_hash": "feed-offer-1",
+                            "artifact_kind": "offer",
+                            "actor_id": "provider-hub",
+                            "document": {
+                                "hash": "feed-offer-1",
+                                "payload": {
+                                    "provider_id": "provider-hub",
+                                    "offer_id": format!("mo-{}", plugin_id.replace('/', "-")),
+                                    "offer_kind": "biocompass.module.run.v1",
+                                    "execution_profile": {
+                                        "access_handles": [format!("{plugin_id}@1.0.0")],
+                                        "capabilities": [format!("biocompass.ui_bundle_hash.v1:{ui_bundle_hash}")]
+                                    }
+                                }
+                            }
+                        }],
+                        "active_offer_hashes": ["feed-offer-1"],
+                        "has_more": false
+                    })
+                    .to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), seen_auth)
+    }
+
+    #[tokio::test]
+    async fn u3_local_client_switches_between_two_hubs_in_app_persists_and_isolates_auth() {
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let (hub_a, auth_a) =
+            spawn_mock_hub_server("org-a/alpha-mod", "Alpha Cloud Module", hash_a.clone()).await;
+        let (hub_b, auth_b) =
+            spawn_mock_hub_server("org-b/beta-mod", "Beta Customer Module", hash_b.clone()).await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let cfg = MarketplaceConfig {
+            mode: DeploymentMode::Local,
+            default_hub_url: hub_a.clone(),
+            explicit_hub_url: None,
+            airgapped: false,
+        };
+        let client = MarketplaceClient::new(tmp.path(), cfg.clone()).expect("client");
+
+        // 1. Switch to Alithea Cloud (Hub A) with a bearer token.
+        let status_a = client
+            .set_workspace_hub(
+                WorkspaceHubMode::AlitheaCloud,
+                None,
+                Some("secret-token-hub-a".to_owned()),
+            )
+            .await
+            .expect("switch to hub A");
+        assert_eq!(status_a.mode, WorkspaceHubMode::AlitheaCloud);
+        assert_eq!(status_a.hub_url.as_deref(), Some(hub_a.as_str()));
+        assert!(status_a.connected);
+        assert!(status_a.authenticated);
+        let mods_a = client.list_remote_and_subscribed_modules(None).await;
+        assert_eq!(mods_a.len(), 1);
+        assert_eq!(mods_a[0].manifest.id.as_str(), "org-a/alpha-mod");
+        assert_eq!(mods_a[0].ui_bundle_hash.as_deref(), Some(hash_a.as_str()));
+        assert!(!auth_a.lock().await.is_empty());
+
+        // 2. Switch to Custom Cloud (Hub B) — token from Hub A MUST NOT leak to Hub B!
+        let status_b = client
+            .set_workspace_hub(WorkspaceHubMode::CustomCloud, Some(hub_b.clone()), None)
+            .await
+            .expect("switch to hub B");
+        assert_eq!(status_b.mode, WorkspaceHubMode::CustomCloud);
+        assert_eq!(status_b.hub_url.as_deref(), Some(hub_b.as_str()));
+        assert!(!status_b.authenticated, "Hub A token must be cleared on hub switch");
+        let mods_b = client.list_remote_and_subscribed_modules(None).await;
+        assert_eq!(mods_b.len(), 1);
+        assert_eq!(mods_b[0].manifest.id.as_str(), "org-b/beta-mod");
+        assert_eq!(mods_b[0].ui_bundle_hash.as_deref(), Some(hash_b.as_str()));
+        assert!(
+            auth_b.lock().await.is_empty(),
+            "Hub A auth header leaked to Hub B!"
+        );
+
+        // 3. Restart on same data_dir preserves Hub B choice without needing COMPASS_HUB_URL env!
+        let restarted = MarketplaceClient::new(tmp.path(), cfg.clone()).expect("restart");
+        let persisted_status = restarted.workspace_hub_status().await;
+        assert_eq!(persisted_status.mode, WorkspaceHubMode::CustomCloud);
+        assert_eq!(persisted_status.hub_url.as_deref(), Some(hub_b.as_str()));
+        assert!(persisted_status.recent_hubs.contains(&hub_a));
+        assert!(persisted_status.recent_hubs.contains(&hub_b));
+
+        // 4. Switch to Offline clears remote modules cleanly.
+        let offline = restarted
+            .set_workspace_hub(WorkspaceHubMode::Offline, None, None)
+            .await
+            .expect("offline");
+        assert_eq!(offline.mode, WorkspaceHubMode::Offline);
+        assert_eq!(offline.hub_url, None);
+        assert!(restarted.list_remote_and_subscribed_modules(None).await.is_empty());
     }
 }

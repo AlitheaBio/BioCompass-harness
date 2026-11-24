@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { cancelRun, confirmRun, formatErrorInline, prepareRun } from "../api";
 import { getExternalProviderConsentInfo } from "../milestoneBPolicy";
 import { IconCheck, IconCopy, IconRuns, IconShield } from "./Icons";
+import { ProvenancePanel } from "./ProvenancePanel";
 import { ScientificViews } from "./ScientificViews";
 import {
-  formatMilliAct,
+  formatWorkspaceAmount,
   runStatusLabel,
   type DatasetGrant,
   type RunVerification,
@@ -207,6 +208,7 @@ export function ModuleApiTab({
   sessionId,
   isFocused,
   isConfirmingRun,
+  isLocalPlayLedger = false,
   onSyncDraftParams,
   onRunApiTest,
   onQuoteConfirmed,
@@ -218,6 +220,7 @@ export function ModuleApiTab({
   sessionId?: string;
   isFocused: boolean;
   isConfirmingRun: boolean;
+  isLocalPlayLedger?: boolean;
   onSyncDraftParams?: (pluginId: string, params: Record<string, unknown>) => void;
   onRunApiTest?: (
     params: Record<string, unknown>,
@@ -226,6 +229,8 @@ export function ModuleApiTab({
   onQuoteConfirmed?: (completed: RunRecord) => Promise<void> | void;
   onInspectRun: (runId: string) => void;
 }) {
+  const fmtAmount = (milli: number) =>
+    formatWorkspaceAmount(milli, isLocalPlayLedger && plugin.runs_in !== "cloud" && plugin.runs_in !== "network_provider" && plugin.runs_in !== "provider_edge");
   const schema = plugin.manifest.inputs.schema ?? {};
   const schemaProps =
     (schema["properties"] as Record<string, SchemaPropertySpec> | undefined) ?? {};
@@ -428,7 +433,7 @@ export function ModuleApiTab({
             <p className="bc-caption" style={{ marginTop: 3 }}>
               Two-phase verifiable execution over {plugin.marketplace_offer_id ? "REST" : "REST or BioCompass MCP"}. Active grant:{" "}
               <strong>{activeGrant?.label ?? "Default"}</strong> · Cost:{" "}
-              <strong>{formatMilliAct(plugin.manifest.price_milli_act)}</strong>
+              <strong>{fmtAmount(plugin.manifest.price_milli_act)}</strong>
             </p>
           </div>
           <span className="bc-badge bc-badge-accent mono">{plugin.marketplace_offer_id ? "REST" : "REST + MCP"}</span>
@@ -549,7 +554,7 @@ export function ModuleApiTab({
             >
               {effectiveOffers.map((off) => (
                 <option key={off.id} value={off.id}>
-                  {off.name} ({formatMilliAct(off.price_milli_act)})
+                  {off.name} ({fmtAmount(off.price_milli_act)})
                 </option>
               ))}
             </select>
@@ -593,7 +598,7 @@ export function ModuleApiTab({
           }}
         >
           <span>Offer: {selectedOffer.name}</span>
-          <span>Price: {formatMilliAct(selectedOffer.price_milli_act)}</span>
+          <span>Price: {fmtAmount(selectedOffer.price_milli_act)}</span>
           <span>
             Max Input: {(selectedOffer.max_input_bytes / (1024 * 1024)).toFixed(1)} MiB
           </span>
@@ -632,7 +637,7 @@ export function ModuleApiTab({
                   Signed Froglet Quote · {preparedQuote.offer_name ?? selectedOffer.name}
                 </strong>
                 <span className="bc-badge bc-badge-accent mono">
-                  {formatMilliAct(preparedQuote.estimated_cost_act)}
+                  {fmtAmount(preparedQuote.estimated_cost_act)}
                 </span>
               </div>
               <span className="bc-caption mono">
@@ -672,7 +677,7 @@ export function ModuleApiTab({
                 preparedQuote.base_fee_act > 0 && (
                   <span>
                     Non-refundable failed-run base fee:{" "}
-                    {formatMilliAct(preparedQuote.base_fee_act)}
+                    {fmtAmount(preparedQuote.base_fee_act)}
                   </span>
                 )}
             </div>
@@ -799,7 +804,7 @@ export function ModuleApiTab({
                 <span className="mono bc-caption">{lastTestRun.run_id}</span>
                 <span className="bc-caption">
                   {lastTestRun.artifacts.length} artifact(s) ·{" "}
-                  Quoted {formatMilliAct(lastTestRun.quote.estimated_cost_act)}
+                  Quoted {fmtAmount(lastTestRun.quote.estimated_cost_act)}
                 </span>
               </div>
               <button
@@ -927,6 +932,7 @@ export function ModuleRunsTab({
   requestedRunId,
   isFocused,
   isConfirmingRun,
+  isLocalPlayLedger = false,
   liveLogs,
   verifyReport,
   onClearRequestedRunId,
@@ -938,6 +944,7 @@ export function ModuleRunsTab({
   requestedRunId?: string | null;
   isFocused: boolean;
   isConfirmingRun: boolean;
+  isLocalPlayLedger?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onClearRequestedRunId?: () => void;
@@ -1056,7 +1063,7 @@ export function ModuleRunsTab({
                       <span>{formatRunTimestamp(run.created_at)}</span>
                       {duration && <span>· {duration}</span>}
                       <span>· {run.artifacts.length} file(s)</span>
-                      <span>· Quoted {formatMilliAct(run.quote.estimated_cost_act)}</span>
+                      <span>· Quoted {formatWorkspaceAmount(run.quote.estimated_cost_act, isLocalPlayLedger)}</span>
                       {run.receipt_verified && (
                         <span className="bc-run-verified-dot" title="Schnorr receipt verified">
                           <IconShield size={12} />
@@ -1276,6 +1283,8 @@ export function ModuleRunsTab({
             </details>
           </div>
         )}
+
+        {activeRun && <ProvenancePanel run={activeRun} />}
       </div>
     </div>
   );
@@ -1288,9 +1297,11 @@ export function ModuleRunsTab({
 export function ModuleAboutTab({
   plugin,
   isFocused,
+  isLocalPlayLedger = false,
 }: {
   plugin: PluginSummary;
   isFocused: boolean;
+  isLocalPlayLedger?: boolean;
 }) {
   const schema = plugin.manifest.inputs.schema ?? {};
   const schemaProps =
@@ -1358,7 +1369,15 @@ export function ModuleAboutTab({
         </div>
         <div className="bc-meta-item">
           <span className="bc-caption">Run Cost</span>
-          <span>{formatMilliAct(plugin.manifest.price_milli_act)}</span>
+          <span>
+            {formatWorkspaceAmount(
+              plugin.manifest.price_milli_act,
+              isLocalPlayLedger &&
+                plugin.runs_in !== "cloud" &&
+                plugin.runs_in !== "network_provider" &&
+                plugin.runs_in !== "provider_edge",
+            )}
+          </span>
         </div>
         <div className="bc-meta-item">
           <span className="bc-caption">Execution Target</span>

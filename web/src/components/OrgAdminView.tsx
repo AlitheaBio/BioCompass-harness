@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { AgentCredentialsPanel } from "./AgentCredentialsPanel";
+import { BillingStatementPanel } from "./BillingStatementPanel";
+import { ClientCloudImportPanel } from "./ClientCloudImportPanel";
 import { DatasetOfferVersionsView } from "./DatasetOfferVersionsView";
+import { DocumentsPanel } from "./DocumentsPanel";
 import { ModuleOffersView } from "./ModuleOffersView";
+import { WebhooksPanel } from "./WebhooksPanel";
 import {
   approveDatasetOffer,
   createApiKey,
@@ -76,9 +81,14 @@ type OrgSubTab =
   | "overview"
   | "members"
   | "security"
+  | "agent-credentials"
+  | "statements"
+  | "webhooks"
+  | "documents"
   | "grants"
   | "offers"
   | "module-offers"
+  | "client-cloud-import"
   | "nodes"
   | "audit";
 
@@ -496,11 +506,16 @@ export function OrgAdminView({
 
   const tabs: { id: OrgSubTab; label: string; adminOnly?: boolean }[] = [
     { id: "overview", label: "Budgets & Overview" },
+    { id: "statements", label: "EUR Statements" },
+    { id: "agent-credentials", label: "Agent Credentials", adminOnly: true },
+    { id: "webhooks", label: "Webhooks", adminOnly: true },
+    { id: "documents", label: "Documents" },
     { id: "security", label: "2FA & API Keys" },
     { id: "members", label: "Members & Invites", adminOnly: true },
     { id: "grants", label: "Dataset Grants", adminOnly: true },
     { id: "offers", label: "Dataset Offers" },
     { id: "module-offers", label: "Module Offers" },
+    { id: "client-cloud-import", label: "Client Cloud Import", adminOnly: true },
     { id: "nodes", label: "Provider-Edge Nodes", adminOnly: true },
     { id: "audit", label: "Audit Trail", adminOnly: true },
   ];
@@ -586,17 +601,17 @@ export function OrgAdminView({
           <div className="bc-settings-stack">
             <div className="bc-meta-grid">
               <div className="bc-meta-item">
-                <span className="bc-caption">Available Balance</span>
+                <span className="bc-caption">Available Balance (EUR)</span>
                 <strong
                   className="mono"
                   style={{ fontSize: 18, color: "var(--bc-accent)" }}
                   data-testid="org-available-act"
                 >
-                  {ledger?.available_display ?? "0.00 ACT"}
+                  {ledger?.available_display ?? "€0.00"}
                 </strong>
               </div>
               <div className="bc-meta-item">
-                <span className="bc-caption">ACT Left Today (Circuit Breaker)</span>
+                <span className="bc-caption">EUR Left Today (Daily Breaker)</span>
                 <strong
                   className="mono"
                   style={{ fontSize: 16 }}
@@ -1646,6 +1661,23 @@ export function OrgAdminView({
               )}
             </div>
           </div>
+        )}
+
+        {subTab === "agent-credentials" && isOrgAdmin && (
+          <AgentCredentialsPanel catalogOptions={catalogs.map((c) => c.id)} />
+        )}
+
+        {subTab === "statements" && <BillingStatementPanel />}
+
+        {subTab === "webhooks" && isOrgAdmin && <WebhooksPanel />}
+
+        {subTab === "documents" && <DocumentsPanel />}
+
+        {subTab === "client-cloud-import" && isOrgAdmin && (
+          <ClientCloudImportPanel
+            catalogs={catalogs}
+            onImported={onRefreshWorkspace}
+          />
         )}
 
         {subTab === "audit" && isOrgAdmin && (

@@ -89,36 +89,89 @@ mod private_catalog_tests {
     }
 }
 
-/// Integer minor units of Alithea Compute Tokens (`1 ACT = 1_000 milli-ACT`).
+/// Integer minor units of compute value (`1 EUR = 1 ACT = 1_000 milli-units`; `10 milli-units = €0.01`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CreditAmountAct(pub i64);
 
 impl CreditAmountAct {
-    /// Zero ACT credits.
+    /// Zero balance.
     pub const ZERO: Self = Self(0);
 
-    /// Construct from whole ACT tokens (`1 ACT = 1_000 milli-ACT`).
+    /// Construct from whole EUR / ACT units (`1 unit = 1_000 milli-units`).
     pub const fn from_whole_act(whole: i64) -> Self {
         Self(whole * 1_000)
     }
 
-    /// Construct from milli-ACT minor units.
+    /// Construct from milli-EUR / milli-ACT minor units.
     pub const fn from_milli_act(milli: i64) -> Self {
         Self(milli)
     }
 
-    /// Return raw milli-ACT minor units.
+    /// Return raw milli-EUR / milli-ACT minor units.
     pub const fn milli_act(self) -> i64 {
         self.0
     }
 
-    /// Format as human-readable ACT string (e.g., `12.50 ACT`).
-    pub fn display_act(self) -> String {
-        let sign = if self.0 < 0 { "-" } else { "" };
+    fn rounded_cents(self) -> (&'static str, u64, u64) {
         let abs = self.0.unsigned_abs();
-        let whole = abs / 1_000;
-        let frac = (abs % 1_000) / 10;
-        format!("{sign}{whole}.{frac:02} ACT")
+        let total_cents = abs.saturating_add(5) / 10;
+        let sign = if self.0 < 0 && total_cents > 0 {
+            "-"
+        } else {
+            ""
+        };
+        let whole = total_cents / 100;
+        let cents = total_cents % 100;
+        (sign, whole, cents)
+    }
+
+    /// Format as euros to the cent (e.g., `€1.00`, `€0.05`, `€12.34`).
+    pub fn display_eur(self) -> String {
+        let (sign, whole, cents) = self.rounded_cents();
+        format!("{sign}€{whole}.{cents:02}")
+    }
+
+    /// Format as human-readable euro amount to the cent (`1 ACT = 1 EUR`, e.g., `€12.50`).
+    ///
+    /// For the laptop's local play ledger, use [`Self::display_local_credits`] so local play
+    /// credits are never labelled as euros.
+    pub fn display_act(self) -> String {
+        self.display_eur()
+    }
+
+    /// Format for the local workstation play ledger (never labelled `€` or `EUR`).
+    pub fn display_local_credits(self) -> String {
+        let (sign, whole, cents) = self.rounded_cents();
+        format!("{sign}{whole}.{cents:02} credits")
+    }
+}
+
+#[cfg(test)]
+mod credit_display_tests {
+    use super::CreditAmountAct;
+
+    #[test]
+    fn display_act_formats_euros_to_the_cent() {
+        assert_eq!(CreditAmountAct::ZERO.display_act(), "€0.00");
+        assert_eq!(CreditAmountAct::from_milli_act(50).display_act(), "€0.05");
+        assert_eq!(CreditAmountAct::from_milli_act(1_000).display_act(), "€1.00");
+        assert_eq!(CreditAmountAct::from_milli_act(12_340).display_act(), "€12.34");
+        assert_eq!(CreditAmountAct::from_milli_act(12_345).display_act(), "€12.35");
+        assert_eq!(CreditAmountAct::from_milli_act(-50).display_act(), "-€0.05");
+        assert_eq!(CreditAmountAct::from_milli_act(-4).display_act(), "€0.00");
+        assert_eq!(CreditAmountAct::from_whole_act(250).display_eur(), "€250.00");
+    }
+
+    #[test]
+    fn local_play_ledger_credits_are_never_labelled_euros() {
+        for milli in [0, 50, 1_000, 12_340, 250_000, -5_000] {
+            let formatted = CreditAmountAct::from_milli_act(milli).display_local_credits();
+            assert!(!formatted.contains('€'), "unexpected euro symbol in {formatted}");
+            assert!(!formatted.to_ascii_uppercase().contains("EUR"), "unexpected EUR label in {formatted}");
+            assert!(formatted.ends_with(" credits"), "expected credits suffix in {formatted}");
+        }
+        assert_eq!(CreditAmountAct::from_milli_act(5_000).display_local_credits(), "5.00 credits");
+        assert_eq!(CreditAmountAct::from_milli_act(50).display_local_credits(), "0.05 credits");
     }
 }

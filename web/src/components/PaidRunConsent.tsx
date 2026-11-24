@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { getExternalProviderConsentInfo } from "../milestoneBPolicy";
-import { formatMilliAct, type RunQuote } from "../types";
+import { formatWorkspaceAmount, type RunQuote } from "../types";
 
-export function PaidRunConsent({ quote, params, busy, error, onApprove, onDismiss }: {
+export function PaidRunConsent({ quote, params, busy, error, isLocalPlayLedger = false, onApprove, onDismiss }: {
   quote: RunQuote;
   params: Record<string, unknown> | null;
   busy: boolean;
   error?: string;
+  isLocalPlayLedger?: boolean;
   onApprove: (runId: string) => void;
   onDismiss: (runId: string) => void;
 }) {
@@ -14,6 +15,8 @@ export function PaidRunConsent({ quote, params, busy, error, onApprove, onDismis
   const dismiss = useRef<HTMLButtonElement>(null);
   const externalProvider = getExternalProviderConsentInfo(quote);
   const [externalAck, setExternalAck] = useState(false);
+  const useLocalCredits = isLocalPlayLedger && !externalProvider;
+  const formattedCost = formatWorkspaceAmount(quote.estimated_cost_act, useLocalCredits);
 
   useEffect(() => {
     setExternalAck(false);
@@ -35,7 +38,7 @@ export function PaidRunConsent({ quote, params, busy, error, onApprove, onDismis
         {externalProvider ? "External Provider Execution Consent" : "Approve this run?"}
       </h2>
       <p>{quote.plugin_id} · v{quote.plugin_version}</p>
-      <p>{quote.offer_name ?? quote.offer_id ?? "Run"} · <strong>{formatMilliAct(quote.estimated_cost_act)}</strong></p>
+      <p>{quote.offer_name ?? quote.offer_id ?? "Run"} · <strong>{formattedCost}</strong></p>
       <p className="bc-caption mono">Run {quote.run_id}</p>
       {externalProvider && (
         <div
@@ -104,7 +107,7 @@ export function PaidRunConsent({ quote, params, busy, error, onApprove, onDismis
           disabled={busy} onClick={(e) => { if (e.detail <= 1) onDismiss(quote.run_id); }}>Dismiss quote</button>
         <button type="button" className="bc-btn bc-btn-primary" data-testid="approve-paid-run"
           disabled={approveDisabled} onClick={(e) => { if (e.detail <= 1) onApprove(quote.run_id); }}>
-          {busy ? "Confirming…" : `Approve ${formatMilliAct(quote.estimated_cost_act)}`}
+          {busy ? "Confirming…" : `Approve ${formattedCost}`}
         </button>
       </div>
     </dialog>

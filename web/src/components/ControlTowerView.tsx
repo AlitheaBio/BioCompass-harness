@@ -1,3 +1,4 @@
+import { ClientCloudImportPanel } from "./ClientCloudImportPanel";
 import { ConfirmTierChange } from "./ConfirmTierChange";
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -361,7 +362,7 @@ export function ControlTowerView({
           ? `Federation Peers (${federationPeers.length} · ${pendingFederationCount} pending)`
           : `Federation Peers (${federationPeers.length})`,
     },
-    { id: "billing", label: "Invoice ACT Credits" },
+    { id: "billing", label: "Invoice EUR Balance" },
     { id: "monitor", label: `Enumeration Monitor (${enumEntries.length})` },
   ];
 
@@ -1178,13 +1179,19 @@ export function ControlTowerView({
           </div>
         )}
 
+        {tab === "federation" && (
+          <div style={{ marginTop: 14 }}>
+            <ClientCloudImportPanel onImported={loadAll} />
+          </div>
+        )}
+
         {tab === "billing" && (
           <div className="bc-card">
             <div className="bc-card-header">
               <div>
-                <span className="bc-card-title">Invoice ACT Credit Settlement</span>
+                <span className="bc-card-title">Invoice EUR Credit Settlement</span>
                 <p className="bc-caption" style={{ marginTop: 2 }}>
-                  Credits paid customer invoices directly to an organization&apos;s ACT ledger with
+                  Credits paid customer invoices directly to an organization&apos;s EUR ledger with
                   an immutable audit log entry.
                 </p>
               </div>
@@ -1208,7 +1215,7 @@ export function ControlTowerView({
               </label>
 
               <label className="bc-field">
-                <span className="bc-field-label">Amount (ACT)</span>
+                <span className="bc-field-label">Amount (EUR)</span>
                 <input
                   type="number"
                   step="0.01"

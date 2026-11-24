@@ -61,7 +61,7 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
   const decline=page.getByTestId("decline-paid-run");
   await request("decline");
   expect(confirms).toEqual([]);
-  await expect(consent).toContainText("5.00 ACT");
+  await expect(consent).toContainText("5.00 credits");
   await expect(consent).toContainText("decline");
   await expect(decline).toBeFocused();
   await consent.getByText("Run details").click();
@@ -113,7 +113,7 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
   expect(confirms).toHaveLength(3);
   await decline.click();
   await page.getByTestId("review-quote-btn").click();
-  await expect(page.getByTestId("quote-consent-card")).toContainText("5.00 ACT");
+  await expect(page.getByTestId("quote-consent-card")).toContainText("5.00 credits");
   expect(confirms).toHaveLength(3);
   await page.getByTestId("confirm-quote-run-btn").click();
   await expect.poll(()=>confirms.at(-1)).toEqual({run:"review-run",key:"idem-review-run"});
