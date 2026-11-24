@@ -1,0 +1,15 @@
+# Extends the default gitleaks rules. Keep allowlist entries exact and explained.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public test vectors (not secrets)"
+regexes = [
+  # BIP340 public key derived from the fixed test seed [0x11; 32] in
+  # crates/node-runtime/src/module_attestation.rs (js_test_signer_vector_verifies).
+  '''4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa''',
+  # Sequential placeholder credentials for a throwaway local Garage container in
+  # e2e/u3_real_hubs/run.sh (U-3 real-process timing test).
+  '''GK0123456789abcdef01234567''',
+  '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+]

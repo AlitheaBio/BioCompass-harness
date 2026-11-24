@@ -272,6 +272,7 @@ mod tests {
     /// (`e2e/support/froglet_sign.ts`, seed 0x11..11) produces documents this verifier accepts.
     #[test]
     fn js_test_signer_vector_verifies() {
+        // Public test-vector key derived from the fixed seed [0x11; 32]; allowlisted in .gitleaks.toml.
         let doc: Value = serde_json::from_str(r#"{"artifact_type":"bc.module_attestation.v1","schema_version":"froglet/v1","signer":"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa","created_at":1760000000,"payload_hash":"a1991cd9274c32c28f389aad6593ec2c53b9ef0bc3b796c34084957503065612","hash":"01c6b2a429cbb8dd1cc66b814d25d4c818a4c7949cee0836ec2cb171055dc948","payload":{"plugin_id":"org/mod","version":"1.0.0","ui_bundle_hash":"abababababababababababababababababababababababababababababababab","hub_key":"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa","issued_at":1760000000},"signature":"6ee0e9eedc0a290c255aaa7f4fd2fb90fbff5c46722c07998546132ca9799d3dac69a945920db99c755a3fde986c081675b6f3951bebd3fee26e88db1e6a69ca"}"#).unwrap();
         let key = froglet_protocol::crypto::signing_key_from_seed_bytes(&[0x11; 32]).unwrap();
         assert_eq!(public_key_hex(&key), doc["signer"]);
