@@ -512,17 +512,19 @@ export function ControlTowerView({
                     </label>
 
                     <label className="bc-field">
-                      <span className="bc-field-label">Initial ACT (milli-ACT)</span>
+                      <span className="bc-field-label">Initial balance (EUR)</span>
                       <input
                         type="number"
+                        step="0.01"
+                        min={0}
                         data-testid={`tier-initial-act-${tier.tier_id}`}
                         className="bc-input mono"
-                        value={draft.initial_act_milli}
+                        value={draft.initial_act_milli / 1000}
                         onChange={(e) =>
                           updateTierDraftField(
                             tier.tier_id,
                             "initial_act_milli",
-                            Number(e.target.value) || 0,
+                            Math.round((Number(e.target.value) || 0) * 1000),
                           )
                         }
                       />
@@ -530,18 +532,20 @@ export function ControlTowerView({
 
                     <label className="bc-field">
                       <span className="bc-field-label">
-                        Daily ACT Circuit Breaker (milli-ACT)
+                        Daily spending breaker (EUR)
                       </span>
                       <input
                         type="number"
                         data-testid={`tier-daily-breaker-${tier.tier_id}`}
                         className="bc-input mono"
-                        value={draft.daily_act_breaker_milli ?? ""}
+                        step="0.01"
+                        min={0}
+                        value={draft.daily_act_breaker_milli == null ? "" : draft.daily_act_breaker_milli / 1000}
                         onChange={(e) =>
                           updateTierDraftField(
                             tier.tier_id,
                             "daily_act_breaker_milli",
-                            e.target.value.trim() ? Number(e.target.value) : null,
+                            e.target.value.trim() ? Math.round(Number(e.target.value) * 1000) : null,
                           )
                         }
                       />

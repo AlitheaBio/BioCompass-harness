@@ -31,6 +31,7 @@ pub const ERR_DOC_VERSION_CONFLICT: &str = "DOC_VERSION_CONFLICT";
 pub const ERR_INPUT_LIMIT_EXCEEDED: &str = "INPUT_LIMIT_EXCEEDED";
 pub const ERR_ROW_BUDGET_EXCEEDED: &str = "ROW_BUDGET_EXCEEDED";
 pub const ERR_UNAUTHENTICATED: &str = "UNAUTHENTICATED";
+pub const ERR_MFA_TOTP_REQUIRED: &str = "MFA_TOTP_REQUIRED";
 
 /// Structured, currency-agnostic machine-readable error code for HTTP/MCP/API responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,6 +65,8 @@ pub enum ErrorCode {
     InputLimitExceeded,
     RowBudgetExceeded,
     Unauthenticated,
+    /// The account requires a TOTP second factor for this request (`401`).
+    MfaTotpRequired,
 }
 
 impl ErrorCode {
@@ -95,6 +98,7 @@ impl ErrorCode {
             Self::InputLimitExceeded => ERR_INPUT_LIMIT_EXCEEDED,
             Self::RowBudgetExceeded => ERR_ROW_BUDGET_EXCEEDED,
             Self::Unauthenticated => ERR_UNAUTHENTICATED,
+            Self::MfaTotpRequired => ERR_MFA_TOTP_REQUIRED,
         }
     }
 
@@ -126,6 +130,7 @@ impl ErrorCode {
             ERR_INPUT_LIMIT_EXCEEDED => Some(Self::InputLimitExceeded),
             ERR_ROW_BUDGET_EXCEEDED => Some(Self::RowBudgetExceeded),
             ERR_UNAUTHENTICATED => Some(Self::Unauthenticated),
+            ERR_MFA_TOTP_REQUIRED => Some(Self::MfaTotpRequired),
             _ => None,
         }
     }
@@ -156,6 +161,7 @@ impl ErrorCode {
                 | Self::InputLimitExceeded
                 | Self::RowBudgetExceeded
                 | Self::Unauthenticated
+                | Self::MfaTotpRequired
         )
     }
 }
@@ -193,6 +199,7 @@ impl CompassError {
             ErrorCode::ValidationError | ErrorCode::InputLimitExceeded => Self::Validation(msg),
             ErrorCode::AccessDenied
             | ErrorCode::Unauthenticated
+            | ErrorCode::MfaTotpRequired
             | ErrorCode::AgentCredentialRevoked
             | ErrorCode::AgentCredentialExpired
             | ErrorCode::OffListModule
@@ -269,6 +276,10 @@ impl CompassError {
 
     pub fn unauthenticated(detail: impl Into<String>) -> Self {
         Self::coded(ErrorCode::Unauthenticated, detail)
+    }
+
+    pub fn mfa_totp_required(detail: impl Into<String>) -> Self {
+        Self::coded(ErrorCode::MfaTotpRequired, detail)
     }
 
     /// Extract the stable machine-readable [`ErrorCode`] for this error.

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { fetchBillingStatement, formatErrorInline } from "../api";
-import { formatMilliAct, type BillingStatement } from "../types";
+import { formatMilliAct, type BillingStatement, type BillingStatementEntry } from "../types";
 
 /**
  * Milestone C1 (H4 / H3) — EUR Billing Statement with breakdowns by module, dataset, and
@@ -13,23 +13,47 @@ export function BillingStatementPanel() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [credentialFilter, setCredentialFilter] = useState("");
+  // Totals come from the server over the whole range; entries are paged with a cursor.
+  const [entries, setEntries] = useState<BillingStatementEntry[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+
+  const filters = useCallback(
+    () => ({
+      ...(fromDate ? { from: fromDate } : {}),
+      ...(toDate ? { to: toDate } : {}),
+      ...(credentialFilter.trim() ? { credential_id: credentialFilter.trim() } : {}),
+    }),
+    [fromDate, toDate, credentialFilter],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchBillingStatement({
-        ...(fromDate ? { from: fromDate } : {}),
-        ...(toDate ? { to: toDate } : {}),
-        ...(credentialFilter.trim() ? { credential_id: credentialFilter.trim() } : {}),
-      });
+      const data = await fetchBillingStatement({ ...filters(), limit: 100 });
       setStatement(data);
+      setEntries(data.entries);
+      setNextCursor(data.page?.next_cursor ?? null);
     } catch (err: unknown) {
       setError(formatErrorInline(err));
     } finally {
       setLoading(false);
     }
-  }, [fromDate, toDate, credentialFilter]);
+  }, [filters]);
+
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    setLoading(true);
+    try {
+      const data = await fetchBillingStatement({ ...filters(), limit: 100, cursor: nextCursor });
+      setEntries((prev) => [...prev, ...data.entries]);
+      setNextCursor(data.page?.next_cursor ?? null);
+    } catch (err: unknown) {
+      setError(formatErrorInline(err));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -42,7 +66,8 @@ export function BillingStatementPanel() {
           <div>
             <span className="bc-card-title">EUR Usage Statement</span>
             <p className="bc-caption" style={{ marginTop: 2, marginBottom: 0 }}>
-              Settled module &amp; dataset fees in euros (1 ACT = €1.00) with verifiable receipt hashes.
+              Settled module &amp; dataset fees in euros, to the cent, with verifiable receipt hashes.
+              Totals cover the whole date range; runs still in flight are shown separately.
             </p>
           </div>
           <button
@@ -120,9 +145,51 @@ export function BillingStatementPanel() {
               <strong className="mono">{formatMilliAct(statement.totals.refunded_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
-              <span className="bc-caption">Runs Settled</span>
-              <strong className="mono">{statement.totals.run_count}</strong>
+              <span className="bc-caption">Reserved (in flight)</span>
+              <strong className="mono" data-testid="statement-in-flight">
+                {formatMilliAct(statement.totals.reserved_in_flight_milli_eur ?? 0)}
+              </strong>
             </div>
+            <div className="bc-meta-item">
+              <span className="bc-caption">Runs</span>
+              <strong className="mono">
+                {statement.totals.run_count}
+                {statement.totals.in_flight_run_count ? ` (${statement.totals.in_flight_run_count} in flight)` : ""}
+              </strong>
+            </div>
+          </div>
+        )}
+
+        {statement?.ledger && (
+          <div className="bc-meta-grid" style={{ marginTop: 10 }} data-testid="statement-ledger-reconciliation">
+            <div className="bc-meta-item">
+              <span className="bc-caption">Opening balance</span>
+              <strong className="mono">{formatMilliAct(statement.ledger.opening_balance_milli_eur)}</strong>
+            </div>
+            <div className="bc-meta-item">
+              <span className="bc-caption">Ledger movements</span>
+              <strong className="mono">{formatMilliAct(statement.ledger.movements_milli_eur)}</strong>
+            </div>
+            <div className="bc-meta-item">
+              <span className="bc-caption">Closing balance</span>
+              <strong className="mono">{formatMilliAct(statement.ledger.closing_balance_milli_eur)}</strong>
+            </div>
+            <div className="bc-meta-item">
+              <span className="bc-caption">Reconciled</span>
+              <strong>{statement.ledger.reconciled ? "Yes" : "No: contact support"}</strong>
+            </div>
+            {statement.ledger.non_run_entries.length > 0 && (
+              <div className="bc-meta-item" style={{ gridColumn: "1 / -1" }}>
+                <span className="bc-caption">Top-ups, grants and other non-run entries</span>
+                <ul className="bc-caption mono" style={{ margin: 0, paddingLeft: 16 }}>
+                  {statement.ledger.non_run_entries.map((e) => (
+                    <li key={e.tx_id}>
+                      {new Date(e.created_at).toLocaleDateString()} · {e.kind} · {formatMilliAct(e.delta_milli_eur)} · {e.reference}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -197,7 +264,7 @@ export function BillingStatementPanel() {
         </div>
       )}
 
-      {statement && statement.entries.length > 0 && (
+      {statement && entries.length > 0 && (
         <section className="bc-card">
           <div className="bc-card-title" style={{ marginBottom: 8 }}>Itemized Runs</div>
           <div className="table-scroll">
@@ -213,7 +280,7 @@ export function BillingStatementPanel() {
                 </tr>
               </thead>
               <tbody>
-                {statement.entries.map((entry) => (
+                {entries.map((entry) => (
                   <tr key={entry.run_id}>
                     <td className="mono">{entry.run_id.slice(0, 14)}</td>
                     <td className="mono">{entry.plugin_id}</td>
@@ -221,7 +288,9 @@ export function BillingStatementPanel() {
                       {entry.agent_credential_label ?? entry.agent_credential_id ?? "human"}
                     </td>
                     <td className="mono">
-                      {formatMilliAct(entry.settled_milli_eur)} ({formatMilliAct(entry.module_fee_milli_eur)} + {formatMilliAct(entry.dataset_fee_milli_eur)})
+                      {entry.in_flight
+                        ? `${formatMilliAct(entry.reserved_in_flight_milli_eur ?? 0)} reserved (in flight)`
+                        : `${formatMilliAct(entry.settled_milli_eur)} (${formatMilliAct(entry.module_fee_milli_eur)} + ${formatMilliAct(entry.dataset_fee_milli_eur)})`}
                     </td>
                     <td className="mono">{entry.receipt_hash ? `${entry.receipt_hash.slice(0, 16)}…` : "—"}</td>
                     <td className="bc-caption mono">{new Date(entry.created_at).toLocaleString()}</td>
@@ -230,6 +299,18 @@ export function BillingStatementPanel() {
               </tbody>
             </table>
           </div>
+          {nextCursor && (
+            <button
+              type="button"
+              className="bc-btn bc-btn-secondary bc-btn-sm"
+              style={{ marginTop: 8 }}
+              disabled={loading}
+              data-testid="statement-load-more"
+              onClick={() => void loadMore()}
+            >
+              {loading ? "Loading…" : "Load more runs"}
+            </button>
+          )}
         </section>
       )}
     </div>

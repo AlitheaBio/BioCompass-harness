@@ -158,6 +158,7 @@ export function OrgAdminView({
     useState<GrantAccessLevel>("compute_only");
   const [offerDailyBudget, setOfferDailyBudget] = useState("500");
   const [offerMaxRows, setOfferMaxRows] = useState("250");
+  // Entered in euros (to the cent); sent to the hub in milli-euro.
   const [offerPriceMilliAct, setOfferPriceMilliAct] = useState("0");
 
   // Hospital-Edge Node form
@@ -416,7 +417,7 @@ export function OrgAdminView({
         default_level: offerDefaultLevel,
         daily_row_budget: budget != null && Number.isFinite(budget) ? budget : null,
         max_rows_per_query: Number(offerMaxRows) || 250,
-        price_milli_act: Number(offerPriceMilliAct) || 0,
+        price_milli_act: Math.round((Number(offerPriceMilliAct) || 0) * 1000),
       });
       setOfferTitle("");
       setOfferDescription("");
@@ -1268,7 +1269,7 @@ export function OrgAdminView({
                 <div>
                   <span className="bc-card-title">Froglet Dataset Offers Marketplace</span>
                   <p className="bc-caption" style={{ marginTop: 2 }}>
-                    Subscribe to cloud-hosted or hospital-edge governed datasets with signed ACT
+                    Subscribe to cloud-hosted or hospital-edge governed datasets with signed, euro-denominated
                     settlement.
                   </p>
                 </div>
@@ -1448,10 +1449,11 @@ export function OrgAdminView({
                   </label>
 
                   <label className="bc-field">
-                    <span className="bc-field-label">Subscription Fee (milli-ACT)</span>
+                    <span className="bc-field-label">Subscription fee (EUR)</span>
                     <input
                       type="number"
                       min={0}
+                      step="0.01"
                       className="bc-input mono"
                       value={offerPriceMilliAct}
                       onChange={(e) => setOfferPriceMilliAct(e.target.value)}

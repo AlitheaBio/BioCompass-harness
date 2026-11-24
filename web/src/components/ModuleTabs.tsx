@@ -5,9 +5,11 @@ import { IconCheck, IconCopy, IconRuns, IconShield } from "./Icons";
 import { ProvenancePanel } from "./ProvenancePanel";
 import { ScientificViews } from "./ScientificViews";
 import {
+  effectiveRunCostMilli,
   formatWorkspaceAmount,
   runStatusLabel,
   type DatasetGrant,
+  type NegotiatedModuleOfferPrice,
   type RunVerification,
   type PluginSummary,
   type ResolvedPluginOffer,
@@ -1298,10 +1300,13 @@ export function ModuleAboutTab({
   plugin,
   isFocused,
   isLocalPlayLedger = false,
+  negotiatedPrice = null,
 }: {
   plugin: PluginSummary;
   isFocused: boolean;
   isLocalPlayLedger?: boolean;
+  /** This organization's negotiated price for the release, when one applies. */
+  negotiatedPrice?: NegotiatedModuleOfferPrice | null;
 }) {
   const schema = plugin.manifest.inputs.schema ?? {};
   const schemaProps =
@@ -1369,14 +1374,15 @@ export function ModuleAboutTab({
         </div>
         <div className="bc-meta-item">
           <span className="bc-caption">Run Cost</span>
-          <span>
+          <span data-testid="module-run-cost">
             {formatWorkspaceAmount(
-              plugin.manifest.price_milli_act,
+              effectiveRunCostMilli(plugin, negotiatedPrice),
               isLocalPlayLedger &&
                 plugin.runs_in !== "cloud" &&
                 plugin.runs_in !== "network_provider" &&
                 plugin.runs_in !== "provider_edge",
             )}
+            {negotiatedPrice && <span className="bc-caption"> (negotiated)</span>}
           </span>
         </div>
         <div className="bc-meta-item">

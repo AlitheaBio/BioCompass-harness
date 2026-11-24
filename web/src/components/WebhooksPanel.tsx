@@ -5,6 +5,7 @@ import {
   fetchWebhookDeliveries,
   fetchWebhooks,
   formatErrorInline,
+  redeliverWebhookDelivery,
   updateWebhook,
 } from "../api";
 import type {
@@ -56,6 +57,20 @@ export function WebhooksPanel() {
       setError(formatErrorInline(err));
     }
   }, []);
+
+  const redeliver = async (deliveryId: string) => {
+    if (!selectedId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await redeliverWebhookDelivery(selectedId, deliveryId);
+      await loadDeliveries(selectedId);
+    } catch (err: unknown) {
+      setError(formatErrorInline(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const toggleEvent = (ev: string) => {
     setEvents((prev) => (prev.includes(ev) ? prev.filter((x) => x !== ev) : [...prev, ev]));
@@ -140,8 +155,12 @@ export function WebhooksPanel() {
               <span>{copiedSecret ? "Copied" : "Copy secret"}</span>
             </button>
           </div>
-          <p className="bc-caption" style={{ marginTop: 4 }}>
-            Verify deliveries via <code>X-BioCompass-Signature: sha256=&lt;hmac-hex&gt;</code>.
+          <p className="bc-caption" style={{ marginTop: 4 }} data-testid="webhook-signature-help">
+            Each delivery carries <code>X-BioCompass-Timestamp</code> and{" "}
+            <code>X-BioCompass-Signature: sha256=&lt;hex&gt;</code>, the HMAC-SHA256 of{" "}
+            <code>&lt;timestamp&gt;.&lt;raw body&gt;</code> with this secret. Reject deliveries whose
+            timestamp is more than 5 minutes from your clock, and deduplicate on{" "}
+            <code>X-BioCompass-Delivery</code>.
           </p>
           <pre className="bc-code-pre mono">{createdSecret}</pre>
         </div>
@@ -298,6 +317,7 @@ export function WebhooksPanel() {
                     <th>HTTP</th>
                     <th>Last Error</th>
                     <th>Timestamp</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -324,6 +344,19 @@ export function WebhooksPanel() {
                       <td className="bc-caption">{d.last_error ?? "—"}</td>
                       <td className="bc-caption mono">
                         {new Date(d.delivered_at ?? d.updated_at).toLocaleString()}
+                      </td>
+                      <td>
+                        {(d.status === "dead_letter" || d.status === "failed") && (
+                          <button
+                            type="button"
+                            className="bc-btn bc-btn-ghost bc-btn-sm"
+                            disabled={busy}
+                            data-testid={`webhook-redeliver-${d.delivery_id}`}
+                            onClick={() => void redeliver(d.delivery_id)}
+                          >
+                            Redeliver
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

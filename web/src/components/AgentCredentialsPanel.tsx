@@ -10,6 +10,8 @@ import {
   type AgentCredentialRecord,
   type AgentCredentialRole,
   type CreatedAgentCredential,
+  unlimitedCeilingWarning,
+  unlimitedCeilings,
 } from "../types";
 import { IconCheck, IconCopy, IconShield, IconTrash } from "./Icons";
 
@@ -58,6 +60,11 @@ export function AgentCredentialsPanel({
   const [dailyCapEur, setDailyCapEur] = useState("5.00");
   const [totalCapEur, setTotalCapEur] = useState("50.00");
   const [burstPerMinute, setBurstPerMinute] = useState("60");
+
+  const pendingWarning = unlimitedCeilingWarning(
+    parseEurToMilli(dailyCapEur) == null,
+    parseEurToMilli(totalCapEur) == null,
+  );
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -263,6 +270,16 @@ export function AgentCredentialsPanel({
               onChange={(e) => setAllowedModules(e.target.value)}
             />
           </label>
+          {pendingWarning && (
+            <div
+              role="alert"
+              className="bc-inline-alert bc-inline-alert-warn"
+              data-testid="agent-cred-unlimited-warning"
+              style={{ gridColumn: "1 / -1" }}
+            >
+              {pendingWarning} Leaving a ceiling empty is allowed and is recorded in the audit log.
+            </div>
+          )}
           <div>
             <button
               type="submit"
@@ -323,10 +340,27 @@ export function AgentCredentialsPanel({
                         <div>Mod: {cred.allowed_modules ? cred.allowed_modules.join(", ") || "none" : "all"}</div>
                       </td>
                       <td className="mono">
-                        {cred.daily_ceiling_milli_act != null ? formatMilliAct(cred.daily_ceiling_milli_act) : "∞"} /{" "}
-                        {cred.total_ceiling_milli_act != null ? formatMilliAct(cred.total_ceiling_milli_act) : "∞"}
+                        {cred.daily_ceiling_milli_act != null ? formatMilliAct(cred.daily_ceiling_milli_act) : "unlimited"} /{" "}
+                        {cred.total_ceiling_milli_act != null ? formatMilliAct(cred.total_ceiling_milli_act) : "unlimited"}
+                        {(() => {
+                          const lacks = unlimitedCeilings(cred);
+                          const warning = unlimitedCeilingWarning(lacks.daily, lacks.total);
+                          return warning && !cred.revoked_at ? (
+                            <div
+                              className="bc-caption"
+                              role="note"
+                              data-testid={`agent-cred-unlimited-${cred.credential_id}`}
+                              style={{ color: "var(--bc-warn, #b45309)" }}
+                            >
+                              Warning: {warning}
+                            </div>
+                          ) : null;
+                        })()}
                       </td>
-                      <td className="mono">{formatMilliAct(cred.spent_total_milli_act)}</td>
+                      <td className="mono">
+                        {formatMilliAct(cred.spent_today_milli_act ?? 0)} today
+                        <div className="bc-caption">{formatMilliAct(cred.spent_total_milli_act)} total</div>
+                      </td>
                       <td className="bc-caption mono">{new Date(cred.expires_at).toLocaleDateString()}</td>
                       <td>
                         <span className={`bc-badge ${badgeClass}`}>{statusLabel}</span>

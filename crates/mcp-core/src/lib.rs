@@ -77,6 +77,7 @@ impl McpErrorCode {
     pub fn from_compass_error(err: &CompassError) -> Self {
         match err.error_code() {
             ErrorCode::Unauthenticated
+            | ErrorCode::MfaTotpRequired
             | ErrorCode::AgentCredentialExpired
             | ErrorCode::AgentCredentialRevoked => Self::Unauthorized,
             ErrorCode::InsufficientFunds

@@ -182,6 +182,16 @@ export function DocumentsPanel({
   };
 
   const handleDelete = async (docId: string) => {
+    // Deleting is org-admin only and soft: the document leaves the list, but every version is
+    // kept and runs that used a version still resolve it.
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        "Delete this document? Org admins only. Its versions are kept, and runs that used them still resolve.",
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -277,6 +287,8 @@ export function DocumentsPanel({
                           type="button"
                           className="bc-btn bc-btn-ghost bc-btn-sm"
                           disabled={busy}
+                          title="Delete (org admins only; versions are kept)"
+                          aria-label={`Delete document ${doc.title}`}
                           onClick={() => void handleDelete(doc.id)}
                         >
                           <IconTrash size={13} />

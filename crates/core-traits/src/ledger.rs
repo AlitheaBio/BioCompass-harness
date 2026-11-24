@@ -293,10 +293,11 @@ impl PaymentGateway for SqliteActLedger {
             let (avail, reserved) = Self::ensure_org(&tx, &oid, genesis)?;
             let needed = amount.milli_act();
             if avail < needed {
+                // Laptop play ledger: credits, never euros.
                 return Err(CompassError::insufficient_funds(format!(
                     "need {}, available {}",
-                    amount.display_act(),
-                    CreditAmountAct::from_milli_act(avail).display_act()
+                    amount.display_local_credits(),
+                    CreditAmountAct::from_milli_act(avail).display_local_credits()
                 )));
             }
 
@@ -614,5 +615,24 @@ impl PaymentGateway for SqliteActLedger {
                 .map_err(|e| CompassError::Payment(format!("read ledger transactions: {e}")))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod play_ledger_currency_tests {
+    use super::*;
+
+    /// Review fix: the laptop play ledger counts credits; its messages never mention euros.
+    #[tokio::test]
+    async fn insufficient_funds_on_the_play_ledger_is_in_credits() {
+        let ledger = SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(1)).unwrap();
+        let org = OrgId::from("org-local");
+        let err = ledger
+            .reserve_for_run(&org, &RunId::from("run-local-1"), CreditAmountAct::from_whole_act(5), "idem-1")
+            .await
+            .expect_err("5 credits exceed the 1 credit genesis balance");
+        let text = err.to_string();
+        assert!(text.contains("5.00 credits"), "{text}");
+        assert!(!text.contains('€') && !text.to_ascii_uppercase().contains("EUR"), "{text}");
     }
 }

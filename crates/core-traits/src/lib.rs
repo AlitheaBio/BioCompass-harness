@@ -446,9 +446,11 @@ mod tests {
             payment.user_message(),
             "Credit & billing error: Insufficient ACT balance"
         );
+        // Hints come from typed codes only, never from message substrings.
+        assert_eq!(payment.hint(), None);
         assert_eq!(
-            payment.hint(),
-            Some("Check your available ACT credits and daily ACT breaker in Settings -> Usage.")
+            CompassError::insufficient_funds("need 2.00 credits, available 1.00 credits").hint(),
+            Some("Check your available balance and the organization's daily spending breaker in Settings -> Usage.")
         );
 
         let limited = CompassError::RateLimited("burst rpm exceeded".into());
