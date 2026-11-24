@@ -1,9 +1,104 @@
 use super::*;
-use biocompass_core_traits::{compute_canonical_workload_hash, result_manifest_hash};
+use biocompass_core_traits::{
+    ParsedExtensionRef, compute_canonical_workload_hash, parse_extension_ref, result_manifest_hash,
+};
 use froglet_verify::DocumentStatus;
 
 fn inconsistent(detail: &str) -> CompassError {
     CompassError::IntegrityViolation(format!("workspace pickup: {detail}"))
+}
+
+/// Fail-closed verification of Quote, Deal, and Receipt `extension_refs` (`W6`, `W7`).
+pub(crate) fn verify_signed_chain_extension_refs(
+    quote: &SignedArtifact<QuotePayload>,
+    deal: &SignedArtifact<DealPayload>,
+    receipt: &SignedArtifact<ReceiptPayload>,
+    inputs: &[biocompass_core_traits::RunInput],
+    has_parent_run_id: bool,
+    expected_parent_deal_hash: Option<&str>,
+    expected_child_receipt_hashes: Option<&[String]>,
+) -> CompassResult<()> {
+    let mut observed_parents = Vec::new();
+    for raw in &quote.payload.extension_refs {
+        match parse_extension_ref(raw)? {
+            ParsedExtensionRef::Input { .. } => {}
+            ParsedExtensionRef::Parent { parent_deal_hash } => {
+                observed_parents.push(parent_deal_hash);
+            }
+            ParsedExtensionRef::Child { .. } => {
+                return Err(CompassError::IntegrityViolation(
+                    "bc.child.v1 extension_ref is not permitted on Quote".into(),
+                ));
+            }
+        }
+    }
+    if observed_parents.len() > 1 {
+        return Err(CompassError::IntegrityViolation(
+            "Quote carries multiple bc.parent.v1 extension_refs".into(),
+        ));
+    }
+    let parent_deal_hash = match (has_parent_run_id, expected_parent_deal_hash) {
+        (_, Some(expected)) => Some(expected),
+        (true, None) => {
+            let Some(found) = observed_parents.first().map(String::as_str) else {
+                return Err(CompassError::IntegrityViolation(
+                    "child run with parent_run_id is missing bc.parent.v1 on signed Quote".into(),
+                ));
+            };
+            Some(found)
+        }
+        (false, None) => {
+            if !observed_parents.is_empty() {
+                return Err(CompassError::IntegrityViolation(
+                    "non-child run unexpectedly carries bc.parent.v1 on signed Quote".into(),
+                ));
+            }
+            None
+        }
+    };
+
+    verify_extension_refs(
+        ExtensionRefStage::QuoteOrDeal,
+        &quote.payload.extension_refs,
+        inputs,
+        parent_deal_hash,
+        &[],
+    )?;
+    verify_extension_refs(
+        ExtensionRefStage::QuoteOrDeal,
+        &deal.payload.extension_refs,
+        inputs,
+        parent_deal_hash,
+        &[],
+    )?;
+
+    let child_hashes: Vec<String> = match expected_child_receipt_hashes {
+        Some(expected) => expected.to_vec(),
+        None => {
+            let mut parsed_children = Vec::with_capacity(receipt.payload.extension_refs.len());
+            for raw in &receipt.payload.extension_refs {
+                match parse_extension_ref(raw)? {
+                    ParsedExtensionRef::Child { child_receipt_hash } => {
+                        parsed_children.push(child_receipt_hash);
+                    }
+                    other => {
+                        return Err(CompassError::IntegrityViolation(format!(
+                            "unexpected non-child extension_ref on Receipt: {other:?}"
+                        )));
+                    }
+                }
+            }
+            parsed_children
+        }
+    };
+    verify_extension_refs(
+        ExtensionRefStage::Receipt,
+        &receipt.payload.extension_refs,
+        &[],
+        None,
+        &child_hashes,
+    )?;
+    Ok(())
 }
 
 /// Verify a released hosted run before publishing locally downloaded files.
@@ -69,8 +164,22 @@ pub fn verify_released_result_commitment(
             "run or quote metadata differs from its signed chain",
         ));
     }
+    let quote: SignedArtifact<QuotePayload> = serde_json::from_value(chain[2].clone())
+        .map_err(|e| inconsistent(&format!("decode signed quote: {e}")))?;
+    let deal: SignedArtifact<DealPayload> = serde_json::from_value(chain[3].clone())
+        .map_err(|e| inconsistent(&format!("decode signed deal: {e}")))?;
     let receipt: SignedArtifact<ReceiptPayload> = serde_json::from_value(chain[4].clone())
         .map_err(|e| inconsistent(&format!("decode signed receipt: {e}")))?;
+    verify_signed_chain_extension_refs(
+        &quote,
+        &deal,
+        &receipt,
+        &run.inputs,
+        run.parent_run_id.is_some(),
+        None,
+        None,
+    )
+    .map_err(|e| inconsistent(&e.to_string()))?;
     let payload = &receipt.payload;
     let image_digest = OciImageRef::parse(&run.quote.image_ref, false)?.canonical_module_hash();
     let result_ref = format!("blob://runs/{}/result.json", run.run_id);

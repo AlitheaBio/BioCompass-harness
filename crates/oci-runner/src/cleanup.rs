@@ -186,25 +186,21 @@ impl OciContainerRunner {
         }
     }
 
-    pub(super) async fn abort_execution(
+    pub(super) async fn abort_client_and_container(
         &self,
         child: &mut tokio::process::Child,
         container_name: &str,
-        reason: CompassError,
-    ) -> CompassError {
+    ) -> CompassResult<()> {
         // The attached run client and the daemon-owned container have independent lifetimes.
         // Even if killing the client fails, attempt to remove the actual container.
         let client = stop_client(child).await;
-        let removal = self.force_remove_container(container_name).await;
-        if let Err(error) = removal {
-            return CompassError::ContainerEngine(format!("{reason}; {error}"));
-        }
+        self.force_remove_container(container_name).await?;
         if let Err(error) = client {
-            return CompassError::ContainerEngine(format!(
-                "{reason}; reap attached client: {error}"
-            ));
+            return Err(CompassError::ContainerEngine(format!(
+                "reap attached client: {error}"
+            )));
         }
-        reason
+        Ok(())
     }
 }
 

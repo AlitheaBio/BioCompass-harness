@@ -160,8 +160,22 @@ fn verify_native_chain(
             "local identity, run, offer, approved quote or confirmation key differs",
         ));
     }
+    let signed_quote: SignedArtifact<QuotePayload> = serde_json::from_value(docs[2].clone())
+        .map_err(|error| inconsistent(format!("decode Froglet quote: {error}")))?;
+    let signed_deal: SignedArtifact<DealPayload> = serde_json::from_value(docs[3].clone())
+        .map_err(|error| inconsistent(format!("decode Froglet deal: {error}")))?;
     let receipt: SignedArtifact<ReceiptPayload> = serde_json::from_value(docs[4].clone())
         .map_err(|error| inconsistent(format!("decode Froglet receipt: {error}")))?;
+    released_result::verify_signed_chain_extension_refs(
+        &signed_quote,
+        &signed_deal,
+        &receipt,
+        &run.inputs,
+        run.parent_run_id.is_some(),
+        None,
+        None,
+    )
+    .map_err(|error| inconsistent(error.to_string()))?;
     let image = OciImageRef::parse(&run.quote.image_ref, runtime.allow_local_dev_tags)?
         .canonical_module_hash();
     if receipt.signer != provider
