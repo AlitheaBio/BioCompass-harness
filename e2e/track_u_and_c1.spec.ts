@@ -1,7 +1,6 @@
 /**
  * Track U UI-FLOW test against node:http MOCK hubs (U2 buttons, U3 hub switch, U-1 attested UI
- * cache and tamper refusal). Its timings are NOT a performance proof: the real measurement
- * against two compass-hub processes with added latency is `e2e/u3_real_hubs/run.sh`.
+ * cache and tamper refusal).
  */
 import { expect, test } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
@@ -127,7 +126,7 @@ async function startMockHub(opts: {
                 category: "Proteomics",
                 execution: "cloud_only",
                 image: `registry.example.org/mod@sha256:${"a".repeat(64)}`,
-                price_milli_act: 2500,
+                price_milli_eur: 2500,
                 ui: { entry: "ui/dist/index.html" },
               },
               has_ui_bundle: true,
@@ -149,7 +148,7 @@ async function startMockHub(opts: {
                       category: "Security",
                       execution: "cloud_only",
                       image: `registry.example.org/bad@sha256:${"b".repeat(64)}`,
-                      price_milli_act: 0,
+                      price_milli_eur: 0,
                       ui: { entry: "ui/dist/index.html" },
                     },
                     has_ui_bundle: true,
@@ -211,7 +210,7 @@ async function startMockHub(opts: {
 }
 
 test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
-  test("UI-flow (mock hubs, not a performance proof): U1 attested UI cache (local, cloud, network + tamper refusal), U2 button semantics, U3 hub switch, H3 play credits", async ({
+  test("UI-flow (mock hubs): U1 attested UI cache (local, cloud, network + tamper refusal), U2 button semantics, U3 hub switch, local no-billing usage tab", async ({
     page,
   }) => {
     const tamperedHash = "e".repeat(64);
@@ -246,17 +245,12 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
         await declineBtn.click();
       }
 
-      // 1. Verify H3 local play ledger is NOT labelled euros.
-      const ledgerResp = await page.request.get("/api/v1/ledger");
-      expect(ledgerResp.ok()).toBe(true);
-      const ledger = (await ledgerResp.json()) as {
-        available_display: string;
-        is_local_play_ledger?: boolean;
-      };
-      expect(ledger.is_local_play_ledger).toBe(true);
-      expect(ledger.available_display).not.toContain("€");
-      expect(ledger.available_display.toUpperCase()).not.toContain("EUR");
-      expect(ledger.available_display).toMatch(/credits$/);
+      // 1. Verify local mode Settings -> Usage shows local no-billing note.
+      await page.getByTestId("nav-settings").click();
+      await page.getByTestId("settings-tab-usage").click();
+      await expect(page.getByTestId("usage-local-note")).toContainText("no billing");
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("settings-modal")).toBeHidden();
 
       await page.getByTestId("nav-plugins").click();
       await expect(page.getByTestId("workspace-hub-chooser")).toBeVisible();
@@ -412,7 +406,6 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
           actor: "admin@pharma.bio",
           email: "admin@pharma.bio",
           role: "owner",
-          tier_id: "enterprise",
           is_platform_admin: true,
           auth_method: "session",
         });
@@ -420,11 +413,11 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
       if (pathname === "ledger") {
         return json({
           org_id: "org-pharma",
-          tier_id: "enterprise",
-          available_milli_act: 42_500,
+          available_milli_eur: 42_500,
+          reserved_milli_eur: 0,
           available_display: "€42.50",
-          daily_act_spent_milli: 5_000,
-          daily_act_breaker_milli: 50_000,
+          daily_spent_milli_eur: 5_000,
+          daily_spend_breaker_milli_eur: 50_000,
           transactions: [],
         });
       }
@@ -441,9 +434,9 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
           token_prefix: "bc_agent_abc123",
           allowed_catalogs: body.allowed_catalogs ?? null,
           allowed_modules: body.allowed_modules ?? null,
-          daily_ceiling_milli_act: body.daily_ceiling_milli_act ?? null,
-          total_ceiling_milli_act: body.total_ceiling_milli_act ?? null,
-          spent_total_milli_act: 0,
+          daily_ceiling_milli_eur: body.daily_ceiling_milli_eur ?? null,
+          total_ceiling_milli_eur: body.total_ceiling_milli_eur ?? null,
+          spent_total_milli_eur: 0,
           burst_per_minute: body.burst_per_minute ?? 60,
           expires_at: "2027-01-01T00:00:00Z",
           created_by: "admin@pharma.bio",
@@ -633,18 +626,6 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
           },
         });
       }
-      if (pathname === "admin/federation/register-outbound") {
-        const body = req.postDataJSON() as Record<string, unknown>;
-        expect(body).not.toHaveProperty("hub_url");
-        return json({
-          registered: true,
-          target_hub_url: (body.target_hub_url as string | undefined) ?? "https://hub.biocompass.alithea.bio",
-          local_peer_id: "peer-pharma-cloud",
-          local_peer_pubkey: "a".repeat(64),
-          recorded_provider_peer_id: "peer-alithea",
-          remote_response: { status: "pending" },
-        });
-      }
       if (pathname === "catalogs/org-pharma/study-1/placement" && method === "PATCH") {
         return json({ catalog_id: "org-pharma/study-1", data_placement: "licensable_copy" });
       }
@@ -689,8 +670,8 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
     await page.getByTestId("nav-org-admin").click();
 
     // 1. H3 EUR display in Org Overview
-    await expect(page.getByTestId("org-available-act")).toHaveText("€42.50");
-    await expect(page.getByTestId("org-act-left-today")).toContainText("€45.00 / €50.00");
+    await expect(page.getByTestId("org-available-eur")).toHaveText("€42.50");
+    await expect(page.getByTestId("org-eur-left-today")).toContainText("€45.00 / €50.00");
 
     // 2. H1 Agent Credentials
     await page.getByTestId("org-tab-agent-credentials").click();
@@ -732,12 +713,8 @@ test.describe("Track U (U1, U2, U3) & Milestone C1 Enterprise Web UI", () => {
     await page.getByTestId("document-save-btn").click();
     await expect(page.getByTestId("document-editor-card")).toContainText("v3");
 
-    // 6. U4 Client Cloud Registration & Data Placement
+    // 6. Catalog Data Placement
     await page.getByTestId("org-tab-client-cloud-import").click();
-    await page.getByTestId("u4-register-outbound-btn").click();
-    await expect(page.getByTestId("client-cloud-import-panel")).toContainText(
-      "Outbound registration submitted",
-    );
     await page.getByTestId("u4-placement-mode-select").selectOption("licensable_copy");
     await page.getByTestId("u4-placement-save-btn").click();
     await expect(page.getByTestId("client-cloud-import-panel")).toContainText("licensable_copy");

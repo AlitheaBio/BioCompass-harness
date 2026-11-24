@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { getExternalProviderConsentInfo } from "../milestoneBPolicy";
-import { formatWorkspaceAmount, type RunQuote } from "../types";
+import { formatMilliEur, type RunQuote } from "../types";
 
-export function PaidRunConsent({ quote, params, busy, error, isLocalPlayLedger = false, onApprove, onDismiss }: {
+export function PaidRunConsent({ quote, params, busy, error, isLocalRun = false, onApprove, onDismiss }: {
   quote: RunQuote;
   params: Record<string, unknown> | null;
   busy: boolean;
   error?: string;
-  isLocalPlayLedger?: boolean;
+  isLocalRun?: boolean;
   onApprove: (runId: string) => void;
   onDismiss: (runId: string) => void;
 }) {
@@ -15,8 +15,10 @@ export function PaidRunConsent({ quote, params, busy, error, isLocalPlayLedger =
   const dismiss = useRef<HTMLButtonElement>(null);
   const externalProvider = getExternalProviderConsentInfo(quote);
   const [externalAck, setExternalAck] = useState(false);
-  const useLocalCredits = isLocalPlayLedger && !externalProvider;
-  const formattedCost = formatWorkspaceAmount(quote.estimated_cost_act, useLocalCredits);
+  const localNoCharge = isLocalRun && !externalProvider;
+  const formattedCost = localNoCharge
+    ? "Local run (no charge)"
+    : formatMilliEur(quote.estimated_cost_milli_eur);
 
   useEffect(() => {
     setExternalAck(false);
@@ -107,7 +109,7 @@ export function PaidRunConsent({ quote, params, busy, error, isLocalPlayLedger =
           disabled={busy} onClick={(e) => { if (e.detail <= 1) onDismiss(quote.run_id); }}>Dismiss quote</button>
         <button type="button" className="bc-btn bc-btn-primary" data-testid="approve-paid-run"
           disabled={approveDisabled} onClick={(e) => { if (e.detail <= 1) onApprove(quote.run_id); }}>
-          {busy ? "Confirming…" : `Approve ${formattedCost}`}
+          {busy ? "Confirming…" : localNoCharge ? "Approve local run" : `Approve ${formattedCost}`}
         </button>
       </div>
     </dialog>

@@ -77,7 +77,7 @@ fn source(root: &Path, id: &str, v: &str, plane: &str) -> String {
     let dir = root.join("plugins").join(format!("{id}-{v}"));
     fs::create_dir_all(&dir).unwrap();
     let manifest = format!(
-        "id='fixture/{id}'\nname='Example'\nversion='{v}'\nimage='local/fixture:dev'\nexecution='{plane}'\nprice_milli_act=0\n"
+        "id='fixture/{id}'\nname='Example'\nversion='{v}'\nimage='local/fixture:dev'\nexecution='{plane}'\nprice_milli_eur=0\n"
     );
     fs::write(dir.join("plugin.toml"), &manifest).unwrap();
     manifest
@@ -185,7 +185,7 @@ async fn exact_source_detach_restore_and_quote_lifecycle_through_native_http() {
     );
     fs::write(
         &source_path,
-        original.replace("price_milli_act=0", "price_milli_act=123"),
+        original.replace("price_milli_eur=0", "price_milli_eur=123"),
     )
     .unwrap();
     assert_eq!(

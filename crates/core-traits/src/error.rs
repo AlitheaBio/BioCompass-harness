@@ -18,7 +18,7 @@ pub const ERR_UPSTREAM_LLM_ERROR: &str = "UPSTREAM_LLM_ERROR";
 pub const ERR_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
 pub const ERR_INSUFFICIENT_FUNDS: &str = "INSUFFICIENT_FUNDS";
-pub const ERR_DAILY_ACT_BREAKER_EXCEEDED: &str = "DAILY_ACT_BREAKER_EXCEEDED";
+pub const ERR_DAILY_SPEND_BREAKER_EXCEEDED: &str = "DAILY_SPEND_BREAKER_EXCEEDED";
 pub const ERR_AGENT_CEILING_EXCEEDED: &str = "AGENT_CEILING_EXCEEDED";
 pub const ERR_AGENT_CREDENTIAL_REVOKED: &str = "AGENT_CREDENTIAL_REVOKED";
 pub const ERR_AGENT_CREDENTIAL_EXPIRED: &str = "AGENT_CREDENTIAL_EXPIRED";
@@ -52,7 +52,7 @@ pub enum ErrorCode {
 
     // Domain-specific stable codes (Milestone C)
     InsufficientFunds,
-    DailyActBreakerExceeded,
+    DailySpendBreakerExceeded,
     AgentCeilingExceeded,
     AgentCredentialRevoked,
     AgentCredentialExpired,
@@ -85,7 +85,7 @@ impl ErrorCode {
             Self::UpstreamLlmError => ERR_UPSTREAM_LLM_ERROR,
             Self::InternalError => ERR_INTERNAL_ERROR,
             Self::InsufficientFunds => ERR_INSUFFICIENT_FUNDS,
-            Self::DailyActBreakerExceeded => ERR_DAILY_ACT_BREAKER_EXCEEDED,
+            Self::DailySpendBreakerExceeded => ERR_DAILY_SPEND_BREAKER_EXCEEDED,
             Self::AgentCeilingExceeded => ERR_AGENT_CEILING_EXCEEDED,
             Self::AgentCredentialRevoked => ERR_AGENT_CREDENTIAL_REVOKED,
             Self::AgentCredentialExpired => ERR_AGENT_CREDENTIAL_EXPIRED,
@@ -117,7 +117,7 @@ impl ErrorCode {
             ERR_UPSTREAM_LLM_ERROR => Some(Self::UpstreamLlmError),
             ERR_INTERNAL_ERROR => Some(Self::InternalError),
             ERR_INSUFFICIENT_FUNDS => Some(Self::InsufficientFunds),
-            ERR_DAILY_ACT_BREAKER_EXCEEDED => Some(Self::DailyActBreakerExceeded),
+            ERR_DAILY_SPEND_BREAKER_EXCEEDED => Some(Self::DailySpendBreakerExceeded),
             ERR_AGENT_CEILING_EXCEEDED => Some(Self::AgentCeilingExceeded),
             ERR_AGENT_CREDENTIAL_REVOKED => Some(Self::AgentCredentialRevoked),
             ERR_AGENT_CREDENTIAL_EXPIRED => Some(Self::AgentCredentialExpired),
@@ -148,7 +148,7 @@ impl ErrorCode {
         matches!(
             self,
             Self::InsufficientFunds
-                | Self::DailyActBreakerExceeded
+                | Self::DailySpendBreakerExceeded
                 | Self::AgentCeilingExceeded
                 | Self::AgentCredentialRevoked
                 | Self::AgentCredentialExpired
@@ -214,7 +214,7 @@ impl CompassError {
             ErrorCode::ProtocolError => Self::Protocol(msg),
             ErrorCode::PaymentError
             | ErrorCode::InsufficientFunds
-            | ErrorCode::DailyActBreakerExceeded
+            | ErrorCode::DailySpendBreakerExceeded
             | ErrorCode::AgentCeilingExceeded => Self::Payment(msg),
             ErrorCode::RateLimited | ErrorCode::RowBudgetExceeded => Self::RateLimited(msg),
             ErrorCode::UpstreamLlmError => Self::UpstreamLlm(msg),
@@ -226,8 +226,8 @@ impl CompassError {
         Self::coded(ErrorCode::InsufficientFunds, detail)
     }
 
-    pub fn daily_act_breaker_exceeded(detail: impl Into<String>) -> Self {
-        Self::coded(ErrorCode::DailyActBreakerExceeded, detail)
+    pub fn daily_spend_breaker_exceeded(detail: impl Into<String>) -> Self {
+        Self::coded(ErrorCode::DailySpendBreakerExceeded, detail)
     }
 
     pub fn agent_ceiling_exceeded(detail: impl Into<String>) -> Self {

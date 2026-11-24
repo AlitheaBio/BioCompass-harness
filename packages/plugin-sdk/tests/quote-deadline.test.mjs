@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { createPluginClient } from "../dist/index.js";
+import { createPluginClient, formatMilliEur } from "../dist/index.js";
+
+test("formatMilliEur formats milli-EUR values to cents", () => {
+  assert.equal(formatMilliEur(0), "€0.00");
+  assert.equal(formatMilliEur(50), "€0.05");
+  assert.equal(formatMilliEur(1000), "€1.00");
+  assert.equal(formatMilliEur(5000), "€5.00");
+  assert.equal(formatMilliEur(12345), "€12.35");
+  assert.equal(formatMilliEur(-50), "-€0.05");
+  assert.equal(formatMilliEur(-4), "€0.00");
+});
 
 test("only the host times out quote preparation", async (t) => {
   const frame = new EventTarget();

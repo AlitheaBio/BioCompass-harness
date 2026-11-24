@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { fetchBillingStatement, formatErrorInline } from "../api";
-import { formatMilliAct, type BillingStatement, type BillingStatementEntry } from "../types";
+import { formatMilliEur, type BillingStatement, type BillingStatementEntry } from "../types";
 
 /**
  * Milestone C1 (H4 / H3) — EUR Billing Statement with breakdowns by module, dataset, and
@@ -129,25 +129,25 @@ export function BillingStatementPanel() {
             <div className="bc-meta-item">
               <span className="bc-caption">Total Spend (EUR)</span>
               <strong className="mono" style={{ fontSize: 18 }}>
-                {formatMilliAct(statement.totals.total_milli_eur)}
+                {formatMilliEur(statement.totals.total_milli_eur)}
               </strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Module Fees</span>
-              <strong className="mono">{formatMilliAct(statement.totals.module_fee_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.totals.module_fee_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Dataset Fees</span>
-              <strong className="mono">{formatMilliAct(statement.totals.dataset_fee_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.totals.dataset_fee_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Refunded</span>
-              <strong className="mono">{formatMilliAct(statement.totals.refunded_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.totals.refunded_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Reserved (in flight)</span>
               <strong className="mono" data-testid="statement-in-flight">
-                {formatMilliAct(statement.totals.reserved_in_flight_milli_eur ?? 0)}
+                {formatMilliEur(statement.totals.reserved_in_flight_milli_eur ?? 0)}
               </strong>
             </div>
             <div className="bc-meta-item">
@@ -164,15 +164,15 @@ export function BillingStatementPanel() {
           <div className="bc-meta-grid" style={{ marginTop: 10 }} data-testid="statement-ledger-reconciliation">
             <div className="bc-meta-item">
               <span className="bc-caption">Opening balance</span>
-              <strong className="mono">{formatMilliAct(statement.ledger.opening_balance_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.ledger.opening_balance_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Ledger movements</span>
-              <strong className="mono">{formatMilliAct(statement.ledger.movements_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.ledger.movements_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Closing balance</span>
-              <strong className="mono">{formatMilliAct(statement.ledger.closing_balance_milli_eur)}</strong>
+              <strong className="mono">{formatMilliEur(statement.ledger.closing_balance_milli_eur)}</strong>
             </div>
             <div className="bc-meta-item">
               <span className="bc-caption">Reconciled</span>
@@ -184,7 +184,7 @@ export function BillingStatementPanel() {
                 <ul className="bc-caption mono" style={{ margin: 0, paddingLeft: 16 }}>
                   {statement.ledger.non_run_entries.map((e) => (
                     <li key={e.tx_id}>
-                      {new Date(e.created_at).toLocaleDateString()} · {e.kind} · {formatMilliAct(e.delta_milli_eur)} · {e.reference}
+                      {new Date(e.created_at).toLocaleDateString()} · {e.kind} · {formatMilliEur(e.delta_milli_eur)} · {e.reference}
                     </li>
                   ))}
                 </ul>
@@ -210,7 +210,7 @@ export function BillingStatementPanel() {
                     <tr key={g.plugin_id}>
                       <td className="mono">{g.plugin_id}</td>
                       <td className="mono">{g.run_count}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.total_milli_eur)}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliEur(g.total_milli_eur)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -232,7 +232,7 @@ export function BillingStatementPanel() {
                     <tr key={g.catalog_id}>
                       <td className="mono">{g.catalog_id}</td>
                       <td className="mono">{g.run_count}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.dataset_fee_milli_eur)}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliEur(g.dataset_fee_milli_eur)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -254,7 +254,7 @@ export function BillingStatementPanel() {
                     <tr key={g.credential_id ?? g.label}>
                       <td className="mono">{g.label}</td>
                       <td className="mono">{g.run_count}</td>
-                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliAct(g.total_milli_eur)}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{formatMilliEur(g.total_milli_eur)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -289,8 +289,8 @@ export function BillingStatementPanel() {
                     </td>
                     <td className="mono">
                       {entry.in_flight
-                        ? `${formatMilliAct(entry.reserved_in_flight_milli_eur ?? 0)} reserved (in flight)`
-                        : `${formatMilliAct(entry.settled_milli_eur)} (${formatMilliAct(entry.module_fee_milli_eur)} + ${formatMilliAct(entry.dataset_fee_milli_eur)})`}
+                        ? `${formatMilliEur(entry.reserved_in_flight_milli_eur ?? 0)} reserved (in flight)`
+                        : `${formatMilliEur(entry.settled_milli_eur)} (${formatMilliEur(entry.module_fee_milli_eur)} + ${formatMilliEur(entry.dataset_fee_milli_eur)})`}
                     </td>
                     <td className="mono">{entry.receipt_hash ? `${entry.receipt_hash.slice(0, 16)}…` : "—"}</td>
                     <td className="bc-caption mono">{new Date(entry.created_at).toLocaleString()}</td>

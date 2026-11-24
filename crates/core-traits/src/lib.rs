@@ -12,7 +12,7 @@ pub use commitments::{
 pub use error::{
     ERR_ACCESS_DENIED, ERR_AGENT_CEILING_EXCEEDED, ERR_AGENT_CREDENTIAL_EXPIRED,
     ERR_AGENT_CREDENTIAL_REVOKED, ERR_CHILD_MODULE_NOT_ALLOWED, ERR_CONTAINER_ENGINE_ERROR,
-    ERR_DAILY_ACT_BREAKER_EXCEEDED, ERR_DOC_VERSION_CONFLICT, ERR_IDEMPOTENCY_CONFLICT,
+    ERR_DAILY_SPEND_BREAKER_EXCEEDED, ERR_DOC_VERSION_CONFLICT, ERR_IDEMPOTENCY_CONFLICT,
     ERR_INPUT_LIMIT_EXCEEDED, ERR_INSUFFICIENT_FUNDS, ERR_INTEGRITY_VIOLATION, ERR_INTERNAL_ERROR,
     ERR_NOT_FOUND, ERR_OFF_LIST_CATALOG, ERR_OFF_LIST_MODULE, ERR_PAYMENT_ERROR,
     ERR_PROTOCOL_ERROR, ERR_RATE_LIMITED, ERR_ROW_BUDGET_EXCEEDED, ERR_STORAGE_ERROR,
@@ -20,20 +20,16 @@ pub use error::{
     ErrorCode,
 };
 #[cfg(feature = "local-sqlite")]
-pub mod ledger;
-#[cfg(feature = "local-sqlite")]
 pub mod sqlite_store;
 pub mod traits;
 pub mod types;
 pub mod run_events;
 
 pub use fs_blob_store::{LocalFsBlobStore, StandardOciPolicyVerifier};
-pub use ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
-#[cfg(feature = "local-sqlite")]
-pub use ledger::SqliteActLedger;
+pub use ids::{CatalogId, MilliEur, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
 #[cfg(feature = "local-sqlite")]
 pub use sqlite_store::{SqliteSessionStore, local_delivery};
-pub use traits::{BlobStore, OciRegistryClient, PaymentGateway, RunDispatcher, SessionStore};
+pub use traits::{BlobStore, Ledger, OciRegistryClient, RunDispatcher, SessionStore};
 pub use types::{
     ArtifactRef, AttachedCatalogPin, ColumnDescriptor, CompassError, CompassResult, DatasetGrant,
     DatasetHostingMode, DatasetOfferRecord, DatasetOfferScope, FilterExpr, GrantLevel, IngestFormat, IngestMode,
@@ -289,155 +285,6 @@ mod tests {
         assert_eq!(roundtrip, br#"{"ok":true}"#);
     }
 
-    #[cfg(feature = "local-sqlite")]
-    #[tokio::test]
-    async fn act_ledger_reserves_settles_refunds_and_rejects_idempotency_collision() {
-        let ledger =
-            SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(100)).expect("ledger");
-        let org = OrgId::from("org-biotech");
-        let run_ok = RunId::from("run-ok-1");
-        let run_fail = RunId::from("run-fail-2");
-
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("bal"),
-            CreditAmountAct::from_whole_act(100)
-        );
-
-        ledger
-            .reserve_for_run(&org, &run_ok, CreditAmountAct::from_whole_act(15), "idem-1")
-            .await
-            .expect("reserve 1");
-        // Same (run_id, idempotency_key) -> safe idempotent replay
-        ledger
-            .reserve_for_run(&org, &run_ok, CreditAmountAct::from_whole_act(15), "idem-1")
-            .await
-            .expect("idempotent replay must not double-deduct");
-        // Different run_id reusing idem-1 -> MUST FAIL LOUD
-        let collision = ledger
-            .reserve_for_run(
-                &org,
-                &RunId::from("run-hijack"),
-                CreditAmountAct::from_whole_act(15),
-                "idem-1",
-            )
-            .await;
-        assert!(
-            matches!(collision, Err(CompassError::Payment(_))),
-            "reusing idempotency_key across different run_ids must fail"
-        );
-
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("bal after reserve"),
-            CreditAmountAct::from_whole_act(85)
-        );
-
-        ledger
-            .settle_run(&org, &run_ok, "ed86f83b5a1b4e56")
-            .await
-            .expect("settle");
-        // A different signed receipt cannot supersede a completed settlement.
-        assert!(ledger.settle_run(&org, &run_ok, "different-receipt").await.is_err());
-
-        ledger
-            .reserve_for_run(&org, &run_fail, CreditAmountAct::from_whole_act(25), "idem-2")
-            .await
-            .expect("reserve 2");
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("bal mid"),
-            CreditAmountAct::from_whole_act(60)
-        );
-        ledger
-            .refund_run(&org, &run_fail, "container exited non-zero")
-            .await
-            .expect("refund");
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("bal refunded"),
-            CreditAmountAct::from_whole_act(85)
-        );
-
-        ledger
-            .credit_topup(
-                &org,
-                CreditAmountAct::from_whole_act(50),
-                "PO-2026-ALITHEA-0042",
-                false,
-            )
-            .await
-            .expect("topup");
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("bal topup"),
-            CreditAmountAct::from_whole_act(135)
-        );
-    }
-
-    #[cfg(feature = "local-sqlite")]
-    #[tokio::test]
-    async fn act_ledger_prevents_overdraft_under_concurrent_reservation_race() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let ledger = SqliteActLedger::open(
-            dir.path().join("ledger.sqlite"),
-            CreditAmountAct::from_whole_act(100),
-        )
-        .expect("open disk ledger");
-        let org = OrgId::from("org-race-tenant");
-
-        // Prime the org genesis balance first
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("prime"),
-            CreditAmountAct::from_whole_act(100)
-        );
-
-        // Spawn 10 concurrent reservations of 20 ACT each against a 100 ACT balance
-        let mut handles = Vec::new();
-        for idx in 0..10 {
-            let l = ledger.clone();
-            let o = org.clone();
-            handles.push(tokio::spawn(async move {
-                let run_id = RunId::from(format!("run-race-{idx}"));
-                let idem = format!("idem-race-{idx}");
-                l.reserve_for_run(&o, &run_id, CreditAmountAct::from_whole_act(20), &idem)
-                    .await
-                    .map(|_| run_id)
-            }));
-        }
-
-        let mut winners = Vec::new();
-        let mut losers = 0usize;
-        for h in handles {
-            match h.await.expect("join task") {
-                Ok(run_id) => winners.push(run_id),
-                Err(CompassError::Payment(_)) => losers += 1,
-                Err(other) => panic!("unexpected error variant: {other}"),
-            }
-        }
-
-        assert_eq!(winners.len(), 5, "exactly 5 of 10 20-ACT reservations may succeed");
-        assert_eq!(losers, 5, "remaining 5 reservations must fail with insufficient balance");
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("depleted"),
-            CreditAmountAct::ZERO
-        );
-
-        // Settle 3 winners and refund 2 winners -> exact 40 ACT available!
-        for (i, run_id) in winners.iter().enumerate() {
-            if i < 3 {
-                ledger
-                    .settle_run(&org, run_id, "receipt-sha256")
-                    .await
-                    .expect("settle winner");
-            } else {
-                ledger
-                    .refund_run(&org, run_id, "simulated container failure")
-                    .await
-                    .expect("refund winner");
-            }
-        }
-        assert_eq!(
-            ledger.available_balance(&org).await.expect("conserved"),
-            CreditAmountAct::from_whole_act(40)
-        );
-    }
-
     #[test]
     fn compass_error_formats_user_message_code_and_hint() {
         let missing_run = CompassError::NotFound("run r-123".into());
@@ -463,17 +310,17 @@ mod tests {
         let already_prefixed = CompassError::AccessDenied("Access denied by policy".into());
         assert_eq!(already_prefixed.user_message(), "Access denied by policy");
 
-        let payment = CompassError::Payment("insufficient ACT balance".into());
+        let payment = CompassError::Payment("insufficient EUR balance".into());
         assert_eq!(payment.code(), "PAYMENT_ERROR");
         assert_eq!(
             payment.user_message(),
-            "Credit & billing error: Insufficient ACT balance"
+            "Credit & billing error: Insufficient EUR balance"
         );
         // Hints come from typed codes only, never from message substrings.
         assert_eq!(payment.hint(), None);
         assert_eq!(
-            CompassError::insufficient_funds("need 2.00 credits, available 1.00 credits").hint(),
-            Some("Check your available balance and the organization's daily spending breaker in Settings -> Usage.")
+            CompassError::insufficient_funds("need €2.00, available €1.00").hint(),
+            Some("Check your available EUR balance and daily spending limit in Settings -> Usage.")
         );
 
         let limited = CompassError::RateLimited("burst rpm exceeded".into());
@@ -529,7 +376,7 @@ mod tests {
 
         for code in [
             ErrorCode::InsufficientFunds,
-            ErrorCode::DailyActBreakerExceeded,
+            ErrorCode::DailySpendBreakerExceeded,
             ErrorCode::AgentCeilingExceeded,
             ErrorCode::AgentCredentialRevoked,
             ErrorCode::AgentCredentialExpired,

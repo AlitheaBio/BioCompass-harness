@@ -10,13 +10,13 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
   let willFail = true;
   const sdk = readFileSync(path.resolve("packages/plugin-sdk/dist/index.js"), "utf8");
   const manifest = {id, name:"Color sample", version:pluginVersion, description:"", category:"utility",
-    image:"fixture/paint@sha256:"+"a".repeat(64), network:"none", price_milli_act:5000,
+    image:"fixture/paint@sha256:"+"a".repeat(64), network:"none", price_milli_eur:5000,
     resources:{cpus:1,memory_mb:64,gpu:0,timeout_sec:30,pids_limit:16},inputs:{schema:{}},views:[]};
   const plugin = {manifest, installed:true, views:[], author:"Fixture", has_custom_ui:true,
     ui_entry_url:"/fixture/paint.html", execution_target:"local", execution_label:"Local"};
   const quote = (run: string, price=5000) => ({
     run_id:run,plugin_id:id,plugin_version:pluginVersion,image_ref:manifest.image,target_node_id:"local",
-    offer_id:"default",offer_name:"Render",estimated_cost_act:price,workload_hash:"f".repeat(64),
+    offer_id:"default",offer_name:"Render",estimated_cost_milli_eur:price,workload_hash:"f".repeat(64),
     dataset_grant_summary:"Fixture data grant",froglet_quote:{},expires_at:"2099-01-01T00:00:00Z",
   });
   await page.route("**/api/v1/**",async route=>{
@@ -40,7 +40,7 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
       health:{mode:"local",status:"ok"}, "auth/whoami":{org_id:"fixture",actor:"reader",role:"member"},
       catalogs:{catalogs:[]},grants:{grants:[],grant_usage:[]},plugins:{plugins:[plugin]},
       projects:{projects:[]},runs:{runs:[]},sessions:{sessions:[]},"saved-views":{views:[]},
-      ledger:{available_milli_act:20000,reserved_milli_act:0,transactions:[]},"llm/config":{configured:false,providers:[]},
+      ledger:{available_milli_eur:20000,reserved_milli_eur:0,transactions:[]},"llm/config":{configured:false,providers:[]},
     };
     return Object.hasOwn(fixtures,name)?json(fixtures[name]):json({error:"fixture not found"},404);
   });
@@ -61,7 +61,7 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
   const decline=page.getByTestId("decline-paid-run");
   await request("decline");
   expect(confirms).toEqual([]);
-  await expect(consent).toContainText("5.00 credits");
+  await expect(consent).toContainText("Local run (no charge)");
   await expect(consent).toContainText("decline");
   await expect(decline).toBeFocused();
   await consent.getByText("Run details").click();
@@ -113,7 +113,7 @@ test("paid custom forms wait for consent and confirm only the displayed run", as
   expect(confirms).toHaveLength(3);
   await decline.click();
   await page.getByTestId("review-quote-btn").click();
-  await expect(page.getByTestId("quote-consent-card")).toContainText("5.00 credits");
+  await expect(page.getByTestId("quote-consent-card")).toContainText("Local run (no charge)");
   expect(confirms).toHaveLength(3);
   await page.getByTestId("confirm-quote-run-btn").click();
   await expect.poll(()=>confirms.at(-1)).toEqual({run:"review-run",key:"idem-review-run"});

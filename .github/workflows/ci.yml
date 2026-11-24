@@ -61,6 +61,22 @@ jobs:
           severity: CRITICAL,HIGH
           skip-dirs: target,node_modules,web/node_modules,vendor
 
+  demolition-grep-gate:
+    name: Stage 1 Demolition Grep Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Assert zero references to deleted Stage 1 concepts
+        run: |
+          set -euo pipefail
+          PATTERN='milli_act|PaymentGateway|play_ledger|ResultSharing|ArchiveResult|ConfirmTierChange|private_edge|provider_edge|hospital_edge|query_provider|module_offer_requests|dataset_offer_requests|module_offer_prices|tier_definitions|result_shares|legacy_settlement|CreditAmountAct|SqliteActLedger|estimated_cost_act|base_fee_act|delta_act|balance_after_act|daily_act_breaker|DailyActBreaker|formatMilliAct|formatLocalPlayCredits|isLocalPlayLedger|is_local_play_ledger|federation/peers|federation/offers|federation/launch|federation/register-outbound|/v1/registrations|/api/v1/result-shares'
+          if grep -rnE --exclude-dir=dist --exclude-dir=node_modules --exclude-dir=target "$PATTERN" crates/ bins/ packages/ web/src/ plugins/; then
+            echo "::error::Found forbidden Stage 1 deleted concept reference(s) above!"
+            exit 1
+          fi
+          echo "Stage 1 demolition grep gate passed (0 hits)."
+
   web:
     name: Web SDK & UI (typecheck, unit tests, build)
     runs-on: ubuntu-latest
@@ -104,6 +120,8 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
       - name: Cargo clippy (--all-targets -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cargo test (--workspace)
@@ -114,6 +132,7 @@ jobs:
     needs:
       - gitleaks
       - vuln-scan
+      - demolition-grep-gate
       - web
       - rust
     permissions:
@@ -135,6 +154,7 @@ jobs:
     needs:
       - gitleaks
       - vuln-scan
+      - demolition-grep-gate
       - web
       - rust
     permissions:

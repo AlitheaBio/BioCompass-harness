@@ -1,11 +1,10 @@
 //! Recovery runs under the same process-shared lease as confirmation. The signed
-//! chain is published after the output blobs and before the ledger is posted.
+//! chain is published after the output blobs and before the terminal run record is saved.
 use super::*;
-use biocompass_core_traits::ReservationState;
 
 impl InProcessNodeRuntime {
     /// The engine retains the workspace label until removal. A failed sweep is safe
-    /// to retry on startup and does not hold up ledger recovery or publish outputs.
+    /// to retry on startup and does not hold up recovery or publish outputs.
     pub async fn recover_abandoned_containers(&self) -> CompassResult<()> {
         for container in self.oci_runner.native_job_containers().await? {
             let run_id = container.run_id();
@@ -59,58 +58,39 @@ impl InProcessNodeRuntime {
                 run.run_id
             )));
         }
-        let reservation = self
-            .payment_gateway
-            .run_reservation(&run.org_id, &run.run_id)
-            .await?;
-        let Some(reservation) = reservation else {
-            if run.status == RunStatus::Prepared {
-                return Ok(None);
-            }
-            return Err(CompassError::IntegrityViolation(format!(
-                "run {} in {:?} has no matching organization reservation",
-                run.run_id, run.status
-            )));
-        };
-        if key.is_some_and(|key| key != reservation.idempotency_key) {
+        if run.status == RunStatus::Prepared {
+            return Ok(None);
+        }
+        let recorded_key = run
+            .froglet_chain
+            .get(3)
+            .and_then(|deal| deal.pointer("/payload/client_nonce"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(requested_key) = key
+            && recorded_key.is_some_and(|orig| orig != requested_key)
+        {
             return Err(CompassError::IntegrityViolation(format!(
                 "confirmation key differs from the original approval for {}",
                 run.run_id
             )));
         }
-        if run.quote.estimated_cost_act != reservation.amount {
-            return Err(CompassError::IntegrityViolation(format!(
-                "stored quote and reservation amounts differ for {}",
-                run.run_id
-            )));
-        }
-        match (run.status, reservation.state) {
-            (RunStatus::Succeeded, ReservationState::Settled) => {
-                // Receipt identity is also the ledger's settlement idempotency key.
-                self.payment_gateway
-                    .settle_run(&run.org_id, &run.run_id, verified_receipt_hash(run)?)
-                    .await?;
-                return Ok(Some(run.clone()));
-            }
-            (RunStatus::Failed, ReservationState::Refunded) => return Ok(Some(run.clone())),
-            (RunStatus::Succeeded | RunStatus::Failed, _) => {
+        if matches!(run.status, RunStatus::Succeeded | RunStatus::Failed) {
+            if key.is_some() && recorded_key.is_none() {
                 return Err(CompassError::IntegrityViolation(format!(
-                    "terminal run {} disagrees with its reservation",
+                    "terminal run {} lacks a signed deal confirmation key",
                     run.run_id
                 )));
             }
-            _ => {}
+            return Ok(Some(run.clone()));
         }
-        let outcome =
-            recovered_result::load_signed_outcome(self, run, &reservation.idempotency_key).await?;
+        let outcome = match recorded_key {
+            Some(orig_key) => recovered_result::load_signed_outcome(self, run, orig_key).await?,
+            None => None,
+        };
         let terminal = match outcome {
             Some(signed) => signed,
-            None if reservation.state == ReservationState::Settled => {
-                return Err(CompassError::IntegrityViolation(format!(
-                    "settled run {} is missing its durable signed outcome",
-                    run.run_id
-                )));
-            }
             None => {
                 let mut interrupted = run.clone();
                 interrupted.status = RunStatus::Failed;
@@ -129,8 +109,7 @@ impl InProcessNodeRuntime {
     }
 
     /// The signed chain and outputs are already durable for signed outcomes.
-    /// A storage error leaves the public record pending so recovery can replay
-    /// the same ledger operation. Never change a settlement error into a refund.
+    /// A storage error leaves the public record pending so recovery can replay it.
     pub(super) async fn post_and_finish(&self, run: RunRecord) -> CompassResult<RunRecord> {
         let receipt_hash = run
             .froglet_receipt
@@ -140,9 +119,6 @@ impl InProcessNodeRuntime {
         let summary = match run.status {
             RunStatus::Succeeded => {
                 let hash = verified_receipt_hash(&run)?;
-                self.payment_gateway
-                    .settle_run(&run.org_id, &run.run_id, hash)
-                    .await?;
                 format!(
                     "Plugin '{}' completed with verified Froglet receipt `{}`.",
                     run.plugin_id,
@@ -154,13 +130,7 @@ impl InProcessNodeRuntime {
                     .error_message
                     .as_deref()
                     .unwrap_or("container execution failed");
-                self.payment_gateway
-                    .refund_run(&run.org_id, &run.run_id, reason)
-                    .await?;
-                format!(
-                    "Plugin '{}' failed ({reason}); reserved ACT refunded.",
-                    run.plugin_id
-                )
+                format!("Plugin '{}' failed ({reason}).", run.plugin_id)
             }
             _ => {
                 return Err(CompassError::Internal(

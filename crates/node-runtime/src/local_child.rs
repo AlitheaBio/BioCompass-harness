@@ -1,6 +1,6 @@
 //! Laptop child-run broker (`W7`, `N-1`): a notebook (or any module declaring `child_modules`)
 //! running in the in-process runtime starts child modules that run locally, as the local user,
-//! paid from the local play ledger. Each child gets its own Quote -> Deal -> Receipt chain
+//! with `settlement_method = "none"`. Each child gets its own Quote -> Deal -> Receipt chain
 //! linked to the parent with `bc.parent.v1`; the parent's receipt lists the child with
 //! `bc.child.v1`.
 //!
@@ -30,9 +30,9 @@ pub(crate) struct LocalChildBroker {
     pub(crate) org_id: OrgId,
     pub(crate) session_id: Option<SessionId>,
     pub(crate) parent_run_id: RunId,
-    /// Signed per-parent cap on the summed child quotes (milli play credits).
-    pub(crate) spend_cap_milli: i64,
-    pub(crate) spent_milli: AtomicI64,
+    /// Signed per-parent cap on the summed child quotes (milli-EUR).
+    pub(crate) spend_cap_milli_eur: i64,
+    pub(crate) spent_milli_eur: AtomicI64,
 }
 
 impl LocalChildBroker {
@@ -122,20 +122,20 @@ impl ChildRunBroker for LocalChildBroker {
             Ok(quote) => quote,
             Err(err) => return Ok(ChildRunReply::error(request.request_id, err.code(), err.to_string())),
         };
-        let cost = quote.estimated_cost_act.milli_act();
-        let spent = self.spent_milli.load(Ordering::Acquire);
-        if spent.saturating_add(cost) > self.spend_cap_milli {
+        let cost = quote.estimated_cost_milli_eur.as_milli();
+        let spent = self.spent_milli_eur.load(Ordering::Acquire);
+        if spent.saturating_add(cost) > self.spend_cap_milli_eur {
             return Ok(ChildRunReply::error(
                 request.request_id,
                 "CHILD_SPEND_CAP_EXCEEDED",
                 format!(
-                    "child would bring this run's child spend to {} milli, above its signed cap of {}",
+                    "child would bring this run's child spend to {} milli-EUR, above its signed cap of {}",
                     spent.saturating_add(cost),
-                    self.spend_cap_milli
+                    self.spend_cap_milli_eur
                 ),
             ));
         }
-        self.spent_milli.fetch_add(cost, Ordering::AcqRel);
+        self.spent_milli_eur.fetch_add(cost, Ordering::AcqRel);
 
         let wait_secs = request
             .timeout_sec
@@ -176,7 +176,7 @@ impl ChildRunBroker for LocalChildBroker {
         };
         if finished.status != RunStatus::Succeeded {
             // Failed children settle at most their base fee; release the unused cap share.
-            self.spent_milli.fetch_sub(cost, Ordering::AcqRel);
+            self.spent_milli_eur.fetch_sub(cost, Ordering::AcqRel);
         }
 
         let total: u64 = finished.artifacts.iter().map(|a| a.size_bytes).sum();

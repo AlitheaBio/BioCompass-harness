@@ -11,7 +11,7 @@
 //!    equivalence (`read_parquet(..., file_row_number = true)` anti-joined with `pos` == `AT (VERSION => sid)`),
 //!    preserving sealed snapshot immutability even after DuckLake consolidates later delete files.
 //! 6. Selective snapshot expiry (`ducklake_expire_snapshots`) & file cleanup while sealed/archived files remain intact.
-//! 7. Read-only (`READ_ONLY`) local DuckLake attach for `hospital-edge` nodes.
+//! 7. Read-only (`READ_ONLY`) local DuckLake attach.
 //! 8. Postgres `pg_stat_activity` connection footprint (`+1` connection per attached cloud catalog, `+0` after `DETACH`).
 
 use duckdb::{Config, Connection};

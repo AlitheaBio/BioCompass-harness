@@ -6,12 +6,13 @@ import { ModuleRunsTab } from "./ModuleTabs";
 interface Props {
   runId: string;
   verifyReport: RunVerification | null;
+  isLocalMode?: boolean;
   onClose: () => void;
   onUpdate: (run: RunRecord) => void;
   onReverify: (run: RunRecord, tamper: boolean) => void;
 }
 
-export function SavedRunDialog({ runId, verifyReport, onClose, onUpdate, onReverify }: Props) {
+export function SavedRunDialog({ runId, verifyReport, isLocalMode = false, onClose, onUpdate, onReverify }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [run, setRun] = useState<RunRecord>();
   const [error, setError] = useState("");
@@ -37,7 +38,7 @@ export function SavedRunDialog({ runId, verifyReport, onClose, onUpdate, onRever
       {error ? <p role="alert">{error}</p> : run ? (
         <>
           <p>{run.plugin_id} v{run.plugin_version}</p>
-          <ModuleRunsTab runs={[run]} isFocused isConfirmingRun={false} liveLogs={[]}
+          <ModuleRunsTab runs={[run]} isFocused isConfirmingRun={false} isLocalMode={isLocalMode} liveLogs={[]}
             verifyReport={verifyReport} onReverifyChain={onReverify}
             onUpdateRun={(updated) => { setRun(updated); onUpdate(updated); }} />
         </>

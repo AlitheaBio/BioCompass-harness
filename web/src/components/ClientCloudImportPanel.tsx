@@ -1,42 +1,23 @@
 import React, { useState } from "react";
 import {
   formatErrorInline,
-  importFederatedCatalog,
-  importFederatedModule,
-  registerClientCloudOutbound,
   updateCatalogDataPlacement,
 } from "../api";
 import type {
   CatalogDataPlacement,
   CatalogManifest,
-  FederatedModuleOffer,
 } from "../types";
 
 /**
- * Milestone C1 (U4) — Client Cloud Outbound Registration with Alithea,
- * Download-Offer Module Import (with OCI digest & UI-hash verification),
- * and Catalog Data Placement (`stays_with_alithea` vs `licensable_copy`) + Licensed-Copy Import.
+ * Catalog Data Placement (`stays_with_alithea` vs `licensable_copy`).
  */
 export function ClientCloudImportPanel({
   catalogs = [],
-  federatedOffers = [],
   onImported,
 }: {
   catalogs?: CatalogManifest[];
-  federatedOffers?: FederatedModuleOffer[];
   onImported?: () => Promise<void> | void;
 }) {
-  const [hubUrl, setHubUrl] = useState("");
-  const [orgName, setOrgName] = useState("");
-  const [importOfferId, setImportOfferId] = useState("");
-  const [importPluginId, setImportPluginId] = useState("");
-  const [importVersion, setImportVersion] = useState("");
-  const [importHubUrl, setImportHubUrl] = useState("");
-
-  const [catPeerId, setCatPeerId] = useState("");
-  const [catId, setCatId] = useState("");
-  const [catHubUrl, setCatHubUrl] = useState("");
-
   const [placementCatalogId, setPlacementCatalogId] = useState(catalogs[0]?.id ?? "");
   const [placementMode, setPlacementMode] = useState<CatalogDataPlacement>("stays_with_alithea");
 
@@ -59,13 +40,6 @@ export function ClientCloudImportPanel({
     }
   };
 
-  const downloadOffers = federatedOffers.filter(
-    (f) => (f.offer_kind ?? f.offer.action) === "download",
-  );
-  const datasetOffers = federatedOffers.filter(
-    (f) => (f.offer_kind ?? f.offer.action) === "dataset",
-  );
-
   return (
     <div className="bc-settings-stack" data-testid="client-cloud-import-panel">
       {error && (
@@ -79,202 +53,21 @@ export function ClientCloudImportPanel({
         </div>
       )}
 
-      {/* 1. Outbound Registration with Alithea Hub */}
       <section className="bc-card">
         <div className="bc-card-header">
           <div>
-            <span className="bc-card-title">Outbound Hub Registration (U4)</span>
+            <span className="bc-card-title">Catalog Data Placement</span>
             <p className="bc-caption" style={{ marginTop: 2, marginBottom: 0 }}>
-              Register this Client Cloud outbound against Alithea&apos;s hub (<code>POST /v1/registrations</code>, admin-approved).
-            </p>
-          </div>
-        </div>
-        <form
-          className="bc-form-grid"
-          style={{ marginTop: 10 }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            void runAction(async () => {
-              const res = await registerClientCloudOutbound({
-                ...(hubUrl.trim() ? { target_hub_url: hubUrl.trim() } : {}),
-                ...(orgName.trim() ? { org_name: orgName.trim() } : {}),
-              });
-              return `Outbound registration ${res.registered ? "submitted" : "pending"} for peer ${res.local_peer_id} -> ${res.target_hub_url}.`;
-            });
-          }}
-        >
-          <label className="bc-field">
-            <span className="bc-field-label">Upstream Hub URL (optional, defaults to chart defaultHubUrl)</span>
-            <input
-              type="url"
-              className="bc-input mono"
-              data-testid="u4-register-hub-url"
-              placeholder="https://hub.biocompass.alithea.bio"
-              value={hubUrl}
-              onChange={(e) => setHubUrl(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Organization Display Name</span>
-            <input
-              className="bc-input"
-              placeholder="Acme Pharma R&D Cloud"
-              value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
-            />
-          </label>
-          <div>
-            <button
-              type="submit"
-              className="bc-btn bc-btn-primary"
-              data-testid="u4-register-outbound-btn"
-              disabled={busy}
-            >
-              {busy ? "Registering…" : "Register with Upstream Hub"}
-            </button>
-          </div>
-        </form>
-      </section>
-
-      {/* 2. Import Download-Offer Module */}
-      <section className="bc-card">
-        <div className="bc-card-header">
-          <div>
-            <span className="bc-card-title">Import Download-Offer Module</span>
-            <p className="bc-caption" style={{ marginTop: 2, marginBottom: 0 }}>
-              Imports a federated download-offer module into this Client Cloud&apos;s registry with OCI digest and UI-bundle SHA-256 verification.
+              Mark catalogs as <code>stays_with_alithea</code> or <code>licensable_copy</code>.
             </p>
           </div>
         </div>
 
-        {downloadOffers.length > 0 && (
-          <div className="table-scroll" style={{ marginTop: 10 }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Offer</th>
-                  <th>Module</th>
-                  <th>Provider</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {downloadOffers.map((item) => (
-                  <tr key={`${item.provider}:${item.offer.offer_id}`}>
-                    <td>{item.offer.title}</td>
-                    <td className="mono">
-                      {item.offer.plugin_id}@{item.offer.version}
-                    </td>
-                    <td>{item.provider}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="bc-btn bc-btn-primary bc-btn-sm"
-                        disabled={busy || !item.offer.plugin_id || !item.offer.version}
-                        onClick={() =>
-                          void runAction(async () => {
-                            const res = await importFederatedModule({
-                              peer_id: item.peer_id,
-                              marketplace_offer_id: item.offer.offer_id,
-                              plugin_id: item.offer.plugin_id!,
-                              version: item.offer.version!,
-                            });
-                            return `Imported ${res.plugin_id}@${res.version} (${res.visibility}, digest ${res.image_digest.slice(0, 19)}…).`;
-                          })
-                        }
-                      >
-                        Import into Cloud
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <form
-          className="bc-form-grid"
-          style={{ marginTop: 10 }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!importPluginId.trim() || !importVersion.trim()) return;
-            void runAction(async () => {
-              const res = await importFederatedModule({
-                ...(importHubUrl.trim() ? { source_hub_url: importHubUrl.trim() } : {}),
-                ...(importOfferId.trim() ? { marketplace_offer_id: importOfferId.trim() } : {}),
-                plugin_id: importPluginId.trim(),
-                version: importVersion.trim(),
-              });
-              return `Imported module ${res.plugin_id}@${res.version} (${res.visibility}, digest ${res.image_digest.slice(0, 19)}…).`;
-            });
-          }}
-        >
-          <label className="bc-field">
-            <span className="bc-field-label">Marketplace Offer ID (optional)</span>
-            <input
-              className="bc-input mono"
-              data-testid="u4-import-offer-id"
-              placeholder="mo-..."
-              value={importOfferId}
-              onChange={(e) => setImportOfferId(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Module ID</span>
-            <input
-              className="bc-input mono"
-              placeholder="alithea/hla-motif-enrichment"
-              required
-              value={importPluginId}
-              onChange={(e) => setImportPluginId(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Version</span>
-            <input
-              className="bc-input mono"
-              placeholder="2.0.0"
-              required
-              value={importVersion}
-              onChange={(e) => setImportVersion(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Source Hub URL (optional)</span>
-            <input
-              type="url"
-              className="bc-input mono"
-              placeholder="https://hub.biocompass.alithea.bio"
-              value={importHubUrl}
-              onChange={(e) => setImportHubUrl(e.target.value)}
-            />
-          </label>
-          <div>
-            <button
-              type="submit"
-              className="bc-btn bc-btn-secondary"
-              data-testid="u4-import-module-btn"
-              disabled={busy || !importPluginId.trim() || !importVersion.trim()}
-            >
-              Import Module
-            </button>
-          </div>
-        </form>
-      </section>
-
-      {/* 3. Catalog Data Placement & Licensed-Copy Catalog Import */}
-      <section className="bc-card">
-        <div className="bc-card-header">
-          <div>
-            <span className="bc-card-title">Catalog Data Placement &amp; Licensed Copies</span>
-            <p className="bc-caption" style={{ marginTop: 2, marginBottom: 0 }}>
-              Mark catalogs as <code>stays_with_alithea</code> or <code>licensable_copy</code>, or import an approved licensed catalog copy.
-            </p>
-          </div>
-        </div>
-
-        {catalogs.length > 0 && (
+        {catalogs.length === 0 ? (
+          <p className="bc-empty-note" style={{ marginTop: 10 }}>
+            No organization catalogs available.
+          </p>
+        ) : (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "end", marginTop: 10 }}>
             <label className="bc-field" style={{ flex: 1, minWidth: 200 }}>
               <span className="bc-field-label">Catalog</span>
@@ -319,105 +112,6 @@ export function ClientCloudImportPanel({
             </button>
           </div>
         )}
-
-        {datasetOffers.length > 0 && (
-          <div className="table-scroll" style={{ marginTop: 12 }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Dataset Offer</th>
-                  <th>Catalog</th>
-                  <th>Provider</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {datasetOffers.map((item) => (
-                  <tr key={`${item.provider}:${item.offer.offer_id}`}>
-                    <td>{item.offer.title}</td>
-                    <td className="mono">{item.offer.catalog_id ?? item.offer.offer_id}</td>
-                    <td>{item.provider}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="bc-btn bc-btn-secondary bc-btn-sm"
-                        disabled={busy || !item.offer.catalog_id}
-                        onClick={() =>
-                          void runAction(async () => {
-                            const res = await importFederatedCatalog({
-                              peer_id: item.peer_id,
-                              catalog_id: item.offer.catalog_id!,
-                            });
-                            return `Imported licensed catalog copy ${res.catalog.id} (${res.shard_count} shard${res.shard_count === 1 ? "" : "s"}).`;
-                          })
-                        }
-                      >
-                        Import Licensed Copy
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <form
-          className="bc-form-grid"
-          style={{ marginTop: 12 }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!catId.trim()) return;
-            void runAction(async () => {
-              const res = await importFederatedCatalog({
-                ...(catPeerId.trim() ? { peer_id: catPeerId.trim() } : {}),
-                ...(catHubUrl.trim() ? { source_hub_url: catHubUrl.trim() } : {}),
-                catalog_id: catId.trim(),
-              });
-              return `Imported licensed catalog copy ${res.catalog.id} (${res.shard_count} shard${res.shard_count === 1 ? "" : "s"}).`;
-            });
-          }}
-        >
-          <label className="bc-field">
-            <span className="bc-field-label">Catalog ID</span>
-            <input
-              className="bc-input mono"
-              placeholder="alithea/hla-atlas-v2026.1"
-              required
-              value={catId}
-              onChange={(e) => setCatId(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Federation Peer ID (optional)</span>
-            <input
-              className="bc-input mono"
-              placeholder="peer-alithea"
-              value={catPeerId}
-              onChange={(e) => setCatPeerId(e.target.value)}
-            />
-          </label>
-          <label className="bc-field">
-            <span className="bc-field-label">Source Hub URL (optional)</span>
-            <input
-              type="url"
-              className="bc-input mono"
-              placeholder="https://hub.biocompass.alithea.bio"
-              value={catHubUrl}
-              onChange={(e) => setCatHubUrl(e.target.value)}
-            />
-          </label>
-          <div>
-            <button
-              type="submit"
-              className="bc-btn bc-btn-secondary"
-              data-testid="u4-import-catalog-btn"
-              disabled={busy || !catId.trim()}
-            >
-              Import Licensed Catalog Copy
-            </button>
-          </div>
-        </form>
       </section>
     </div>
   );

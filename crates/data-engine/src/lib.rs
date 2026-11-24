@@ -354,7 +354,7 @@ impl DuckLakeCatalogEngine {
         Self::open_internal(catalog_dir.as_ref(), false)
     }
 
-    /// Open a local DuckLake catalog in strict `READ_ONLY` mode for `hospital-edge` nodes (§5.1 / §5.4).
+    /// Open a local DuckLake catalog in strict `READ_ONLY` mode (§5.1 / §5.4).
     pub fn open_hospital_readonly(catalog_dir: impl AsRef<Path>) -> CompassResult<Self> {
         let dir = catalog_dir.as_ref();
         let meta_path = dir.join("meta.ducklake");
@@ -671,7 +671,7 @@ impl DuckLakeCatalogEngine {
     ) -> CompassResult<SealedSnapshot> {
         if self.read_only {
             return Err(CompassError::AccessDenied(
-                "cannot mutate a read-only (hospital-edge or cached) DuckLake catalog".into(),
+                "cannot mutate a read-only or cached DuckLake catalog".into(),
             ));
         }
         let conn = open_local_ducklake_rw(&self.catalog_dir, "dl")?;

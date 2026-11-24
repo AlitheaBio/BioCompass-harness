@@ -19,11 +19,8 @@ import {
 } from "./ModuleTabs";
 import { SandboxedPluginFrame } from "./SandboxedPluginFrame";
 import { resolveModuleCardActions } from "../moduleListPolicy";
-import { negotiatedPriceForRelease } from "../types";
 import type {
   DatasetGrant,
-  ModuleOffer,
-  NegotiatedModuleOfferPrice,
   RunVerification,
   PluginSummary,
   RunQuote,
@@ -62,8 +59,7 @@ export function FloatingWindowsLayer({
   pendingQuote,
   pendingQuoteParams = null,
   isConfirmingRun,
-  isLocalPlayLedger = false,
-  moduleOffers = [],
+  isLocalMode = false,
   liveLogs,
   verifyReport,
   onFocusWindow,
@@ -95,9 +91,7 @@ export function FloatingWindowsLayer({
   pendingQuote: RunQuote | null;
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
-  isLocalPlayLedger?: boolean;
-  /** Org module offers (cloud): negotiated prices for "Run Cost". */
-  moduleOffers?: ModuleOffer[];
+  isLocalMode?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocusWindow: (winId: string) => void;
@@ -211,8 +205,7 @@ export function FloatingWindowsLayer({
             pendingQuote={hasPendingQuote ? pendingQuote : null}
             pendingQuoteParams={hasPendingQuote ? pendingQuoteParams : null}
             isConfirmingRun={isConfirmingRun && hasPendingQuote}
-            isLocalPlayLedger={isLocalPlayLedger}
-            negotiatedPrice={negotiatedPriceForRelease(moduleOffers, plugin.manifest.id, plugin.manifest.version)}
+            isLocalMode={isLocalMode}
             liveLogs={liveLogs}
             verifyReport={isFocused ? verifyReport : null}
             onFocus={() => onFocusWindow(win.id)}
@@ -318,8 +311,7 @@ export function ModuleFloatingWindow({
   pendingQuote,
   pendingQuoteParams = null,
   isConfirmingRun,
-  isLocalPlayLedger = false,
-  negotiatedPrice = null,
+  isLocalMode = false,
   liveLogs,
   verifyReport,
   onFocus,
@@ -353,8 +345,7 @@ export function ModuleFloatingWindow({
   pendingQuote: RunQuote | null;
   pendingQuoteParams?: Record<string, unknown> | null;
   isConfirmingRun: boolean;
-  isLocalPlayLedger?: boolean;
-  negotiatedPrice?: NegotiatedModuleOfferPrice | null;
+  isLocalMode?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onFocus: () => void;
@@ -632,7 +623,7 @@ export function ModuleFloatingWindow({
       <div className="bc-window-body">
         {/* Keep custom UI iframe mounted so postMessage run updates stay seamless */}
         {plugin.has_custom_ui && (() => {
-          const actions = resolveModuleCardActions(plugin, isLocalPlayLedger);
+          const actions = resolveModuleCardActions(plugin, isLocalMode);
           return (
           <div
             className="bc-window-iframe-pane"
@@ -712,7 +703,7 @@ export function ModuleFloatingWindow({
             sessionId={sessionId}
             isFocused={isFocused}
             isConfirmingRun={isConfirmingRun}
-            isLocalPlayLedger={isLocalPlayLedger}
+            isLocalMode={isLocalMode}
             onSyncDraftParams={onSyncDraftParams}
             onRunApiTest={onRunApiTest}
             onQuoteConfirmed={onQuoteConfirmed}
@@ -727,7 +718,7 @@ export function ModuleFloatingWindow({
             requestedRunId={win.requestedRunId}
             isFocused={isFocused}
             isConfirmingRun={isConfirmingRun}
-            isLocalPlayLedger={isLocalPlayLedger}
+            isLocalMode={isLocalMode}
             liveLogs={liveLogs}
             verifyReport={verifyReport}
             onClearRequestedRunId={() => onChangeTab("results")}
@@ -740,8 +731,7 @@ export function ModuleFloatingWindow({
           <ModuleAboutTab
             plugin={plugin}
             isFocused={isFocused}
-            isLocalPlayLedger={isLocalPlayLedger}
-            negotiatedPrice={negotiatedPrice}
+            isLocalMode={isLocalMode}
           />
         )}
       </div>

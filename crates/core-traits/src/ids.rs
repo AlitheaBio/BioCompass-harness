@@ -89,28 +89,128 @@ mod private_catalog_tests {
     }
 }
 
-/// Integer minor units of compute value (`1 EUR = 1 ACT = 1_000 milli-units`; `10 milli-units = €0.01`).
+/// Integer minor units of compute value in euros (`1 EUR = 1_000 milli-EUR`; `10 milli-EUR = €0.01`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct CreditAmountAct(pub i64);
+pub struct MilliEur(pub i64);
 
-impl CreditAmountAct {
+impl MilliEur {
     /// Zero balance.
     pub const ZERO: Self = Self(0);
 
-    /// Construct from whole EUR / ACT units (`1 unit = 1_000 milli-units`).
-    pub const fn from_whole_act(whole: i64) -> Self {
-        Self(whole * 1_000)
+    /// Number of milli-EUR per whole euro.
+    pub const PER_EUR: i64 = 1_000;
+
+    /// Construct from whole EUR (`1 EUR = 1_000 milli-EUR`).
+    pub const fn from_eur(whole_eur: i64) -> Self {
+        Self(whole_eur * Self::PER_EUR)
     }
 
-    /// Construct from milli-EUR / milli-ACT minor units.
-    pub const fn from_milli_act(milli: i64) -> Self {
+    /// Construct from euro cents (`1 cent = 10 milli-EUR`).
+    pub const fn from_cents(cents: i64) -> Self {
+        Self(cents * 10)
+    }
+
+    /// Construct from raw milli-EUR minor units.
+    pub const fn from_milli(milli: i64) -> Self {
         Self(milli)
     }
 
-    /// Return raw milli-EUR / milli-ACT minor units.
-    pub const fn milli_act(self) -> i64 {
+    /// Return raw milli-EUR minor units as `i64`.
+    pub const fn as_milli(self) -> i64 {
         self.0
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn is_positive(self) -> bool {
+        self.0 > 0
+    }
+
+    pub const fn is_negative(self) -> bool {
+        self.0 < 0
+    }
+
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        match self.0.checked_add(rhs.0) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
+        match self.0.checked_sub(rhs.0) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
+    pub const fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+
+    pub const fn checked_neg(self) -> Option<Self> {
+        match self.0.checked_neg() {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    pub const fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
+
+    /// Parse a non-negative decimal EUR amount string (`"12.34"`, `"75"`, `"1.5"`, `"99.999"`)
+    /// into [`MilliEur`]. Rejects signs, empty input, non-ASCII digits, >3 fractional digits, and overflow.
+    pub fn parse_eur_decimal(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('+')
+            || trimmed.starts_with('-')
+            || trimmed.chars().any(|c| !c.is_ascii_digit() && c != '.')
+        {
+            return Err(format!("invalid EUR amount value '{raw}'"));
+        }
+        let (whole_str, frac_str) = match trimmed.split_once('.') {
+            Some((w, f)) => {
+                if f.contains('.') || w.is_empty() || f.is_empty() || f.len() > 3 {
+                    return Err(format!(
+                        "invalid EUR decimal precision in '{raw}' (expected 1..=3 fractional digits)"
+                    ));
+                }
+                (w, f)
+            }
+            None => (trimmed, ""),
+        };
+        let whole: i64 = whole_str
+            .parse()
+            .map_err(|_| format!("EUR whole amount out of range in '{raw}'"))?;
+        let frac: i64 = match frac_str.len() {
+            0 => 0,
+            1 => frac_str
+                .parse::<i64>()
+                .map_err(|_| format!("invalid EUR fraction in '{raw}'"))?
+                * 100,
+            2 => frac_str
+                .parse::<i64>()
+                .map_err(|_| format!("invalid EUR fraction in '{raw}'"))?
+                * 10,
+            3 => frac_str
+                .parse::<i64>()
+                .map_err(|_| format!("invalid EUR fraction in '{raw}'"))?,
+            _ => unreachable!(),
+        };
+        let milli = whole
+            .checked_mul(Self::PER_EUR)
+            .and_then(|w| w.checked_add(frac))
+            .ok_or_else(|| format!("EUR amount overflow in '{raw}'"))?;
+        Ok(Self(milli))
     }
 
     fn rounded_cents(self) -> (&'static str, u64, u64) {
@@ -126,52 +226,111 @@ impl CreditAmountAct {
         (sign, whole, cents)
     }
 
-    /// Format as euros to the cent (e.g., `€1.00`, `€0.05`, `€12.34`).
+    /// Format as euros to the cent (e.g., `€0.00`, `€0.05`, `€12.34`, `-€0.05`).
     pub fn display_eur(self) -> String {
         let (sign, whole, cents) = self.rounded_cents();
         format!("{sign}€{whole}.{cents:02}")
     }
+}
 
-    /// Format as human-readable euro amount to the cent (`1 ACT = 1 EUR`, e.g., `€12.50`).
-    ///
-    /// For the laptop's local play ledger, use [`Self::display_local_credits`] so local play
-    /// credits are never labelled as euros.
-    pub fn display_act(self) -> String {
-        self.display_eur()
+impl fmt::Display for MilliEur {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.display_eur())
     }
+}
 
-    /// Format for the local workstation play ledger (never labelled `€` or `EUR`).
-    pub fn display_local_credits(self) -> String {
-        let (sign, whole, cents) = self.rounded_cents();
-        format!("{sign}{whole}.{cents:02} credits")
+impl From<i64> for MilliEur {
+    fn from(milli: i64) -> Self {
+        Self(milli)
+    }
+}
+
+impl From<MilliEur> for i64 {
+    fn from(amount: MilliEur) -> Self {
+        amount.0
+    }
+}
+
+impl std::ops::Add for MilliEur {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for MilliEur {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl std::ops::Neg for MilliEur {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self(-self.0)
+    }
+}
+
+impl std::ops::AddAssign for MilliEur {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl std::ops::SubAssign for MilliEur {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
+    }
+}
+
+impl std::iter::Sum for MilliEur {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, |acc, item| acc + item)
     }
 }
 
 #[cfg(test)]
-mod credit_display_tests {
-    use super::CreditAmountAct;
+mod milli_eur_tests {
+    use super::MilliEur;
 
     #[test]
-    fn display_act_formats_euros_to_the_cent() {
-        assert_eq!(CreditAmountAct::ZERO.display_act(), "€0.00");
-        assert_eq!(CreditAmountAct::from_milli_act(50).display_act(), "€0.05");
-        assert_eq!(CreditAmountAct::from_milli_act(1_000).display_act(), "€1.00");
-        assert_eq!(CreditAmountAct::from_milli_act(12_340).display_act(), "€12.34");
-        assert_eq!(CreditAmountAct::from_milli_act(12_345).display_act(), "€12.35");
-        assert_eq!(CreditAmountAct::from_milli_act(-50).display_act(), "-€0.05");
-        assert_eq!(CreditAmountAct::from_milli_act(-4).display_act(), "€0.00");
-        assert_eq!(CreditAmountAct::from_whole_act(250).display_eur(), "€250.00");
+    fn display_eur_formats_euros_to_the_cent() {
+        assert_eq!(MilliEur::ZERO.display_eur(), "€0.00");
+        assert_eq!(MilliEur::from_milli(50).display_eur(), "€0.05");
+        assert_eq!(MilliEur::from_milli(1_000).display_eur(), "€1.00");
+        assert_eq!(MilliEur::from_milli(12_340).display_eur(), "€12.34");
+        assert_eq!(MilliEur::from_milli(12_345).display_eur(), "€12.35");
+        assert_eq!(MilliEur::from_milli(-50).display_eur(), "-€0.05");
+        assert_eq!(MilliEur::from_milli(-4).display_eur(), "€0.00");
+        assert_eq!(MilliEur::from_eur(250).display_eur(), "€250.00");
+        assert_eq!(MilliEur::from_cents(1234).to_string(), "€12.34");
     }
 
     #[test]
-    fn local_play_ledger_credits_are_never_labelled_euros() {
-        for milli in [0, 50, 1_000, 12_340, 250_000, -5_000] {
-            let formatted = CreditAmountAct::from_milli_act(milli).display_local_credits();
-            assert!(!formatted.contains('€'), "unexpected euro symbol in {formatted}");
-            assert!(!formatted.to_ascii_uppercase().contains("EUR"), "unexpected EUR label in {formatted}");
-            assert!(formatted.ends_with(" credits"), "expected credits suffix in {formatted}");
+    fn milli_eur_arithmetic_serde_and_parse_decimal() {
+        let a = MilliEur::from_eur(10);
+        let b = MilliEur::from_cents(250);
+        assert_eq!(a + b, MilliEur::from_milli(12_500));
+        assert_eq!(a - b, MilliEur::from_milli(7_500));
+        assert_eq!(-b, MilliEur::from_milli(-2_500));
+        assert_eq!((-b).abs(), b);
+        assert_eq!(
+            [a, b].into_iter().sum::<MilliEur>(),
+            MilliEur::from_milli(12_500)
+        );
+        assert_eq!(serde_json::to_string(&a).unwrap(), "10000");
+        assert_eq!(serde_json::from_str::<MilliEur>("10000").unwrap(), a);
+
+        assert_eq!(MilliEur::parse_eur_decimal("12.34").unwrap(), MilliEur::from_milli(12_340));
+        assert_eq!(MilliEur::parse_eur_decimal("99.999").unwrap(), MilliEur::from_milli(99_999));
+        assert_eq!(MilliEur::parse_eur_decimal("75").unwrap(), MilliEur::from_eur(75));
+        assert_eq!(MilliEur::parse_eur_decimal("1.5").unwrap(), MilliEur::from_milli(1_500));
+        for bad in ["", "-1.00", "+1.00", "1.2345", ".5", "5.", "1.2.3", "abc"] {
+            assert!(MilliEur::parse_eur_decimal(bad).is_err(), "expected error for '{bad}'");
         }
-        assert_eq!(CreditAmountAct::from_milli_act(5_000).display_local_credits(), "5.00 credits");
-        assert_eq!(CreditAmountAct::from_milli_act(50).display_local_credits(), "0.05 credits");
     }
 }

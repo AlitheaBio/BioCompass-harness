@@ -23,17 +23,13 @@ import type {
   DatasetHostingMode,
   DatasetOfferRecord,
   DatasetOfferScope,
-  DatasetOfferRequest,
   DatasetOfferSubscription,
   EnumerationMonitorEntry,
-  FederationPeerRecord,
   FilterExpr,
   FrogletVerifyReport,
   GrantAccessLevel,
   GrantUsageSummary,
   HealthStatus,
-  ImportedFederatedCatalogResult,
-  ImportedFederatedModuleResult,
   IngestFormat,
   IngestMode,
   HostedHlaPublication,
@@ -47,15 +43,11 @@ import type {
   ModuleDocumentVersionRecord,
   ModuleDownload,
   ModuleOffer,
-  FederatedModuleOffer,
-  ModuleOfferRequest,
-  NegotiatedModuleOfferPrice,
   NodeMode,
   NodeSummaryRecord,
   OrgInvitationRecord,
   OrgMemberRecord,
   OrgRole,
-  OutboundRegistrationResult,
   PeptideRecord,
   PluginSummary,
   PluginVersionRecord,
@@ -77,11 +69,8 @@ import type {
   SessionRecord,
   SubscribedNetworkOffer,
   TestLlmConnectionResponse,
-  ResultShare,
-  TierDefinitionRecord,
   TotpEnrollment,
   UpdateLlmConfigRequest,
-  UpdateTierInput,
   WebhookDeliveryRecord,
   WebhookEndpointRecord,
   WorkspaceHubMode,
@@ -629,28 +618,6 @@ export async function downloadInstalledWorkspaceResult(id: string, bearer: strin
   return response.blob();
 }
 
-export interface WorkspaceArchive {
-  run_id: string;
-  sha256: string;
-  receipt_hash: string;
-  archived_at: string;
-  download_url?: string;
-  sign_in_url?: string;
-}
-
-export async function fetchWorkspaceArchiveTargets(): Promise<{ id: string; label: string }[]> {
-  return (await apiFetch<{targets: {id: string; label: string}[]}>(
-    "/api/v1/workspace/archive-targets", workspaceSession(),
-  )).targets;
-}
-
-export function archiveWorkspaceResult(id: string, bearer?: string, providerId?: string): Promise<WorkspaceArchive> {
-  return apiFetch(`/api/v1/workspace/archives/${encodeURIComponent(id)}`, {
-    ...workspaceSession(bearer), method: "POST",
-    ...(providerId && { body: JSON.stringify({ provider_id: providerId }) }),
-  });
-}
-
 export async function installModuleDownload(release: ModuleDownload, bearer?: string): Promise<PluginSummary> {
   const parts = release.plugin_id.split("/");
   if (parts.length !== 2 || parts.some((part) => !part)) throw new Error("Invalid module ID.");
@@ -1068,7 +1035,7 @@ export function newExecutionId(): string {
   return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
 }
 
-export type ExecutionBudget = { mode: "finite"; limit_milli_act: number } | { mode: "unlimited" };
+export type ExecutionBudget = { mode: "finite"; limit_milli_eur: number } | { mode: "unlimited" };
 
 export interface AgentSseEnvelope {
   type:
@@ -1614,7 +1581,7 @@ export async function publishDatasetOffer(payload: {
   row_scope?: FilterExpr | null;
   daily_row_budget?: number | null;
   max_rows_per_query: number;
-  price_milli_act: number;
+  price_milli_eur: number;
 }): Promise<DatasetOfferRecord> {
   return apiFetch<DatasetOfferRecord>("/api/v1/dataset-offers", {
     method: "POST",
@@ -1650,64 +1617,19 @@ export async function subscribeDatasetOffer(
   );
 }
 
-export async function fetchDatasetOfferRequests(): Promise<DatasetOfferRequest[]> {
-  return (await apiFetch<{requests: DatasetOfferRequest[]}>("/api/v1/dataset-offers/requests")).requests;
-}
-
-export function approveDatasetOffer(offerId: string, subscriberOrgId: string) {
-  return apiFetch<DatasetOfferSubscription>(`/api/v1/dataset-offers/${encodeURIComponent(offerId)}/approve`, {
-    method: "POST", body: JSON.stringify({subscriber_org_id: subscriberOrgId}),
-  });
-}
-
 export async function fetchModuleOffers(): Promise<ModuleOffer[]> {
   const data = await apiFetch<{ offers: ModuleOffer[] }>("/api/v1/module-offers");
   return data.offers;
-}
-
-export function fetchFederatedModuleOffers() {
-  return apiFetch<{ offers: FederatedModuleOffer[]; unavailable: string[] }>("/api/v1/auth/federation/offers");
-}
-
-export async function fetchModuleOfferRequests(): Promise<ModuleOfferRequest[]> {
-  const data = await apiFetch<{ requests: ModuleOfferRequest[] }>("/api/v1/module-offers/requests");
-  return data.requests;
 }
 
 export function publishModuleOffer(payload: Pick<ModuleOffer,
   "plugin_id" | "version" | "action" | "title" | "scope" | "approval_required"
 > & {
   allowed_orgs: string[];
-  manifest_offer_id?: string;
-  price_milli_act?: number;
-  base_fee_milli_act?: number;
 }) {
   return apiFetch<{ offer_id: string }>("/api/v1/module-offers", {
     method: "POST", body: JSON.stringify(payload),
   });
-}
-
-export async function fetchModuleOfferPrice(
-  offerId: string,
-): Promise<NegotiatedModuleOfferPrice | null> {
-  const data = await apiFetch<{ offer_id: string; price: NegotiatedModuleOfferPrice | null }>(
-    `${moduleOfferPath(offerId)}/price`,
-  );
-  return data.price ?? null;
-}
-
-export async function updateModuleOfferPrice(
-  offerId: string,
-  payload: { manifest_offer_id?: string; price_milli_act: number; base_fee_milli_act: number },
-): Promise<NegotiatedModuleOfferPrice> {
-  const data = await apiFetch<{ price: NegotiatedModuleOfferPrice }>(
-    `${moduleOfferPath(offerId)}/price`,
-    {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    },
-  );
-  return data.price;
 }
 
 function moduleOfferPath(id: string): string {
@@ -1716,12 +1638,6 @@ function moduleOfferPath(id: string): string {
 
 export function subscribeModuleOffer(id: string) {
   return apiFetch(`${moduleOfferPath(id)}/subscribe`, { method: "POST" });
-}
-
-export function approveModuleOffer(id: string, subscriberOrgId: string) {
-  return apiFetch(`${moduleOfferPath(id)}/approve`, {
-    method: "POST", body: JSON.stringify({ subscriber_org_id: subscriberOrgId }),
-  });
 }
 
 export async function fetchOfferedRunModule(offer: ModuleOffer): Promise<PluginSummary> {
@@ -1783,85 +1699,6 @@ export async function reviewAdminPluginVisibility(
   return data.plugin_version;
 }
 
-export function createResultShare(runId: string, artifactName: string, recipientOrgId: string) {
-  return apiFetch<ResultShare>("/api/v1/result-shares", {
-    method: "POST",
-    body: JSON.stringify({ run_id: runId, artifact_name: artifactName, recipient_org_id: recipientOrgId }),
-  });
-}
-
-export async function fetchResultShares() {
-  return apiFetch<{ shares: ResultShare[]; providers?: { label: string; launch_url: string }[] }>("/api/v1/result-shares");
-}
-
-export async function downloadResultShare(share: ResultShare): Promise<Blob> {
-  if (!Number.isSafeInteger(share.byte_length) || share.byte_length < 0 || share.byte_length > 8 * 1024 * 1024 ||
-      !/^[a-f0-9]{64}$/i.test(share.sha256)) {
-    throw new Error("Invalid shared file size or checksum.");
-  }
-  if (!globalThis.crypto?.subtle) {
-    throw new Error("Open the Workbench over HTTPS or localhost to verify this download.");
-  }
-  const response = await fetchWithNetworkError(`/api/v1/result-shares/${encodeURIComponent(share.share_id)}/download`, {
-    cache: "no-store", credentials: "same-origin",
-  });
-  if (!response.ok) throw await parseHttpError(response);
-  if (!response.body) throw new Error("The shared file has no response body.");
-  const reader = response.body.getReader();
-  const bytes = new Uint8Array(share.byte_length);
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (size + value.byteLength > bytes.length) {
-        await reader.cancel();
-        throw new Error("The downloaded file exceeds the published size.");
-      }
-      bytes.set(value, size);
-      size += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (size !== bytes.length) throw new Error("The downloaded file size differs from the published size.");
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  const sha256 = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
-  if (sha256 !== share.sha256.toLowerCase()) throw new Error("The downloaded file checksum differs from the published checksum.");
-  return new Blob([bytes], { type: "application/octet-stream" });
-}
-
-export async function revokeResultShare(id: string) {
-  const response = await fetchWithNetworkError(`/api/v1/result-shares/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!response.ok) throw await parseHttpError(response);
-}
-
-export async function fetchAdminTiers(): Promise<TierDefinitionRecord[]> {
-  const data = await apiFetch<{ tiers: TierDefinitionRecord[] }>("/api/v1/admin/tiers");
-  return data.tiers;
-}
-
-export async function updateAdminTier(
-  tierId: string,
-  input: UpdateTierInput,
-): Promise<TierDefinitionRecord> {
-  const data = await apiFetch<{ tier: TierDefinitionRecord }>(
-    `/api/v1/admin/tiers/${encodeURIComponent(tierId)}`,
-    {
-      method: "PUT",
-      body: JSON.stringify(input),
-    },
-  );
-  return data.tier;
-}
-
-export function confirmDemoTier(orgId: string, tierId: string) {
-  return apiFetch<{ org_id: string; tier_id: string; changed: boolean }>(
-    `/api/v1/admin/orgs/${encodeURIComponent(orgId)}/confirm-tier`,
-    { method: "POST", body: JSON.stringify({ tier_id: tierId }) },
-  );
-}
-
 export async function fetchCuratedModuleApprovals(): Promise<CuratedModuleApprovalRecord[]> {
   const data = await apiFetch<{ approvals: CuratedModuleApprovalRecord[] }>(
     "/api/v1/admin/curated-modules",
@@ -1920,7 +1757,7 @@ export async function revokeNode(nodeId: string): Promise<void> {
 
 export async function creditOrgInvoice(payload: {
   org_id?: string;
-  amount_milli_act: number;
+  amount_milli_eur: number;
   reference: string;
 }): Promise<LedgerTx> {
   return apiFetch<LedgerTx>("/api/v1/billing/invoices/credit", {
@@ -1960,56 +1797,6 @@ export async function syncMarketplaceNow(): Promise<MarketplaceStatus> {
     headers: localOwnerHeaders(),
     body: JSON.stringify({}),
   });
-}
-
-export async function fetchAdminFederationPeers(): Promise<FederationPeerRecord[]> {
-  const data = await apiFetch<{ peers: FederationPeerRecord[] }>("/api/v1/admin/federation/peers");
-  return data.peers;
-}
-
-export async function approveAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
-  const data = await apiFetch<{ peer: FederationPeerRecord }>(
-    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/approve`,
-    {
-      method: "POST",
-      body: JSON.stringify({}),
-    },
-  );
-  return data.peer;
-}
-
-export async function rejectAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
-  const data = await apiFetch<{ peer: FederationPeerRecord }>(
-    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/reject`,
-    {
-      method: "POST",
-      body: JSON.stringify({}),
-    },
-  );
-  return data.peer;
-}
-
-export async function suspendAdminFederationPeer(peerId: string): Promise<FederationPeerRecord> {
-  const data = await apiFetch<{ peer: FederationPeerRecord }>(
-    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/suspend`,
-    {
-      method: "POST",
-      body: JSON.stringify({}),
-    },
-  );
-  return data.peer;
-}
-
-export async function syncAdminFederationPeer(
-  peerId: string,
-): Promise<{ peer: FederationPeerRecord; synced_offers: number }> {
-  return apiFetch<{ peer: FederationPeerRecord; synced_offers: number }>(
-    `/api/v1/admin/federation/peers/${encodeURIComponent(peerId)}/sync`,
-    {
-      method: "POST",
-      body: JSON.stringify({}),
-    },
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2286,37 +2073,8 @@ export async function fetchRunProvenance(runId: string): Promise<ProvenanceBundl
 }
 
 // ---------------------------------------------------------------------------
-// Milestone C1 — U4 Client Cloud Registration, Placement & Import
+// Catalog Data Placement
 // ---------------------------------------------------------------------------
-
-export async function registerClientCloudOutbound(payload?: {
-  target_hub_url?: string;
-  org_name?: string;
-  label?: string;
-  peer_id?: string;
-  target_peer_pubkey?: string;
-}): Promise<OutboundRegistrationResult> {
-  return apiFetch<OutboundRegistrationResult>("/api/v1/admin/federation/register-outbound", {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export async function importFederatedModule(payload: {
-  peer_id?: string;
-  source_hub_url?: string;
-  plugin_id: string;
-  version: string;
-  marketplace_offer_id?: string;
-  expected_ui_bundle_hash?: string;
-  source_auth_header?: string;
-  visibility?: string;
-}): Promise<ImportedFederatedModuleResult> {
-  return apiFetch<ImportedFederatedModuleResult>("/api/v1/admin/federation/import-module", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
 
 export async function updateCatalogDataPlacement(
   catalogId: string,
@@ -2331,16 +2089,4 @@ export async function updateCatalogDataPlacement(
       body: JSON.stringify({ data_placement: dataPlacement }),
     },
   );
-}
-
-export async function importFederatedCatalog(payload: {
-  peer_id?: string;
-  source_hub_url?: string;
-  catalog_id: string;
-  source_auth_header?: string;
-}): Promise<ImportedFederatedCatalogResult> {
-  return apiFetch<ImportedFederatedCatalogResult>("/api/v1/admin/federation/import-catalog", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
 }

@@ -113,7 +113,7 @@ export function AppDistributionSettings({ local }: {local: boolean}) {
       {saved === "froglet-node" && <p role="status">Verified customer node download started.</p>}
       <details><summary>Connect a customer node</summary>
         <p>Extract the worker on the customer machine. Keep a private state directory and generate its public key with <code>froglet-node pubkey --state-dir &lt;directory&gt;</code>.</p>
-        <p>To serve private data, enroll the public key under Organization Administration → Hospital-Edge Nodes. Keep the returned credential on the node. To add a compute worker, ask the operator of the customer hub to enroll it as a cloud-pool worker.</p>
+        <p>To add a compute worker, ask the operator of the hub to enroll its public key as a cloud-pool worker in the Platform Control Tower. Keep the returned credential on the node.</p>
       </details>
     </section>}
     {!release && !error && <p role="status">Checking release channel…</p>}

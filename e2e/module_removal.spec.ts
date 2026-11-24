@@ -10,7 +10,7 @@ test("native Modules removes the selected release and can restore a detached wor
   function summary(version: string) {
     return {
       manifest: { id, name: "Color sample", version, image: "registry/fixture/color@sha256:" + "a".repeat(64),
-        category: "utility", price_milli_act: 0, network: "none", description: "",
+        category: "utility", price_milli_eur: 0, network: "none", description: "",
         resources: { cpus: 1, memory_mb: 64, timeout_sec: 15 }, inputs: { schema: {} }, views: [] },
       installed: active.has(version), removable_versions: [...active], detached_versions: [...detached],
       author: "Fixture", execution_target: "local", execution_label: "Local", views: [], has_custom_ui: false,
@@ -37,7 +37,7 @@ test("native Modules removes the selected release and can restore a detached wor
     const fixtures: Record<string, unknown> = {
       "auth/whoami": { org_id: "local", actor: "tester", role: "owner" },
       catalogs: { catalogs: [] }, grants: { grants: [], grant_usage: [] },
-      ledger: { transactions: [], available_milli_act: 0, reserved_milli_act: 0 },
+      ledger: { transactions: [], available_milli_eur: 0, reserved_milli_eur: 0 },
       projects: { projects: [] }, runs: { runs: [] }, sessions: { sessions: [] },
       "saved-views": { views: [] }, "llm/config": { configured: false, providers: [] },
     };
@@ -89,7 +89,7 @@ test("Results opens the saved run by ID after the exact module version is unavai
   let canRead = true;
   const record = {
     plugin_id: id, plugin_version: "1.0", run_id: runId, status: "succeeded", params: {},
-    quote: { estimated_cost_act: 0 }, artifacts: [{ name: "marker.bin", size_bytes: 3 }],
+    quote: { estimated_cost_milli_eur: 0 }, artifacts: [{ name: "marker.bin", size_bytes: 3 }],
     result_json: { exact_value: 17 }, froglet_receipt: { hash: "signed-archive-receipt" },
     froglet_chain: [{ hash: "signed-archive-receipt" }], receipt_verified: true,
     logs: [], created_at: "2026-11-19T08:00:00Z", completed_at: "2026-11-19T08:00:04Z",
@@ -99,7 +99,7 @@ test("Results opens the saved run by ID after the exact module version is unavai
     const json = (body: unknown, status = 200) => route.fulfill({ status, json: body });
     if (path === "plugins") return json({ plugins: onlySiblingInstalled ? [{
       manifest: { id, name: "Newer Color", version: "2.0", description: "", category: "utility",
-        price_milli_act: 0, resources: {}, inputs: { schema: {} } },
+        price_milli_eur: 0, resources: {}, inputs: { schema: {} } },
       installed: true, execution_target: "local", execution_label: "Local", has_custom_ui: true,
       views: [], author: "Fixture",
     }] : [] });
@@ -111,7 +111,7 @@ test("Results opens the saved run by ID after the exact module version is unavai
     const settings: Record<string, unknown> = {
       health: { status: "ok", mode: "local" }, "auth/whoami": { org_id: "test", actor: "tester", role: "owner" },
       catalogs: { catalogs: [] }, grants: { grants: [], grant_usage: [] },
-      ledger: { transactions: [], available_milli_act: 0, reserved_milli_act: 0 },
+      ledger: { transactions: [], available_milli_eur: 0, reserved_milli_eur: 0 },
       projects: { projects: [] }, sessions: { sessions: [] }, "saved-views": { views: [] },
       "llm/config": { configured: false, providers: [] },
     };

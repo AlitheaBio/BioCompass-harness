@@ -116,7 +116,7 @@ export function MarketplaceSyncCard({
               ? "Started with --airgapped (COMPASS_AIRGAPPED=1). All outbound marketplace connections are blocked."
               : isLocalMode
                 ? "Opt-in HTTPS discovery feed for Froglet modules and datasets."
-                : "Managed by this Client Cloud deployment's Compass Hub federation peers."}
+                : "Managed by this Cloud deployment's Compass Hub."}
           </p>
         </div>
         <span

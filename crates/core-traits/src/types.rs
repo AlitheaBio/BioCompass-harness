@@ -1,6 +1,6 @@
 //! Core domain records, error taxonomy, OCI image references, and data grants.
 
-use crate::ids::{CatalogId, CreditAmountAct, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
+use crate::ids::{CatalogId, MilliEur, NodeId, OrgId, PluginId, ProjectId, RunId, SessionId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,7 +26,7 @@ pub enum CompassError {
     ContainerEngine(String),
     #[error("froglet protocol error: {0}")]
     Protocol(String),
-    #[error("payment or ACT ledger error: {0}")]
+    #[error("payment or EUR ledger error: {0}")]
     Payment(String),
     #[error("rate limit exceeded: {0}")]
     RateLimited(String),
@@ -184,11 +184,9 @@ impl CompassError {
                 } else if matches!(
                     self.error_code(),
                     crate::error::ErrorCode::InsufficientFunds
-                        | crate::error::ErrorCode::DailyActBreakerExceeded
+                        | crate::error::ErrorCode::DailySpendBreakerExceeded
                 ) {
-                    // Typed codes only (no message substring matching); currency-neutral because
-                    // the laptop play ledger counts credits while hosted organizations pay euros.
-                    Some("Check your available balance and the organization's daily spending breaker in Settings -> Usage.")
+                    Some("Check your available EUR balance and daily spending limit in Settings -> Usage.")
                 } else {
                     None
                 }
@@ -1136,8 +1134,8 @@ pub struct RunQuote {
     #[serde(default = "default_offer_name")]
     pub offer_name: String,
     #[serde(default)]
-    pub base_fee_act: CreditAmountAct,
-    pub estimated_cost_act: CreditAmountAct,
+    pub base_fee_milli_eur: MilliEur,
+    pub estimated_cost_milli_eur: MilliEur,
     #[serde(default)]
     pub max_input_bytes: u64,
     #[serde(default)]
@@ -1216,12 +1214,12 @@ pub struct RunRecord {
     /// Optional MCP / agent tool-call ID for audit correlation (`H1`, `H2`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool_call_id: Option<String>,
-    /// Module fee component in milli-ACT / milli-EUR (`H1`, `H3`, `H4`).
+    /// Module fee component in milli-EUR (`H1`, `H3`, `H4`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub module_fee_milli_act: Option<i64>,
-    /// Dataset fee component in milli-ACT / milli-EUR (`H1`, `H3`, `H4`).
+    pub module_fee_milli_eur: Option<MilliEur>,
+    /// Dataset fee component in milli-EUR (`H1`, `H3`, `H4`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dataset_fee_milli_act: Option<i64>,
+    pub dataset_fee_milli_eur: Option<MilliEur>,
     pub quote: RunQuote,
     pub result_json: Option<Value>,
     pub artifacts: Vec<ArtifactRef>,
@@ -1264,7 +1262,7 @@ pub struct RunLogEvent {
     pub line: String,
 }
 
-/// Double-entry ACT credit ledger transaction kind.
+/// Double-entry EUR credit ledger transaction kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerTxKind {
@@ -1276,15 +1274,15 @@ pub enum LedgerTxKind {
     RunRefund,
 }
 
-/// Immutable ACT ledger entry.
+/// Immutable EUR ledger entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerTx {
     pub tx_id: String,
     pub org_id: OrgId,
     pub run_id: Option<RunId>,
     pub kind: LedgerTxKind,
-    pub delta_act: CreditAmountAct,
-    pub balance_after_act: CreditAmountAct,
+    pub delta_milli_eur: MilliEur,
+    pub balance_after_milli_eur: MilliEur,
     #[serde(default)]
     pub receipt_hash: Option<String>,
     pub reference: String,
@@ -1302,7 +1300,7 @@ pub enum ReservationState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunReservation {
     pub idempotency_key: String,
-    pub amount: CreditAmountAct,
+    pub amount: MilliEur,
     pub state: ReservationState,
 }
 
@@ -1546,7 +1544,7 @@ pub struct DatasetOfferRecord {
     #[serde(default)]
     pub daily_row_budget: Option<u64>,
     pub max_rows_per_query: usize,
-    pub price_milli_act: u64,
+    pub price_milli_eur: MilliEur,
     pub provider_pubkey: String,
     pub descriptor_doc: Value,
     pub froglet_offer_doc: Value,
@@ -1586,9 +1584,7 @@ pub enum ModuleRunsIn {
     Local,
     /// Runs on the connected cloud hub's managed worker pool.
     Cloud,
-    /// Runs on an organization-owned `provider-edge` worker node.
-    ProviderEdge,
-    /// Runs remotely at an external network provider.
+    /// Runs remotely at an upstream network provider hub.
     NetworkProvider,
 }
 
@@ -1597,7 +1593,6 @@ impl ModuleRunsIn {
         match self {
             Self::Local => "local",
             Self::Cloud => "cloud",
-            Self::ProviderEdge => "provider_edge",
             Self::NetworkProvider => "network_provider",
         }
     }

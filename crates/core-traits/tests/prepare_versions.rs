@@ -28,7 +28,7 @@ fn exact_versions_reject_blank_and_keep_existing_offer_normalization() {
     let plugin = PluginId::new("qa/echo").unwrap();
     let quote: RunQuote = serde_json::from_value(json!({
         "run_id":"r", "plugin_id":"qa/echo", "plugin_version":"v2", "offer_id":"small",
-        "image_ref":"fixture", "target_node_id":"worker", "estimated_cost_act":0,
+        "image_ref":"fixture", "target_node_id":"worker", "estimated_cost_milli_eur":0,
         "workload_hash":"hash", "froglet_quote":{}, "expires_at":"2026-11-19T00:00:00Z"
     }))
     .unwrap();

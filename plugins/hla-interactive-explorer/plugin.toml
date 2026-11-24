@@ -9,7 +9,7 @@ execution = "either"
 requires_catalog_level = "rows"
 image = "ghcr.io/alitheabio/hla-interactive-explorer:1.0.0"
 network = "none"
-price_milli_act = 5000
+price_milli_eur = 5000
 
 [resources]
 cpus = 2

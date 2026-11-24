@@ -23,7 +23,7 @@ use axum::routing::{any, delete, get, patch, post, put};
 use axum::{Json, Router};
 use biocompass_agent_core::AgentStreamEvent;
 use biocompass_core_traits::{
-    CatalogId, CompassError, CreditAmountAct, GrantLevel, IngestFormat, IngestMode, PluginId,
+    CatalogId, CompassError, GrantLevel, IngestFormat, IngestMode, PluginId,
     PrepareRunRequest, ProjectId, QueryAst, RunId, SavedViewPlane, SavedViewRecord,
     SavedViewSourcePin, SavedViewStatus, SavedViewVerificationReport, SessionId,
 };
@@ -488,7 +488,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/feed", get(proxy_public_marketplace_handler))
         .route("/v1/artifacts/:hash", get(proxy_public_marketplace_artifact_handler))
         .route("/api/v1/ui-bundles/:hash", get(proxy_public_marketplace_artifact_handler))
-        .route("/v1/registrations", post(proxy_public_marketplace_handler))
         .route("/api/v1/health", get(get_health))
         .route("/api/v1/marketplace/status", get(get_marketplace_status_handler))
         .route("/api/v1/marketplace/consent", put(update_marketplace_consent_handler))
@@ -586,12 +585,6 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/module-offers/*path", any(proxy_cloud_route_handler))
         .route(
-            "/api/v1/result-shares",
-            get(proxy_cloud_route_handler).post(proxy_cloud_route_handler),
-        )
-        .route("/api/v1/result-shares/:id", delete(proxy_cloud_route_handler))
-        .route("/api/v1/result-shares/:id/download", get(proxy_cloud_route_handler))
-        .route(
             "/api/v1/workbench/module-offers/:id/run-module",
             get(offered_run_module_handler),
         )
@@ -662,7 +655,6 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/froglet/verify", post(verify_froglet_handler))
         .route("/api/v1/ledger", get(get_ledger_handler))
-        .route("/api/v1/ledger/topup", post(topup_ledger_handler))
         .route(
             "/api/v1/sessions",
             get(list_sessions_handler).post(create_session_handler),
@@ -1437,7 +1429,7 @@ async fn to_plugin_dto(
     });
     let runs_in = hub_meta.runs_in.unwrap_or(match execution_target {
         "local" => biocompass_core_traits::ModuleRunsIn::Local,
-        "froglet_node" => biocompass_core_traits::ModuleRunsIn::ProviderEdge,
+        "froglet_node" => biocompass_core_traits::ModuleRunsIn::NetworkProvider,
         _ => biocompass_core_traits::ModuleRunsIn::Cloud,
     });
     if source == biocompass_core_traits::ModuleSource::NetworkProvider
@@ -2980,45 +2972,10 @@ async fn get_ledger_handler(
             .proxy_raw(reqwest::Method::GET, "/api/v1/ledger", &headers, Vec::new())
             .await?);
     }
-    let bal = state
-        .payment_gateway
-        .available_balance(&state.default_org_id)
-        .await?;
-    let txs = state
-        .payment_gateway
-        .list_transactions(&state.default_org_id)
-        .await?;
-    Ok(Json(json!({
-        "org_id": state.default_org_id,
-        "available_milli_act": bal.milli_act(),
-        "available_display": bal.display_local_credits(),
-        "is_local_play_ledger": true,
-        "currency_label": "local play credits",
-        "transactions": txs,
-    }))
-    .into_response())
-}
-
-#[derive(Debug, Deserialize)]
-struct TopUpRequest {
-    amount_milli_act: i64,
-    reference: String,
-}
-
-async fn topup_ledger_handler(
-    State(state): State<AppState>,
-    Json(req): Json<TopUpRequest>,
-) -> ApiResult<Json<Value>> {
-    let tx = state
-        .payment_gateway
-        .credit_topup(
-            &state.default_org_id,
-            CreditAmountAct::from_milli_act(req.amount_milli_act),
-            &req.reference,
-            false,
-        )
-        .await?;
-    Ok(Json(serde_json::to_value(tx).unwrap_or(Value::Null)))
+    Err(CompassError::AccessDenied(
+        "this endpoint is only available in cloud-web mode; local workspaces run with settlement_method = \"none\"".into(),
+    )
+    .into())
 }
 
 async fn list_sessions_handler(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -3222,7 +3179,7 @@ async fn stream_session_chat_handler(
             std::sync::Arc::new(state.agent.for_execution(port))
         }
         None if req.execution_budget.requires_hosted_execution() => {
-            return Err(CompassError::Validation("Agent ACT preapproval requires a hosted workspace.".into()).into());
+            return Err(CompassError::Validation("Agent EUR budget preapproval requires a hosted workspace.".into()).into());
         }
         None => state.agent.clone(),
     };
@@ -5085,8 +5042,8 @@ mod sec_06_tests {
             parent_run_id: None,
             agent_credential_id: None,
             agent_tool_call_id: None,
-            module_fee_milli_act: None,
-            dataset_fee_milli_act: None,
+            module_fee_milli_eur: None,
+            dataset_fee_milli_eur: None,
             quote: biocompass_core_traits::RunQuote {
                 run_id: run_id.clone(),
                 plugin_id: PluginId::new("alithea/hla-motif-enrichment").unwrap(),
@@ -5095,8 +5052,8 @@ mod sec_06_tests {
                 target_node_id: biocompass_core_traits::NodeId::new("local").unwrap(),
                 offer_id: "standard".into(),
                 offer_name: "Standard".into(),
-                base_fee_act: CreditAmountAct::ZERO,
-                estimated_cost_act: CreditAmountAct::ZERO,
+                base_fee_milli_eur: biocompass_core_traits::MilliEur::ZERO,
+                estimated_cost_milli_eur: biocompass_core_traits::MilliEur::ZERO,
                 max_input_bytes: 1024,
                 max_output_bytes: 1024,
                 max_runtime_sec: 60,
@@ -5272,7 +5229,6 @@ mod milestone_b_tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_feed = Arc::clone(&hits);
         let hits_art = Arc::clone(&hits);
-        let hits_reg = Arc::clone(&hits);
 
         let router = Router::new()
             .route(
@@ -5295,15 +5251,15 @@ mod milestone_b_tests {
                 post(|| async {
                     let now = chrono::Utc::now();
                     Json(json!({
-                        "run_id": "run-a2-provider-edge",
+                        "run_id": "run-a2-upstream-node",
                         "plugin_id": "partner-bio/motif-pro",
                         "plugin_version": "1.2.0",
                         "image_ref": format!("ghcr.io/partner/motif-pro@sha256:{}", "b".repeat(64)),
-                        "target_node_id": "provider-edge-zurich-01",
+                        "target_node_id": "upstream-node-zurich-01",
                         "offer_id": "standard",
                         "offer_name": "Standard Provider Run",
-                        "base_fee_act": 1000,
-                        "estimated_cost_act": 2500,
+                        "base_fee_milli_eur": 1000,
+                        "estimated_cost_milli_eur": 2500,
                         "max_input_bytes": 1048576,
                         "max_output_bytes": 1048576,
                         "max_runtime_sec": 300,
@@ -5314,7 +5270,7 @@ mod milestone_b_tests {
                         "expires_at": now,
                         "serving_org_id": "org-zurich-proteomics",
                         "external_provider_org": "Zurich Proteomics AG",
-                        "external_provider_notice": "Your run parameters and uploaded files will execute on an external provider-edge node operated by Zurich Proteomics AG."
+                        "external_provider_notice": "Your run parameters and uploaded files will execute on an upstream hub operated by Zurich Proteomics AG."
                     }))
                 }),
             )
@@ -5401,24 +5357,6 @@ mod milestone_b_tests {
                                 (header::HeaderName::from_static("x-content-sha256"), "deadbeef"),
                             ],
                             format!("artifact-bytes:{hash}"),
-                        )
-                    }
-                }),
-            )
-            .route(
-                "/v1/registrations",
-                post(move |body: Bytes| {
-                    let hits = Arc::clone(&hits_reg);
-                    async move {
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                        (
-                            StatusCode::CREATED,
-                            [(header::RETRY_AFTER, "5")],
-                            Json(json!({
-                                "status": "pending",
-                                "received": parsed
-                            })),
                         )
                     }
                 }),
@@ -5691,7 +5629,7 @@ mod milestone_b_tests {
         state.dispatcher = hub.clone();
         state.session_store = hub.clone();
         state.blob_store = hub.clone();
-        state.payment_gateway = hub;
+        state.ledger = Some(hub);
         state.marketplace = Arc::new(
             crate::marketplace::MarketplaceClient::new(
                 tmp.path(),
@@ -5734,7 +5672,7 @@ mod milestone_b_tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(prep_json["target_node_id"], "provider-edge-zurich-01");
+        assert_eq!(prep_json["target_node_id"], "upstream-node-zurich-01");
         assert_eq!(prep_json["serving_org_id"], "org-zurich-proteomics");
         assert_eq!(prep_json["external_provider_org"], "Zurich Proteomics AG");
         assert!(
@@ -5804,36 +5742,7 @@ mod milestone_b_tests {
             .await
             .unwrap();
         assert_eq!(bad_art.status(), StatusCode::BAD_REQUEST);
-
-        // [B1] POST /v1/registrations proxied with body & status.
-        let reg_resp = cloud_app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/v1/registrations")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"peer_url":"https://client.hospital.org"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(reg_resp.status(), StatusCode::CREATED);
-        assert_eq!(
-            reg_resp
-                .headers()
-                .get(header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-            Some("5")
-        );
-        let reg_json: Value = serde_json::from_slice(
-            &axum::body::to_bytes(reg_resp.into_body(), 1024 * 64)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(reg_json["status"], "pending");
-        assert_eq!(reg_json["received"]["peer_url"], "https://client.hospital.org");
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         // Confirm status enum serialization strings match DEV-07 UI contract.
         assert_eq!(
@@ -5959,7 +5868,7 @@ mod milestone_c_track_u_tests {
                                             "category": "Immunopeptidomics",
                                             "execution": "cloud_only",
                                             "image": "registry.example.org/fast@sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                                            "price_milli_act": 1500,
+                                            "price_milli_eur": 1500,
                                             "ui": { "entry": "ui/dist/index.html" }
                                         },
                                         "has_ui_bundle": true,
@@ -5981,7 +5890,7 @@ mod milestone_c_track_u_tests {
                                             "category": "Security",
                                             "execution": "cloud_only",
                                             "image": "registry.example.org/tamp@sha256:2222222222222222222222222222222222222222222222222222222222222222",
-                                            "price_milli_act": 0,
+                                            "price_milli_eur": 0,
                                             "ui": { "entry": "ui/dist/index.html" }
                                         },
                                         "has_ui_bundle": true,
@@ -6155,7 +6064,7 @@ mod milestone_c_track_u_tests {
         state.dispatcher = hub.clone();
         state.session_store = hub.clone();
         state.blob_store = hub.clone();
-        state.payment_gateway = hub;
+        state.ledger = Some(hub);
         state.marketplace = Arc::new(
             crate::marketplace::MarketplaceClient::new(
                 tmp.path(),
@@ -6346,9 +6255,6 @@ mod milestone_c_track_u_tests {
             (Method::GET, "/api/v1/runs/run-123/provenance"),
             (Method::PATCH, "/api/v1/catalogs/org/study/placement"),
             (Method::GET, "/api/v1/catalogs/org/study/licensed-copy-manifest"),
-            (Method::POST, "/api/v1/admin/federation/register-outbound"),
-            (Method::POST, "/api/v1/admin/federation/import-module"),
-            (Method::POST, "/api/v1/admin/federation/import-catalog"),
             (Method::POST, "/api/v1/mcp"),
         ] {
             let resp = app
@@ -6373,7 +6279,7 @@ mod milestone_c_track_u_tests {
     }
 
     #[tokio::test]
-    async fn u3_and_h3_local_client_switches_two_hubs_opens_verified_ui_and_uses_play_credits() {
+    async fn u3_local_client_switches_two_hubs_opens_verified_ui_and_has_no_local_ledger() {
         let mut files_a = BTreeMap::new();
         files_a.insert("index.html".to_owned(), b"<h1>Hub A Verified UI</h1>".to_vec());
         let (hash_a, archive_a) = encode_ui_bundle_archive_json(&files_a, Some("index.html")).unwrap();
@@ -6419,7 +6325,7 @@ mod milestone_c_track_u_tests {
                                             "category": "Cloud",
                                             "execution": "cloud_only",
                                             "image": "registry.example.org/m@sha256:3333333333333333333333333333333333333333333333333333333333333333",
-                                            "price_milli_act": 2000,
+                                            "price_milli_eur": 2000,
                                             "ui": { "entry": "ui/dist/index.html" }
                                         },
                                         "has_ui_bundle": true,
@@ -6496,7 +6402,7 @@ mod milestone_c_track_u_tests {
         .unwrap();
         let owner_token = redeem_json["owner_session"].as_str().unwrap().to_owned();
 
-        // 1. H3 Local Play Ledger MUST NOT be labelled euros!
+        // 1. Local workspaces have no billing ledger (settlement_method = "none").
         let ledger_resp = app
             .clone()
             .oneshot(
@@ -6508,15 +6414,7 @@ mod milestone_c_track_u_tests {
             )
             .await
             .unwrap();
-        assert_eq!(ledger_resp.status(), StatusCode::OK);
-        let ledger_json: Value = serde_json::from_slice(
-            &axum::body::to_bytes(ledger_resp.into_body(), 64 * 1024).await.unwrap(),
-        )
-        .unwrap();
-        let display = ledger_json["available_display"].as_str().unwrap();
-        assert_eq!(ledger_json["is_local_play_ledger"], true);
-        assert!(!display.contains('€') && !display.to_ascii_uppercase().contains("EUR"));
-        assert!(display.ends_with(" credits"), "expected play credits label, got {display}");
+        assert_eq!(ledger_resp.status(), StatusCode::FORBIDDEN);
 
         // 2. Switch local client to Alithea Cloud (Hub A), list modules, and open Hub A's UI via U1 verified cache!
         let sw_a = app
@@ -6750,7 +6648,7 @@ mod milestone_c_track_u_tests {
                             "provider_label": "Zurich Proteomics",
                             "ui_bundle_hash": hash_b,
                             "launch_url": "https://zurich.example.org/run/mo-zurich-run",
-                            "price_milli_act": 3000
+                            "price_milli_eur": 3000
                         })
                         .to_string(),
                     ))
@@ -6795,7 +6693,7 @@ mod milestone_c_track_u_tests {
     #[tokio::test]
     async fn local_provenance_v1_exports_result_manifest_preimage_child_refs_and_omits_params() {
         use biocompass_core_traits::{
-            ArtifactRef, CreditAmountAct, NodeId, PluginId, RunId, RunQuote, RunRecord,
+            ArtifactRef, MilliEur, NodeId, PluginId, RunId, RunQuote, RunRecord,
             RunStatus, result_manifest_hash,
         };
 
@@ -6875,8 +6773,8 @@ mod milestone_c_track_u_tests {
             target_node_id: NodeId::new("local").unwrap(),
             offer_id: "default".into(),
             offer_name: "Default".into(),
-            base_fee_act: CreditAmountAct::ZERO,
-            estimated_cost_act: CreditAmountAct::ZERO,
+            base_fee_milli_eur: MilliEur::ZERO,
+            estimated_cost_milli_eur: MilliEur::ZERO,
             max_input_bytes: 1024,
             max_output_bytes: 1024,
             max_runtime_sec: 60,
@@ -6905,8 +6803,8 @@ mod milestone_c_track_u_tests {
             parent_run_id: None,
             agent_credential_id: None,
             agent_tool_call_id: None,
-            module_fee_milli_act: None,
-            dataset_fee_milli_act: None,
+            module_fee_milli_eur: None,
+            dataset_fee_milli_eur: None,
             quote: make_quote(&parent_id),
             result_json: Some(json!({ "status": "ok", "hits": 42 })),
             artifacts: vec![artifact.clone()],
@@ -6935,8 +6833,8 @@ mod milestone_c_track_u_tests {
             parent_run_id: None,
             agent_credential_id: None,
             agent_tool_call_id: None,
-            module_fee_milli_act: None,
-            dataset_fee_milli_act: None,
+            module_fee_milli_eur: None,
+            dataset_fee_milli_eur: None,
             quote: make_quote(&failed_id),
             result_json: None,
             artifacts: Vec::new(),
@@ -7027,8 +6925,7 @@ mod milestone_c_track_u_tests {
     #[tokio::test]
     async fn w6_local_provenance_export_never_includes_another_orgs_source_run() {
         use biocompass_core_traits::{
-            CreditAmountAct, NodeId, OrgId, PluginId, RunId, RunInput, RunQuote, RunRecord,
-            RunStatus,
+            NodeId, OrgId, PluginId, RunId, RunInput, RunQuote, RunRecord, RunStatus,
         };
         let tmp = tempfile::tempdir().unwrap();
         let state = crate::state::AppState::bootstrap_with_marketplace(
@@ -7058,8 +6955,8 @@ mod milestone_c_track_u_tests {
             parent_run_id: None,
             agent_credential_id: None,
             agent_tool_call_id: None,
-            module_fee_milli_act: None,
-            dataset_fee_milli_act: None,
+            module_fee_milli_eur: None,
+            dataset_fee_milli_eur: None,
             quote: RunQuote {
                 run_id: RunId::new(id).unwrap(),
                 plugin_id: PluginId::new("alithea/demo").unwrap(),
@@ -7068,8 +6965,8 @@ mod milestone_c_track_u_tests {
                 target_node_id: NodeId::new("local").unwrap(),
                 offer_id: "default".into(),
                 offer_name: "Default".into(),
-                base_fee_act: CreditAmountAct::ZERO,
-                estimated_cost_act: CreditAmountAct::ZERO,
+                base_fee_milli_eur: biocompass_core_traits::MilliEur::ZERO,
+                estimated_cost_milli_eur: biocompass_core_traits::MilliEur::ZERO,
                 max_input_bytes: 1024,
                 max_output_bytes: 1024,
                 max_runtime_sec: 60,

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Cloud-agnostic core traits, domain records, SQLite session store, POSIX blob store, and ACT credit ledger for BioCompass"
+description = "Cloud-agnostic core traits, domain records, SQLite session store, POSIX blob store, and EUR ledger interface for BioCompass"
 
 [lints]
 workspace = true

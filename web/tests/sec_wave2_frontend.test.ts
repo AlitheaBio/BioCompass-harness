@@ -210,10 +210,8 @@ test("sec_32_safe_urls_and_encoded_plugin_segments_applied_across_components_and
   assert.equal(isSafeHttpUrl("https://idp.example/authorize?client=1", { allowRelative: false }), "https://idp.example/authorize?client=1");
   assert.equal(isSafeHttpUrl("/relative", { allowRelative: false }), null);
 
-  // 2. Verify all 4 SEC-32 components import & apply safeLaunchUrl / isSafeHttpUrl.
+  // 2. Verify SEC-32 components import & apply safeLaunchUrl / isSafeHttpUrl.
   for (const rel of [
-    "components/ResultSharing.tsx",
-    "components/ArchiveResult.tsx",
     "components/PersonalAccountSettings.tsx",
     "components/AuthGate.tsx",
   ]) {

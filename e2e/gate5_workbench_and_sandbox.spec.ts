@@ -86,7 +86,7 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
 
     const entry = resolveEntryUrl();
 
-    // 1. Load standalone single-binary SPA & verify BrandWordmark + live health + [A1] consent + genesis ACT
+    // 1. Load standalone single-binary SPA & verify BrandWordmark + live health + [A1] consent
     await page.goto(entry.url);
     await expect(page.getByTestId("brand-wordmark")).toBeVisible();
     await expect(page.getByTestId("health-pill")).toHaveText("Local");
@@ -143,13 +143,6 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
       expect(outboundMarketplaceRequests).toEqual([]);
       expect(unexpectedExternalRequests).toEqual([]);
     }
-
-    const initialLedgerResp = await request.get("/api/v1/ledger");
-    expect(initialLedgerResp.ok()).toBe(true);
-    const initialLedger = (await initialLedgerResp.json()) as {
-      available_milli_act: number;
-    };
-    expect(initialLedger.available_milli_act).toBe(250_000);
 
     // 2. Data Catalogs: verify Full Research Access vs Scoped Partner vs Compute-Only 3-level Grant enforcement
     await page.getByTestId("nav-catalogs").click();
@@ -231,7 +224,7 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await page
       .getByTestId("quick-prepare-btn-alithea/hla-motif-enrichment")
       .click();
-    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 credits");
+    await expect(page.getByTestId("paid-run-consent")).toContainText("Local run (no charge)");
     await page.getByTestId("approve-paid-run").click();
 
     await expect(
@@ -241,11 +234,6 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
       timeout: 45_000,
     });
 
-    // ACT settled from 250.00 -> 245.00 ACT
-    const postMotifLedger = (await (await request.get("/api/v1/ledger")).json()) as {
-      available_milli_act: number;
-    };
-    expect(postMotifLedger.available_milli_act).toBe(245_000);
     await expect(page.getByTestId("live-run-logs")).toContainText(
       "hla-motif-enrichment",
     );
@@ -453,7 +441,7 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
       } catch (err: unknown) {
         return `BLOCKED:${err instanceof Error ? err.message : String(err)}`;
       }
-    }, new URL("/api/v1/ledger", page.url()).toString());
+    }, new URL("/api/v1/health", page.url()).toString());
     expect(hostApiBypassVerdict).toMatch(/^BLOCKED:/);
 
     // Legitimate @biocompass/plugin-sdk RPC 1: queryCatalog over postMessage JSON-RPC 2.0
@@ -510,18 +498,13 @@ test.describe("Gate 5 — Standalone Binary Browser E2E, Real OCI Execution & Sa
     await frameLocator.getByTestId("sdk-prepare-btn").click();
     await expect(frameLocator.getByTestId("sdk-quote-banner")).toBeVisible();
 
-    await expect(page.getByTestId("paid-run-consent")).toContainText("5.00 credits");
+    await expect(page.getByTestId("paid-run-consent")).toContainText("Local run (no charge)");
     await page.getByTestId("approve-paid-run").click();
     const hotspotRows = frameLocator
       .getByTestId("sdk-hotspots-table")
       .locator("tbody tr");
     await expect(hotspotRows.first()).toBeVisible({ timeout: 45_000 });
     expect(await hotspotRows.count()).toBeGreaterThan(0);
-
-    const finalLedger = (await (await request.get("/api/v1/ledger")).json()) as {
-      available_milli_act: number;
-    };
-    expect(finalLedger.available_milli_act).toBe(240_000);
 
     // Zero uncaught page errors and zero outbound marketplace requests across the entire session
     expect(outboundMarketplaceRequests).toEqual([]);

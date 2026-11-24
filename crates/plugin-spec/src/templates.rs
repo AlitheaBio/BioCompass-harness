@@ -149,7 +149,7 @@ execution = "either"
 requires_catalog_level = "compute_only"
 image = {image_toml}
 network = "none"
-price_milli_act = 5000
+price_milli_eur = 5000
 
 [resources]
 cpus = 2

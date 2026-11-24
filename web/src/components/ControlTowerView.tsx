@@ -1,38 +1,27 @@
-import { ClientCloudImportPanel } from "./ClientCloudImportPanel";
-import { ConfirmTierChange } from "./ConfirmTierChange";
 import React, { useCallback, useEffect, useState } from "react";
 import {
-  approveAdminFederationPeer,
   approveCuratedModule,
   creditOrgInvoice,
   enrollNode,
-  fetchAdminFederationPeers,
   fetchAdminPluginVersions,
-  fetchAdminTiers,
   fetchCuratedModuleApprovals,
   fetchEnumerationMonitor,
   fetchNodes,
   formatErrorInline,
-  rejectAdminFederationPeer,
   reviewAdminPluginVisibility,
   revokeCuratedModule,
   revokeNode,
-  suspendAdminFederationPeer,
-  syncAdminFederationPeer,
-  updateAdminTier,
 } from "../api";
 import {
-  formatMilliAct,
+  formatMilliEur,
   type AuthPrincipal,
   type CreatedNodeEnrollment,
   type CuratedModuleApprovalRecord,
   type EnumerationMonitorEntry,
-  type FederationPeerRecord,
   type NodeMode,
   type NodeSummaryRecord,
   type PluginVersionRecord,
   type PluginVisibility,
-  type TierDefinitionRecord,
 } from "../types";
 import {
   IconCheck,
@@ -48,12 +37,9 @@ export interface ControlTowerViewProps {
 }
 
 type ControlTowerTab =
-  | "tiers"
-  | "org-tier"
   | "curated"
   | "plugins"
   | "nodes"
-  | "federation"
   | "billing"
   | "monitor";
 
@@ -61,21 +47,18 @@ export function ControlTowerView({
   principal,
   onRefreshWorkspace,
 }: ControlTowerViewProps) {
-  const [tab, setTab] = useState<ControlTowerTab>("tiers");
+  const [tab, setTab] = useState<ControlTowerTab>("curated");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadErrors, setLoadErrors] = useState<Partial<Record<ControlTowerTab, string>>>({});
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const [tiers, setTiers] = useState<TierDefinitionRecord[]>([]);
-  const [tierDrafts, setTierDrafts] = useState<Record<string, TierDefinitionRecord>>({});
   const [curatedApprovals, setCuratedApprovals] = useState<CuratedModuleApprovalRecord[]>([]);
   const [pluginVersions, setPluginVersions] = useState<PluginVersionRecord[]>([]);
   const [pluginVisFilter, setPluginVisFilter] = useState<string>("all");
   const [approveAsCurated, setApproveAsCurated] = useState<boolean>(true);
   const [nodes, setNodes] = useState<NodeSummaryRecord[]>([]);
-  const [federationPeers, setFederationPeers] = useState<FederationPeerRecord[]>([]);
   const [enumEntries, setEnumEntries] = useState<EnumerationMonitorEntry[]>([]);
   const [enumThreshold, setEnumThreshold] = useState<number>(30);
 
@@ -88,13 +71,12 @@ export function ControlTowerView({
   // Node enrollment form
   const [newNodeId, setNewNodeId] = useState("");
   const [newNodeMode, setNewNodeMode] = useState<NodeMode>("cloud-pool");
-  const [newNodeOrgId, setNewNodeOrgId] = useState("");
   const [newNodeLabel, setNewNodeLabel] = useState("");
   const [createdNode, setCreatedNode] = useState<CreatedNodeEnrollment | null>(null);
 
   // Invoice credit form
   const [creditOrgId, setCreditOrgId] = useState("");
-  const [creditAmountAct, setCreditAmountAct] = useState("100");
+  const [creditAmountEur, setCreditAmountEur] = useState("100");
   const [creditReference, setCreditReference] = useState("INV-2026-001");
 
   const copyToClipboard = (id: string, text: string) => {
@@ -115,14 +97,9 @@ export function ControlTowerView({
       }
     }
     await Promise.all([
-      loadSection("tiers", fetchAdminTiers(), items => {
-        setTiers(items);
-        setTierDrafts(Object.fromEntries(items.map(item => [item.tier_id, { ...item }])));
-      }),
       loadSection("curated", fetchCuratedModuleApprovals(), setCuratedApprovals),
       loadSection("plugins", fetchAdminPluginVersions(), setPluginVersions),
       loadSection("nodes", fetchNodes(), setNodes),
-      loadSection("federation", fetchAdminFederationPeers(), setFederationPeers),
       loadSection("monitor", fetchEnumerationMonitor(enumThreshold), data => setEnumEntries(data.entries)),
     ]);
     setLoadErrors(errors);
@@ -131,56 +108,6 @@ export function ControlTowerView({
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
-
-  const updateTierDraftField = <K extends keyof TierDefinitionRecord>(
-    tierId: string,
-    key: K,
-    value: TierDefinitionRecord[K],
-  ) => {
-    setTierDrafts((prev) => {
-      const cur = prev[tierId];
-      if (!cur) return prev;
-      return {
-        ...prev,
-        [tierId]: {
-          ...cur,
-          [key]: value,
-        },
-      };
-    });
-  };
-
-  const handleSaveTier = async (tierId: string) => {
-    const draft = tierDrafts[tierId];
-    if (!draft) return;
-    setBusy(true);
-    setError(null);
-    setStatusMsg(null);
-    try {
-      const saved = await updateAdminTier(tierId, {
-        name: draft.name,
-        duration_days: draft.duration_days,
-        max_users: draft.max_users,
-        initial_act_milli: draft.initial_act_milli,
-        daily_act_breaker_milli: draft.daily_act_breaker_milli,
-        storage_quota_bytes: draft.storage_quota_bytes,
-        max_snapshots_per_catalog: draft.max_snapshots_per_catalog,
-        burst_rpm: draft.burst_rpm,
-        allow_custom_modules: draft.allow_custom_modules,
-        allowed_modules: draft.allowed_modules,
-        default_grants: draft.default_grants,
-        default_module_offer_ids: draft.default_module_offer_ids,
-        default_dataset_offer_ids: draft.default_dataset_offer_ids,
-      });
-      setTierDrafts((prev) => ({ ...prev, [tierId]: saved }));
-      setStatusMsg(`Updated tier "${saved.name}" (${saved.tier_id}).`);
-      await Promise.all([loadAll(), onRefreshWorkspace()]);
-    } catch (err: unknown) {
-      setError(formatErrorInline(err));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handleApproveCurated = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -254,10 +181,6 @@ export function ControlTowerView({
       const res = await enrollNode({
         node_id: newNodeId.trim(),
         mode: newNodeMode,
-        ...((newNodeMode === "provider-edge" || newNodeMode === "hospital-edge") &&
-        newNodeOrgId.trim()
-          ? { org_id: newNodeOrgId.trim() }
-          : {}),
         provider_pubkey:
           newNodeLabel.trim().length === 64 ? newNodeLabel.trim() : "a".repeat(64),
       });
@@ -287,40 +210,9 @@ export function ControlTowerView({
     }
   };
 
-  const handleFederationAction = async (
-    peer: FederationPeerRecord,
-    action: "approve" | "reject" | "suspend" | "sync",
-  ) => {
-    setBusy(true);
-    setError(null);
-    setStatusMsg(null);
-    try {
-      if (action === "approve") {
-        const updated = await approveAdminFederationPeer(peer.id);
-        setStatusMsg(`Approved federation peer ${updated.org_name || updated.label} (${updated.id}).`);
-      } else if (action === "reject") {
-        const updated = await rejectAdminFederationPeer(peer.id);
-        setStatusMsg(`Rejected federation peer ${updated.org_name || updated.label} (${updated.id}).`);
-      } else if (action === "suspend") {
-        const updated = await suspendAdminFederationPeer(peer.id);
-        setStatusMsg(`Suspended federation peer ${updated.org_name || updated.label} (${updated.id}).`);
-      } else {
-        const res = await syncAdminFederationPeer(peer.id);
-        setStatusMsg(
-          `Synced federation peer ${res.peer.org_name || res.peer.label}: ${res.synced_offers} offer(s).`,
-        );
-      }
-      await loadAll();
-    } catch (err: unknown) {
-      setError(formatErrorInline(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleCreditInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
-    const amount = Number(creditAmountAct);
+    const amount = Number(creditAmountEur);
     if (!creditOrgId.trim() || !Number.isFinite(amount) || amount <= 0) return;
     setBusy(true);
     setError(null);
@@ -328,11 +220,11 @@ export function ControlTowerView({
     try {
       const res = await creditOrgInvoice({
         org_id: creditOrgId.trim(),
-        amount_milli_act: Math.round(amount * 1000),
+        amount_milli_eur: Math.round(amount * 1000),
         reference: creditReference.trim() || `INV-${Date.now()}`,
       });
       setStatusMsg(
-        `Credited ${formatMilliAct(res.delta_act)} to ${res.org_id} (new balance: ${formatMilliAct(res.balance_after_act)}).`,
+        `Credited ${formatMilliEur(res.delta_milli_eur)} to ${res.org_id} (new balance: ${formatMilliEur(res.balance_after_milli_eur)}).`,
       );
       await onRefreshWorkspace();
     } catch (err: unknown) {
@@ -347,26 +239,15 @@ export function ControlTowerView({
       ? pluginVersions
       : pluginVersions.filter((p) => p.visibility === pluginVisFilter);
 
-  const pendingFederationCount = federationPeers.filter((p) => p.status === "pending").length;
-
   const navTabs: { id: ControlTowerTab; label: string }[] = [
-    { id: "tiers", label: `Tier Definitions (${tiers.length})` },
-    { id: "org-tier", label: "Organization tiers" },
     { id: "curated", label: `Curated Digests (${curatedApprovals.length})` },
     { id: "plugins", label: `Plugin Review (${pluginVersions.length})` },
     { id: "nodes", label: `Worker Fleet (${nodes.length})` },
-    {
-      id: "federation",
-      label:
-        pendingFederationCount > 0
-          ? `Federation Peers (${federationPeers.length} · ${pendingFederationCount} pending)`
-          : `Federation Peers (${federationPeers.length})`,
-    },
     { id: "billing", label: "Invoice EUR Balance" },
     { id: "monitor", label: `Enumeration Monitor (${enumEntries.length})` },
   ];
 
-  const visibleError = error ?? loadErrors[tab === "org-tier" ? "tiers" : tab];
+  const visibleError = error ?? loadErrors[tab];
 
   return (
     <div className="bc-page-scroll" data-testid="control-tower-view">
@@ -376,7 +257,7 @@ export function ControlTowerView({
             <h1 className="bc-page-title">Platform Control Tower</h1>
             <p className="bc-page-subtitle">
               Platform Administrator (<span className="mono">{principal.email ?? principal.actor}</span>
-              ) · Runtime Tiers, Curated Digest Approvals, Worker Fleet &amp; Security Monitors
+              ) · Curated Digest Approvals, Plugin Review, Worker Fleet &amp; Security Monitors
             </p>
           </div>
         </div>
@@ -433,215 +314,6 @@ export function ControlTowerView({
             }}
           >
             {statusMsg}
-          </div>
-        )}
-
-        {tab === "org-tier" && (
-          <ConfirmTierChange tiers={tiers} onConfirmed={setStatusMsg} />
-        )}
-
-        {tab === "tiers" && (
-          <div className="bc-settings-stack" data-testid="tier-definitions-list">
-            {tiers.map((tier) => {
-              const draft = tierDrafts[tier.tier_id] ?? tier;
-              return (
-                <div
-                  key={tier.tier_id}
-                  className="bc-card"
-                  data-testid={`tier-card-${tier.tier_id}`}
-                >
-                  <div className="bc-card-header" style={{ marginBottom: 10 }}>
-                    <div>
-                      <span className="bc-card-title">{draft.name}</span>{" "}
-                      <span className="bc-chip mono">{tier.tier_id}</span>
-                    </div>
-                    <button
-                      type="button"
-                      data-testid={`save-tier-btn-${tier.tier_id}`}
-                      className="bc-btn bc-btn-primary bc-btn-sm"
-                      disabled={busy}
-                      onClick={() => void handleSaveTier(tier.tier_id)}
-                    >
-                      Save Tier Policy
-                    </button>
-                  </div>
-
-                  <div className="bc-form-grid">
-                    <label className="bc-field">
-                      <span className="bc-field-label">Display Name</span>
-                      <input
-                        type="text"
-                        className="bc-input"
-                        value={draft.name}
-                        onChange={(e) =>
-                          updateTierDraftField(tier.tier_id, "name", e.target.value)
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Duration Days (blank = unlimited)</span>
-                      <input
-                        type="number"
-                        className="bc-input mono"
-                        value={draft.duration_days ?? ""}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "duration_days",
-                            e.target.value.trim() ? Number(e.target.value) : null,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Max Users (blank = unlimited)</span>
-                      <input
-                        type="number"
-                        className="bc-input mono"
-                        value={draft.max_users ?? ""}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "max_users",
-                            Number(e.target.value) || 1,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Initial balance (EUR)</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min={0}
-                        data-testid={`tier-initial-act-${tier.tier_id}`}
-                        className="bc-input mono"
-                        value={draft.initial_act_milli / 1000}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "initial_act_milli",
-                            Math.round((Number(e.target.value) || 0) * 1000),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">
-                        Daily spending breaker (EUR)
-                      </span>
-                      <input
-                        type="number"
-                        data-testid={`tier-daily-breaker-${tier.tier_id}`}
-                        className="bc-input mono"
-                        step="0.01"
-                        min={0}
-                        value={draft.daily_act_breaker_milli == null ? "" : draft.daily_act_breaker_milli / 1000}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "daily_act_breaker_milli",
-                            e.target.value.trim() ? Math.round(Number(e.target.value) * 1000) : null,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Burst Rate Limit (RPM)</span>
-                      <input
-                        type="number"
-                        className="bc-input mono"
-                        value={draft.burst_rpm}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "burst_rpm",
-                            Number(e.target.value) || 60,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Storage Quota (Bytes)</span>
-                      <input
-                        type="number"
-                        className="bc-input mono"
-                        value={draft.storage_quota_bytes ?? ""}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "storage_quota_bytes",
-                            Number(e.target.value) || 0,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="bc-field">
-                      <span className="bc-field-label">Max Retained Snapshots / Catalog</span>
-                      <input
-                        type="number"
-                        className="bc-input mono"
-                        value={draft.max_snapshots_per_catalog ?? ""}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "max_snapshots_per_catalog",
-                            Number(e.target.value) || 1,
-                          )
-                        }
-                      />
-                    </label>
-
-                    {(["default_module_offer_ids", "default_dataset_offer_ids"] as const).map(field => (
-                      <label className="bc-field" key={field}>
-                        <span className="bc-field-label">
-                          {field === "default_module_offer_ids" ? "Module" : "Data"} offer IDs (one per line)
-                        </span>
-                        <textarea
-                          key={tier.updated_at}
-                          data-testid={`tier-${field}-${tier.tier_id}`}
-                          className="bc-input mono"
-                          rows={2}
-                          defaultValue={(draft[field] ?? []).join("\n")}
-                          onChange={e => updateTierDraftField(tier.tier_id, field,
-                            [...new Set(e.target.value.split(/\s+/).filter(Boolean))])}
-                        />
-                      </label>
-                    ))}
-
-                    <label
-                      style={{
-                        gridColumn: "1 / -1",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 8,
-                        fontSize: 13,
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={draft.allow_custom_modules}
-                        onChange={(e) =>
-                          updateTierDraftField(
-                            tier.tier_id,
-                            "allow_custom_modules",
-                            e.target.checked,
-                          )
-                        }
-                      />
-                      <span>Allow custom organization OCI modules</span>
-                    </label>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         )}
 
@@ -884,7 +556,7 @@ export function ControlTowerView({
             <div className="bc-card">
               <div className="bc-card-header">
                 <span className="bc-card-title">
-                  Enroll Cloud-Pool, Query-Provider, or Provider-Edge Node
+                  Enroll Cloud-Pool Worker Node
                 </span>
               </div>
               <form
@@ -914,26 +586,8 @@ export function ControlTowerView({
                     onChange={(e) => setNewNodeMode(e.target.value as NodeMode)}
                   >
                     <option value="cloud-pool">cloud-pool</option>
-                    <option value="provider-edge">provider-edge</option>
-                    <option value="query-provider">query-provider</option>
-                    <option value="hospital-edge">hospital-edge (legacy alias)</option>
                   </select>
                 </label>
-
-                {(newNodeMode === "provider-edge" || newNodeMode === "hospital-edge") && (
-                  <label className="bc-field">
-                    <span className="bc-field-label">Owner Org ID</span>
-                    <input
-                      type="text"
-                      required
-                      data-testid="ct-enroll-node-org-id"
-                      className="bc-input mono"
-                      placeholder="org-zurich-proteomics"
-                      value={newNodeOrgId}
-                      onChange={(e) => setNewNodeOrgId(e.target.value)}
-                    />
-                  </label>
-                )}
 
                 <label className="bc-field">
                   <span className="bc-field-label">Provider Pubkey (64-hex, optional)</span>
@@ -1045,150 +699,6 @@ export function ControlTowerView({
           </div>
         )}
 
-        {tab === "federation" && (
-          <div className="bc-card" data-testid="ct-federation-peers-panel">
-            <div className="bc-card-header" style={{ marginBottom: 10 }}>
-              <div>
-                <span className="bc-card-title">
-                  Federation Peers ({federationPeers.length})
-                </span>
-                <p className="bc-caption" style={{ marginTop: 2 }}>
-                  Client Cloud hubs register as <code className="mono">pending</code> with BIP340
-                  proof-of-possession and require Platform Administrator approval before exchanging
-                  federated offers or tokens.
-                </p>
-              </div>
-              <button
-                type="button"
-                className="bc-btn bc-btn-sm"
-                disabled={busy}
-                onClick={() => void loadAll()}
-              >
-                Refresh
-              </button>
-            </div>
-
-            {federationPeers.length === 0 ? (
-              <div className="bc-empty-note">No federation peers registered yet.</div>
-            ) : (
-              <div className="table-scroll">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Organization / Label</th>
-                      <th>Peer URL</th>
-                      <th>Pubkey</th>
-                      <th>Status</th>
-                      <th>Last Sync</th>
-                      <th style={{ textAlign: "right" }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {federationPeers.map((peer) => {
-                      const badgeClass =
-                        peer.status === "approved"
-                          ? "bc-badge-success"
-                          : peer.status === "pending"
-                            ? "bc-badge-warn"
-                            : "bc-badge-danger";
-                      return (
-                        <tr key={peer.id} data-testid={`federation-peer-row-${peer.id}`}>
-                          <td>
-                            <div style={{ fontWeight: 500 }}>
-                              {peer.org_name || peer.label || peer.id}
-                            </div>
-                            <div className="bc-caption mono">
-                              {peer.id} · {peer.role}
-                            </div>
-                          </td>
-                          <td className="mono bc-caption">
-                            <div>{peer.peer_url || peer.origin}</div>
-                            {peer.last_error && (
-                              <div style={{ color: "var(--bc-danger)", marginTop: 2 }}>
-                                {peer.last_error}
-                              </div>
-                            )}
-                          </td>
-                          <td className="mono bc-caption">
-                            {peer.peer_pubkey ? `${peer.peer_pubkey.slice(0, 16)}…` : "—"}
-                          </td>
-                          <td>
-                            <span
-                              className={`bc-badge ${badgeClass}`}
-                              data-testid={`federation-peer-status-${peer.id}`}
-                            >
-                              {peer.status}
-                            </span>
-                          </td>
-                          <td className="mono bc-caption">
-                            {peer.last_sync_at
-                              ? new Date(peer.last_sync_at).toLocaleString()
-                              : "Never"}
-                          </td>
-                          <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                            <div style={{ display: "inline-flex", gap: 6 }}>
-                              {peer.status !== "approved" && (
-                                <button
-                                  type="button"
-                                  data-testid={`federation-approve-${peer.id}`}
-                                  className="bc-btn bc-btn-primary bc-btn-sm"
-                                  disabled={busy}
-                                  onClick={() => void handleFederationAction(peer, "approve")}
-                                >
-                                  Approve
-                                </button>
-                              )}
-                              {peer.status === "pending" && (
-                                <button
-                                  type="button"
-                                  data-testid={`federation-reject-${peer.id}`}
-                                  className="bc-btn bc-btn-sm"
-                                  disabled={busy}
-                                  onClick={() => void handleFederationAction(peer, "reject")}
-                                >
-                                  Reject
-                                </button>
-                              )}
-                              {peer.status === "approved" && (
-                                <>
-                                  <button
-                                    type="button"
-                                    data-testid={`federation-sync-${peer.id}`}
-                                    className="bc-btn bc-btn-sm"
-                                    disabled={busy}
-                                    onClick={() => void handleFederationAction(peer, "sync")}
-                                  >
-                                    Sync
-                                  </button>
-                                  <button
-                                    type="button"
-                                    data-testid={`federation-suspend-${peer.id}`}
-                                    className="bc-btn bc-btn-sm"
-                                    disabled={busy}
-                                    onClick={() => void handleFederationAction(peer, "suspend")}
-                                  >
-                                    Suspend
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === "federation" && (
-          <div style={{ marginTop: 14 }}>
-            <ClientCloudImportPanel onImported={loadAll} />
-          </div>
-        )}
-
         {tab === "billing" && (
           <div className="bc-card">
             <div className="bc-card-header">
@@ -1225,10 +735,10 @@ export function ControlTowerView({
                   step="0.01"
                   min="0.01"
                   required
-                  data-testid="invoice-amount-act-input"
+                  data-testid="invoice-amount-eur-input"
                   className="bc-input mono"
-                  value={creditAmountAct}
-                  onChange={(e) => setCreditAmountAct(e.target.value)}
+                  value={creditAmountEur}
+                  onChange={(e) => setCreditAmountEur(e.target.value)}
                 />
               </label>
 

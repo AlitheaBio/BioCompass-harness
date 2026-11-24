@@ -31,7 +31,7 @@ test("a native workspace installs and opens the chosen downloadable release with
       const version = wrongRelease ? "2.0.0" : plugin_version;
       return json({ plugin_id: pluginId, plugin_version, installed: true, plugin: {
         manifest: { id: pluginId, name: "Color sample", version, image: `fixture/color@${digest(version)}`,
-          description: "", category: "utility", network: "none", price_milli_act: 0,
+          description: "", category: "utility", network: "none", price_milli_eur: 0,
           resources: { cpus: 1, memory_mb: 64, timeout_sec: 15 }, inputs: { schema: {} }, views: [] },
         installed: true, views: [], effective_offers: [], author: "Fixture", execution_target: "local",
         execution_label: "Local", has_custom_ui: true, ui_entry_url: `/test-fixture/form/${version}`,
@@ -40,7 +40,7 @@ test("a native workspace installs and opens the chosen downloadable release with
     const fixtures: Record<string, unknown> = {
       "auth/whoami": { org_id: "local", actor: "local-user", role: "owner" },
       catalogs: { catalogs: [] }, grants: { grants: [], grant_usage: [] }, plugins: { plugins: [] },
-      ledger: { transactions: [], available_milli_act: 0, reserved_milli_act: 0 },
+      ledger: { transactions: [], available_milli_eur: 0, reserved_milli_eur: 0 },
       projects: { projects: [] }, runs: { runs: [] }, sessions: { sessions: [] },
       "saved-views": { views: [] }, "llm/config": { configured: false, providers: [] },
     };

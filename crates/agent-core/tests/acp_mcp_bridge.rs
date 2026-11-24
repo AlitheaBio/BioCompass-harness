@@ -4,8 +4,8 @@ use biocompass_agent_core::llm::{LlmProviderConfig, LlmWireProtocol};
 use biocompass_agent_core::mcp::ScopedMcpServer;
 use biocompass_agent_core::{AgentConfig, AgentRuntime, AgentStreamEvent};
 use biocompass_core_traits::{
-    CreditAmountAct, DatasetGrant, LocalFsBlobStore, OrgId, SessionEventKind, SessionRecord,
-    SessionStore, SqliteActLedger, SqliteSessionStore,
+    DatasetGrant, LocalFsBlobStore, OrgId, SessionEventKind, SessionRecord,
+    SessionStore, SqliteSessionStore,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
@@ -21,7 +21,6 @@ async fn build_test_runtime(tmp: &TempDir) -> (Arc<SqliteSessionStore>, Arc<Loca
     let keys = NodeKeypairSet::load_or_generate(tmp.path().join("keys")).expect("keys");
     let session_store = Arc::new(SqliteSessionStore::in_memory().expect("session store"));
     let blob_store = Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).expect("blob store"));
-    let ledger = Arc::new(SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(50)).expect("ledger"));
     let oci_registry = Arc::new(OciDistributionClient::new(true).expect("oci registry"));
     let oci_runner = Arc::new(OciContainerRunner::detect().await.expect("oci runner"));
 
@@ -31,7 +30,6 @@ async fn build_test_runtime(tmp: &TempDir) -> (Arc<SqliteSessionStore>, Arc<Loca
             session_store: session_store.clone(),
             blob_store: blob_store.clone(),
             oci_registry,
-            payment_gateway: ledger,
             oci_runner,
             stage_root_dir: tmp.path().join("stages"),
             allow_local_dev_tags: false,

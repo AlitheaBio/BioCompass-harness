@@ -962,7 +962,7 @@ mod finish_run_tests {
             "run_id":"run-finish", "org_id":"org-fixture", "session_id": session_id,
             "plugin_id":"echo", "plugin_version":"1", "status":"running", "params":{},
             "quote":{"run_id":"run-finish","plugin_id":"echo","plugin_version":"1",
-                "image_ref":"echo:1","target_node_id":"worker","estimated_cost_act":1,
+                "image_ref":"echo:1","target_node_id":"worker","estimated_cost_milli_eur":1,
                 "workload_hash":"test","froglet_quote":{},"expires_at":"2026-01-01T00:00:00Z"},
             "artifacts":[], "froglet_chain":[], "receipt_verified":false, "logs":[],
             "created_at":"2026-01-01T00:00:00Z"

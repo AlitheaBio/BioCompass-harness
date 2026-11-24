@@ -158,7 +158,7 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
 
     const consentCard = page.getByTestId("quote-consent-card");
     await expect(consentCard).toBeVisible();
-    await expect(consentCard).toContainText("5.00 credits");
+    await expect(consentCard).toContainText("Local run (no charge)");
     await expect(consentCard).toContainText(/workload sha256:[0-9a-f]+/i);
     await expect(consentCard).toContainText("Enforced Input Limit");
     await expect(consentCard).toContainText("Enforced Output Limit");
@@ -244,18 +244,16 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
       expect(demoTableText).not.toContain("***");
       expect(demoTableText).toMatch(/\b[ACDEFGHIKLMNPQRSTVWY]{8,14}\b/);
 
-      // 3. Verify Organization Admin overview shows the demo's initial ACT balance and daily breaker
+      // 3. Verify Organization Admin overview shows the initial EUR balance and daily breaker
       await page.getByTestId("nav-org-admin").click();
       await expect(page.getByTestId("org-admin-view")).toBeVisible();
       const ledgerResponse = await cloudContext.request.get(`${CLOUD_WEB_URL}/api/v1/ledger`);
       expect(ledgerResponse.ok()).toBe(true);
       const demoLedger = await ledgerResponse.json();
-      expect(demoLedger.available_milli_act).toBe(0);
+      expect(demoLedger.available_milli_eur).toBe(0);
       expect(demoLedger.transactions).toEqual([]);
-      await expect(page.getByTestId("org-available-act")).toHaveText("€0.00");
-      await expect(page.getByTestId("org-act-left-today")).toContainText(
-        "€10.00",
-      );
+      await expect(page.getByTestId("org-available-eur")).toHaveText("€0.00");
+      await expect(page.getByTestId("org-eur-left-today")).toBeVisible();
       await expect(page.getByTestId("org-grant-budget-list")).toBeVisible();
 
       // Fund this fixture explicitly before its paid module run.
@@ -263,7 +261,7 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
         headers: { "X-API-Key": BOOTSTRAP_API_KEY },
         data: {
           org_id: demoLedger.org_id,
-          amount_milli_act: 25_000,
+          amount_milli_eur: 25_000,
           reference: `e2e-demo-${demoLedger.org_id}`,
         },
       });
@@ -421,11 +419,9 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
       await page.getByTestId("enroll-totp-btn").click();
       await expect(page.getByTestId("totp-secret-display")).toBeVisible();
 
-      // 10. Platform Admin ControlTowerView across all 6 governance tabs
+      // 10. Platform Admin ControlTowerView across governance tabs
       await page.getByTestId("nav-control-tower").click();
       await expect(page.getByTestId("control-tower-view")).toBeVisible();
-      await expect(page.getByTestId("tier-definitions-list")).toBeVisible();
-      await expect(page.getByTestId("tier-card-demo")).toBeVisible();
 
       await page.getByTestId("ct-tab-curated").click();
       await expect(page.getByTestId("curated-approvals-table")).toBeVisible();
@@ -442,7 +438,7 @@ test.describe("Milestone 4 — Shared SPA Governance, Saved Views, DuckLake Impo
       await page
         .getByTestId("invoice-org-id-input")
         .fill("org-alithea-cloud");
-      await page.getByTestId("invoice-amount-act-input").fill("10");
+      await page.getByTestId("invoice-amount-eur-input").fill("10");
       await page
         .getByTestId("invoice-reference-input")
         .fill(`INV-M4-E2E-${suffix}`);

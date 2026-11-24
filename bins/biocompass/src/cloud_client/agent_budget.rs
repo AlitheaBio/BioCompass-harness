@@ -7,19 +7,19 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ExecutionBudget {
-    Finite { limit_milli_act: u64 },
+    Finite { limit_milli_eur: u64 },
     Unlimited,
 }
 
 impl Default for ExecutionBudget {
     fn default() -> Self {
-        Self::Finite { limit_milli_act: 0 }
+        Self::Finite { limit_milli_eur: 0 }
     }
 }
 
 impl ExecutionBudget {
     pub(crate) fn requires_hosted_execution(&self) -> bool {
-        !matches!(self, Self::Finite { limit_milli_act: 0 })
+        !matches!(self, Self::Finite { limit_milli_eur: 0 })
     }
 }
 
@@ -43,10 +43,10 @@ impl BudgetedAgentPort {
 
         let mut body = json!({"session_id": session});
         match budget {
-            ExecutionBudget::Finite { limit_milli_act } => {
-                body["budget_milli_act"] =
-                    json!(i64::try_from(*limit_milli_act).map_err(
-                        |_| CompassError::Validation("ACT allowance is too large".into())
+            ExecutionBudget::Finite { limit_milli_eur } => {
+                body["budget_milli_eur"] =
+                    json!(i64::try_from(*limit_milli_eur).map_err(
+                        |_| CompassError::Validation("EUR allowance is too large".into())
                     )?);
             }
             ExecutionBudget::Unlimited => body["unlimited"] = json!(true),
@@ -69,7 +69,7 @@ impl BudgetedAgentPort {
     }
 
     async fn admit(&self, quote: &RunQuote) -> CompassResult<(AdmissionStatus, String)> {
-        let cost = quote.estimated_cost_act.display_act();
+        let cost = quote.estimated_cost_milli_eur.display_eur();
         if !self.enabled {
             return Ok((
                 AdmissionStatus::ApprovalRequired,
@@ -112,7 +112,7 @@ impl BudgetedAgentPort {
                 struct Conflict {
                     code: Option<String>,
                     error: String,
-                    remaining_milli_act: Option<i64>,
+                    remaining_milli_eur: Option<MilliEur>,
                 }
                 let body: Conflict = resp.json().await.map_err(|e| {
                     CompassError::Internal(format!("decode agent budget conflict: {e}"))
@@ -120,14 +120,14 @@ impl BudgetedAgentPort {
                 if body.code.as_deref() != Some("agent_budget_exhausted") {
                     return Err(CompassError::IntegrityViolation(body.error));
                 }
-                let remaining = body.remaining_milli_act.ok_or_else(|| {
-                    CompassError::Internal("budget response omitted remaining ACT".into())
+                let remaining = body.remaining_milli_eur.ok_or_else(|| {
+                    CompassError::Internal("budget response omitted remaining EUR".into())
                 })?;
                 Ok((
                     AdmissionStatus::ApprovalRequired,
                     format!(
                         "This execution has {} remaining. Please approve the {cost} quote to continue.",
-                        CreditAmountAct::from_milli_act(remaining).display_act()
+                        remaining.display_eur()
                     ),
                 ))
             }
@@ -199,7 +199,7 @@ impl AgentExecutionPort for BudgetedAgentPort {
             .hub
             .prepare_bound_quote(req, Some(self.execution_id))
             .await?;
-        if !self.enabled && quote.estimated_cost_act == CreditAmountAct::ZERO {
+        if !self.enabled && quote.estimated_cost_milli_eur == MilliEur::ZERO {
             // Keep the existing free-quote handoff to the originating client.
             return Ok((quote, None));
         }

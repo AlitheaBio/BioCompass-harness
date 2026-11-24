@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use biocompass_core_traits::{
-    CreditAmountAct, LedgerTxKind, LocalFsBlobStore, OrgId, PaymentGateway, PluginId,
-    PrepareRunRequest, RunDispatcher, RunId, RunStatus, SessionEventKind, SessionStore,
-    SqliteActLedger, SqliteSessionStore, StandardOciPolicyVerifier,
+    LocalFsBlobStore, MilliEur, OrgId, PluginId, PrepareRunRequest, RunDispatcher, RunId,
+    RunStatus, SessionEventKind, SessionStore, SqliteSessionStore, StandardOciPolicyVerifier,
 };
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
 use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
@@ -18,7 +17,6 @@ use tempfile::tempdir;
 struct Native {
     runtime: InProcessNodeRuntime,
     store: Arc<SqliteSessionStore>,
-    ledger: Arc<SqliteActLedger>,
 }
 
 impl Native {
@@ -28,13 +26,6 @@ impl Native {
 
     fn with_engine(dir: &Path, binary_path: std::path::PathBuf) -> Self {
         let store = Arc::new(SqliteSessionStore::open(dir.join("sessions.sqlite")).unwrap());
-        let ledger = Arc::new(
-            SqliteActLedger::open(
-                dir.join("ledger.sqlite"),
-                CreditAmountAct::from_whole_act(10),
-            )
-            .unwrap(),
-        );
         let engine = DetectedEngine {
             kind: EngineKind::Docker,
             binary_path,
@@ -44,7 +35,6 @@ impl Native {
         let runtime = InProcessNodeRuntime::new(NodeRuntimeDeps {
             keys: NodeKeypairSet::load_or_generate(dir.join("keys")).unwrap(),
             session_store: store.clone(),
-            payment_gateway: ledger.clone(),
             blob_store: Arc::new(LocalFsBlobStore::new(dir.join("store")).unwrap()),
             oci_registry: Arc::new(StandardOciPolicyVerifier::workstation_dev()),
             oci_runner: Arc::new(OciContainerRunner::from_engine(engine)),
@@ -52,11 +42,7 @@ impl Native {
             allow_local_dev_tags: true,
         })
         .unwrap();
-        Self {
-            runtime,
-            store,
-            ledger,
-        }
+        Self { runtime, store }
     }
 
     async fn prepare(&self, dir: &Path, org: &OrgId) -> RunId {
@@ -79,7 +65,7 @@ name = "Echo"
 version = "1.0.0"
 execution = "local"
 network = "none"
-price_milli_act = 2000
+price_milli_eur = 2000
 image = "localhost/example/echo@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
 [resources]
@@ -136,35 +122,25 @@ async fn startup_preserves_a_prepared_quote_that_was_never_approved() {
         serde_json::to_value(after).unwrap(),
         serde_json::to_value(before).unwrap()
     );
-    assert!(
-        restarted
-            .ledger
-            .run_reservation(&org, &rid)
-            .await
-            .unwrap()
-            .is_none()
-    );
 }
 
-async fn abandoned_reservation(legacy_running_row: bool) {
+#[tokio::test]
+async fn interrupted_running_record_without_signed_output_is_failed_once() {
     let dir = tempdir().unwrap();
     let org = OrgId::from("org-regression");
     let original = Native::open(dir.path());
     let rid = original.prepare(dir.path(), &org).await;
     let mut original_row = original.store.get_run(&rid).await.unwrap();
     let session = original_row.session_id.clone().unwrap();
-    let price = original_row.quote.estimated_cost_act;
-    assert_eq!(price, CreditAmountAct::from_whole_act(2));
+    let price = original_row.quote.estimated_cost_milli_eur;
+    assert_eq!(price, MilliEur::from_eur(2));
     let key = "original-approval";
-    original
-        .ledger
-        .reserve_for_run(&org, &rid, price, key)
-        .await
-        .unwrap();
-    if legacy_running_row {
-        original_row.status = RunStatus::Running;
-        original.store.save_run(&original_row).await.unwrap();
-    }
+    original_row.status = RunStatus::Running;
+    original_row.froglet_chain.push(json!({
+        "artifact_type": "deal",
+        "payload": { "client_nonce": key }
+    }));
+    original.store.save_run(&original_row).await.unwrap();
     drop(original);
 
     let first = Native::open(dir.path());
@@ -217,34 +193,6 @@ async fn abandoned_reservation(legacy_running_row: bool) {
         serde_json::to_value(&left).unwrap(),
         serde_json::to_value(final_row).unwrap()
     );
-    let kinds: Vec<_> = restarted
-        .ledger
-        .list_transactions(&org)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|t| t.run_id.as_ref() == Some(&rid))
-        .map(|t| t.kind)
-        .collect();
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == LedgerTxKind::RunReserve)
-            .count(),
-        1
-    );
-    assert_eq!(
-        kinds
-            .iter()
-            .filter(|k| **k == LedgerTxKind::RunRefund)
-            .count(),
-        1
-    );
-    assert_eq!(kinds.len(), 2);
-    assert_eq!(
-        restarted.ledger.available_balance(&org).await.unwrap(),
-        CreditAmountAct::from_whole_act(10)
-    );
     let events = restarted.store.list_events(&session).await.unwrap();
     assert_eq!(
         events
@@ -254,16 +202,6 @@ async fn abandoned_reservation(legacy_running_row: bool) {
             .count(),
         1
     );
-}
-
-#[tokio::test]
-async fn crash_between_reservation_and_running_is_refunded_once() {
-    abandoned_reservation(false).await;
-}
-
-#[tokio::test]
-async fn legacy_running_record_without_signed_output_is_refunded_once() {
-    abandoned_reservation(true).await;
 }
 
 #[cfg(unix)]
@@ -286,10 +224,9 @@ esac
 }
 
 /// The engine CLI accepts the run but stops responding to both `run` and cleanup.
-/// Observe the original wallet independently of the supervisor's in-memory view.
 #[cfg(unix)]
 #[tokio::test]
-async fn paid_timeout_refunds_once_while_engine_cleanup_is_unresponsive() {
+async fn timeout_fails_once_while_engine_cleanup_is_unresponsive() {
     use std::time::{Duration, Instant};
 
     let dir = tempdir().unwrap();
@@ -311,45 +248,29 @@ async fn paid_timeout_refunds_once_while_engine_cleanup_is_unresponsive() {
     let supervisor = Native::with_engine(dir.path(), engine.clone());
     let rid = supervisor.prepare_with_timeout(dir.path(), &org, 1).await;
     let key = "approved-timeout-only-once";
-    let inspection = rusqlite::Connection::open_with_flags(
-        dir.path().join("ledger.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let balance = || {
-        let sql =
-            "SELECT available_milli_act, reserved_milli_act FROM org_balances WHERE org_id=?1";
-        inspection
-            .query_row(sql, [org.as_str()], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })
-            .unwrap()
-    };
     let started = Instant::now();
     let failed = tokio::time::timeout(Duration::from_secs(12), async {
         let confirm = supervisor.runtime.confirm_run(&rid, key);
         tokio::pin!(confirm);
-        let observe_reserved = async {
+        let observe_running = async {
             while !dir.path().join("engine-events").exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(balance(), (8_000, 2_000));
-            eprintln!(
-                "Native engine accepted run {}; observed SQLite 8000 available/2000 reserved",
-                rid.as_str()
+            assert_eq!(
+                supervisor.store.get_run(&rid).await.unwrap().status,
+                RunStatus::Running
             );
         };
         tokio::select! {
             done = &mut confirm => panic!("confirmation ended before engine execution: {done:?}"),
-            () = observe_reserved => (),
+            () = observe_running => (),
         }
         confirm.await.unwrap()
     })
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "unresponsive engine held the reservation: {:?}, engine commands: {:?}",
-            balance(),
+            "unresponsive engine blocked confirmation; engine commands: {:?}",
             fs::read_to_string(dir.path().join("engine-events"))
         )
     });
@@ -361,7 +282,6 @@ async fn paid_timeout_refunds_once_while_engine_cleanup_is_unresponsive() {
     );
     assert!(failed.receipt_verified && failed.froglet_receipt.is_some());
     assert!(failed.result_json.is_none() && failed.artifacts.is_empty());
-    assert_eq!(balance(), (10_000, 0));
     drop(supervisor);
 
     let restarted = Native::with_engine(dir.path(), engine);
@@ -379,7 +299,6 @@ async fn paid_timeout_refunds_once_while_engine_cleanup_is_unresponsive() {
         fs::read_to_string(dir.path().join("engine-events")).unwrap(),
         "run\nrm\n"
     );
-    assert_eq!(balance(), (10_000, 0));
     let blobs = LocalFsBlobStore::new(dir.path().join("store")).unwrap();
     for suffix in ["result.json", "artifacts/preview.csv"] {
         let key = format!("runs/{}/{suffix}", rid.as_str());
@@ -390,28 +309,10 @@ async fn paid_timeout_refunds_once_while_engine_cleanup_is_unresponsive() {
             "timeout published an unverified staged output {key}"
         );
     }
-    let mut stmt = inspection.prepare(
-        "SELECT json_extract(kind,'$'),delta_milli_act FROM ledger_txs WHERE org_id=?1 AND run_id=?2 ORDER BY kind"
-    ).unwrap();
-    let entries: Vec<(String, i64)> = stmt
-        .query_map([org.as_str(), rid.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(
-        entries,
-        [
-            ("run_refund".to_owned(), 2_000),
-            ("run_reserve".to_owned(), -2_000)
-        ]
-    );
     eprintln!(
-        "Paid timeout {} finished in {:.3}s. Original SQLite wallet 10000 available/0 reserved after recovery and retry. Journal {:?}.",
+        "Local timeout {} finished in {:.3}s with verified failed receipt and zero leaked outputs.",
         rid.as_str(),
-        started.elapsed().as_secs_f64(),
-        entries
+        started.elapsed().as_secs_f64()
     );
 }
 

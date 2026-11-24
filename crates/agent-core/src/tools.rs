@@ -691,7 +691,7 @@ pub async fn execute_agent_tool_with_options(
                 }))
             }
             forbidden if forbidden.contains("confirm") => Err(CompassError::AccessDenied(
-                "CONSENT_GATE_ENFORCED: agents cannot confirm runs or spend ACT credits; only prepare_plugin_run is permitted".into(),
+                "CONSENT_GATE_ENFORCED: agents cannot confirm runs or spend EUR credits; only prepare_plugin_run is permitted".into(),
             )),
             other => Err(CompassError::Validation(format!(
                 "unknown agent tool '{other}'"

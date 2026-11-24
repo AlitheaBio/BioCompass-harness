@@ -1,10 +1,7 @@
 import type {
-  HealthStatus,
-  LedgerState,
   ModuleRunsIn,
   ModuleSource,
   PluginSummary,
-  RunQuote,
 } from "./types";
 
 function sanitizeHandoffUrl(raw: string): string | null {
@@ -52,7 +49,7 @@ export function inferModuleSource(plugin: Pick<PluginSummary, "source" | "execut
 export function inferModuleRunsIn(plugin: Pick<PluginSummary, "runs_in" | "execution_target">): ModuleRunsIn {
   if (plugin.runs_in) return plugin.runs_in;
   if (plugin.execution_target === "local") return "local";
-  if (plugin.execution_target === "froglet_node") return "provider_edge";
+  if (plugin.execution_target === "froglet_node") return "network_provider";
   return "cloud";
 }
 
@@ -82,8 +79,6 @@ export function formatModuleRunsInLabel(
       return "Local";
     case "cloud":
       return "Cloud";
-    case "provider_edge":
-      return provider ? `Runs at ${provider}` : "Provider node";
     case "network_provider":
       return provider ? `Runs at ${provider}` : "Provider node";
   }
@@ -127,7 +122,7 @@ export function resolveModuleCardActions(
     !plugin.can_install;
   const provider = plugin.provider_label?.trim() || null;
   const runsAtProviderLabel =
-    runsIn === "network_provider" || runsIn === "provider_edge"
+    runsIn === "network_provider"
       ? provider
         ? `Runs at ${provider}`
         : "Provider node"
@@ -190,22 +185,4 @@ export function networkRunHandoff(
       (handoffUrl ? "continue at the provider to run it." : "ask the provider to run it."),
     handoffUrl,
   };
-}
-
-/**
- * Plan Default #3: the laptop's local play ledger is NEVER labelled euros, whereas hosted cloud
- * and network quotes/ledgers display euros to the cent (`€X.XX`).
- */
-export function isLocalPlayLedgerContext(
-  health: Pick<HealthStatus, "mode"> | null | undefined,
-  ledger?: Pick<LedgerState, "is_local_play_ledger"> | null,
-  quote?: Pick<RunQuote, "serving_org_id" | "external_provider_org"> | null,
-): boolean {
-  if (quote && (quote.serving_org_id || quote.external_provider_org)) {
-    return false;
-  }
-  if (ledger?.is_local_play_ledger === true) {
-    return true;
-  }
-  return health?.mode === "local";
 }

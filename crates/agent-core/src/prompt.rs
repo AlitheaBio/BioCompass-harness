@@ -103,8 +103,7 @@ pub fn build_system_prompt(
                 "### `{}` (v{}, cost: {})\n- Description: {}\n- Input JSON Schema: `{}`",
                 m.id,
                 m.version,
-                // The laptop agent quotes the local play ledger: credits, never euros.
-                m.estimated_cost_act().display_local_credits(),
+                m.estimated_cost().display_eur(),
                 m.description,
                 m.inputs.schema
             );

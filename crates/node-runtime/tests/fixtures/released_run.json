@@ -29,7 +29,7 @@
     "target_node_id": "fixture-node",
     "offer_id": "standard",
     "offer_name": "Standard",
-    "estimated_cost_act": 150,
+    "estimated_cost_milli_eur": 150,
     "workload_hash": "aa2a0af9b523468545cfc5f0851fc48969769216915c870b556a32bb1b83c8f7",
     "dataset_grant_summary": null,
     "expires_at": "2026-01-01T00:00:00Z"

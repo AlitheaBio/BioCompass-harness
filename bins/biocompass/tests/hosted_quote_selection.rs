@@ -20,7 +20,7 @@ async fn hosted_prepare_rejects_a_hub_that_ignores_the_request_selection() {
                 sent.send(body).await.unwrap();
                 Json(json!({
                     "run_id":"fixture","plugin_id":"qa/echo","plugin_version":"2.0","offer_id":"standard",
-                    "image_ref":"fixture","target_node_id":"node","estimated_cost_act":0,
+                    "image_ref":"fixture","target_node_id":"node","estimated_cost_milli_eur":0,
                     "workload_hash":"hash","froglet_quote":{},"expires_at":"2030-01-01T00:00:00Z"
                 }))
             }

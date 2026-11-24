@@ -1,5 +1,5 @@
-//! Stateless `cloud-web` trait adapters delegating sessions, S3 blobs, ACT ledger, catalogs,
-//! and WSS `froglet-node` container execution to `compass-hub` over standard HTTP/SSE.
+//! Stateless `cloud-web` trait adapters delegating sessions, S3 blobs, EUR ledger, catalogs,
+//! and worker container execution to `compass-hub` over standard HTTP/SSE.
 //!
 //! Enforces Milestone 0 per-request caller authentication (`B9`), scoped blob access (`B1`),
 //! and hub-authoritative run state (`B6`).
@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode as AxumStatusCode, header};
 use axum::response::{IntoResponse, Response};
 use biocompass_agent_core::tools::AgentExecutionPort;
 use biocompass_core_traits::{
-    BlobStore, CatalogId, CompassError, CompassResult, CreditAmountAct, DatasetGrant, LedgerTx,
-    NodeId, OrgId, PaymentGateway, PluginId, PrepareRunRequest, ProjectId, ProjectRecord, QueryAst,
+    BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant, Ledger, LedgerTx, MilliEur,
+    NodeId, OrgId, PluginId, PrepareRunRequest, ProjectId, ProjectRecord, QueryAst,
     RunDispatcher, RunId, RunLogEvent, RunQuote, RunRecord, SessionEvent, SessionEventKind,
     SessionId, SessionRecord, SessionStore,
 };
@@ -370,12 +370,8 @@ impl CompassHubClient {
         let safe_path = if clean.starts_with("/plugin-ui-access/") { "/plugin-ui-access/[redacted]" } else { &clean };
         let url = format!("{}{}", self.cfg.base_url, clean);
         let path = clean.split('?').next().unwrap_or(&clean);
-        let is_shared_file = path.starts_with("/api/v1/result-shares/") && path.ends_with("/download");
         let is_prepare = method == Method::POST && path == "/api/v1/runs/prepare";
         let mut req = self.http.request(method, &url);
-        if is_shared_file && let Some(range) = incoming_headers.get(header::RANGE) {
-            req = req.header(header::RANGE, range);
-        }
 
         for name in [
             "cookie",
@@ -445,13 +441,6 @@ impl CompassHubClient {
                 && let Ok(hv) = HeaderValue::from_bytes(val.as_bytes())
             {
                 resp.headers_mut().insert(hdr, hv);
-            }
-        }
-        if is_shared_file {
-            for hdr in [header::CONTENT_LENGTH, header::CONTENT_RANGE, header::ACCEPT_RANGES] {
-                if let Some(value) = upstream_headers.get(&hdr) {
-                    resp.headers_mut().insert(hdr, value.clone());
-                }
             }
         }
         for set_cookie in upstream_headers.get_all(header::SET_COOKIE) {
@@ -919,21 +908,21 @@ impl BlobStore for CompassHubClient {
 }
 
 #[async_trait]
-impl PaymentGateway for CompassHubClient {
-    async fn available_balance(&self, _org_id: &OrgId) -> CompassResult<CreditAmountAct> {
+impl Ledger for CompassHubClient {
+    async fn available_balance(&self, _org_id: &OrgId) -> CompassResult<MilliEur> {
         #[derive(Deserialize)]
         struct Resp {
-            available_milli_act: i64,
+            available_milli_eur: MilliEur,
         }
         let r: Resp = get_json(&self.http, &self.cfg, "/api/v1/ledger").await?;
-        Ok(CreditAmountAct::from_milli_act(r.available_milli_act))
+        Ok(r.available_milli_eur)
     }
 
     async fn reserve_for_run(
         &self,
         _org_id: &OrgId,
         _run_id: &RunId,
-        _amount: CreditAmountAct,
+        _amount: MilliEur,
         _idempotency_key: &str,
     ) -> CompassResult<LedgerTx> {
         Err(CompassError::Internal(
@@ -966,7 +955,7 @@ impl PaymentGateway for CompassHubClient {
     async fn credit_topup(
         &self,
         _org_id: &OrgId,
-        amount: CreditAmountAct,
+        amount: MilliEur,
         reference: &str,
         _via_webhook: bool,
     ) -> CompassResult<LedgerTx> {
@@ -974,7 +963,7 @@ impl PaymentGateway for CompassHubClient {
             self.http
                 .post(format!("{}/api/v1/billing/invoices/credit", self.cfg.base_url))
                 .json(&json!({
-                    "amount_milli_act": amount.milli_act(),
+                    "amount_milli_eur": amount,
                     "reference": reference,
                 })),
             "POST /api/v1/billing/invoices/credit",
@@ -1040,7 +1029,7 @@ impl CompassHubClient {
 
     /// Decode and validate a prepared `RunQuote` while preserving additive top-level wire metadata
     /// emitted by `compass-hub` (such as `[A2]` `serving_org_id`, `external_provider_org`, and
-    /// `external_provider_notice` for external `provider-edge` consent).
+    /// `external_provider_notice` for upstream provider consent).
     pub(crate) async fn read_bound_quote_json(
         req: &PrepareRunRequest, response: reqwest::Response,
     ) -> CompassResult<Value> {

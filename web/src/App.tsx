@@ -5,7 +5,7 @@ import {
   shouldPromptQuoteConsent,
   shouldShowMarketplaceConsentModal,
 } from "./milestoneBPolicy";
-import { isLocalPlayLedgerContext, resolveModuleCardActions } from "./moduleListPolicy";
+import { resolveModuleCardActions } from "./moduleListPolicy";
 import { buildStagedPluginChatDraft } from "./pluginBridgePolicy";
 import { useWorkspaceReadHandle, workspaceReadStorageChanged } from "./workspaceReadSession";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -29,7 +29,6 @@ import {
   fetchOfferedRunModule,
   fetchPersonalProfile,
   type PersonalProfile,
-  fetchModuleOffers,
   fetchProjects,
   fetchRun,
   fetchRunProvenance,
@@ -62,11 +61,9 @@ import {
 import { ExecutionBudgetControl, readExecutionBudget } from "./components/ExecutionBudgetControl";
 import { AuthGate } from "./components/AuthGate";
 import { PersonalAvatar } from "./components/PersonalAccountSettings";
-import { ShareResultButton, SharedResultFiles } from "./components/ResultSharing";
 import { SavedRunDialog } from "./components/SavedRunDialog";
 import { WorkspaceModuleVersions } from "./components/WorkspaceModuleVersions";
 import { WorkspaceHubChooser } from "./components/WorkspaceHubChooser";
-import { ArchiveResult } from "./components/ArchiveResult";
 import { MarketplaceConsentModal } from "./components/MarketplaceConsentModal";
 import { PaidRunConsent } from "./components/PaidRunConsent";
 import { InstalledWorkspaceResults } from "./components/InstalledWorkspaceResults";
@@ -115,10 +112,8 @@ import { OrgAdminView } from "./components/OrgAdminView";
 import { SettingsModal, type SettingsSection } from "./components/SettingsModal";
 import {
   effectiveRunCostMilli,
-  formatWorkspaceAmount,
-  negotiatedPriceForRelease,
+  formatMilliEur,
   runStatusLabel,
-  hasMinOrgRole,
   type AuthPrincipal,
   type CatalogManifest,
   type CatalogQuery,
@@ -338,8 +333,7 @@ export function App() {
     window.addEventListener("storage", accountChanged);
     return () => window.removeEventListener("storage", accountChanged);
   }, []);
-  const [archivedRunId, setArchivedRunId] = useState<string | null>(null);
-  const [sharedFilesScope, setSharedFilesScope] = useState<string | null>(null);
+  const [savedRunId, setSavedRunId] = useState<string | null>(null);
   const [moduleUpdate, setModuleUpdate] = useState("");
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
 
@@ -358,6 +352,8 @@ export function App() {
 
   // Core data & node state
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const isCloudMode = health?.mode === "cloud-web" || health?.mode === "cloud";
+  const isLocalMode = health?.mode === "local";
   const [principal, setPrincipal] = useState<AuthPrincipal | null>(null);
   const profileUserId = principal?.auth_method === "session" ? principal.user_id : undefined;
   const [profile, setProfile] = useState<PersonalProfile>();
@@ -474,14 +470,14 @@ export function App() {
       void followActiveRun(run, controller.signal, (updated) => {
         if (controller.signal.aborted) return;
         updateRun(updated);
-        if (["succeeded", "failed", "canceled"].includes(updated.status)) {
+        if (isCloudMode && ["succeeded", "failed", "canceled"].includes(updated.status)) {
           void fetchLedger().then((state) => {
             if (currentApprovalScope.current === approvalScope) setLedger(state);
           }).catch(() => {});
         }
       }).catch((err) => { if (!controller.signal.aborted) showErrorBanner(err); });
     }
-  }, [runs, approvalScope, isConfirmingRun, updateRun, showErrorBanner]);
+  }, [runs, approvalScope, isCloudMode, isConfirmingRun, updateRun, showErrorBanner]);
 
   // Floating module windows state (HLA-Compass window manager)
   const [windows, setWindows] = useState<ModuleWindowState[]>([]);
@@ -563,7 +559,6 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const isCloudMode = health?.mode === "cloud-web" || health?.mode === "cloud";
   useEffect(() => { setPrepareCaller(isCloudMode ? principal : null); }, [isCloudMode, principal]);
 
   const [marketplaceStatus, setMarketplaceStatus] = useState<MarketplaceStatus | null>(null);
@@ -686,8 +681,7 @@ export function App() {
 
   const navigateToPage = useCallback((page: WorkspacePage) => {
     if (page !== "results") {
-      setArchivedRunId(null);
-      setSharedFilesScope(null);
+      setSavedRunId(null);
     }
     setActivePage(page);
     // Minimize open floating module windows into the bottom tray when switching top-level pages
@@ -710,52 +704,6 @@ export function App() {
     openOrFocusModuleWindow(plugin, plugin.has_custom_ui ? "ui" : "run");
   }, [approvalScope, navigateToPage, openOrFocusModuleWindow, sessionGeneration]);
 
-  const [federatedOfferLanding, setFederatedOfferLanding] = useState(false);
-
-  useEffect(() => {
-    if (!approvalScope) {
-      setSharedFilesScope(null);
-      return;
-    }
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("shared_files") !== "1") return;
-    url.searchParams.delete("shared_files");
-    window.history.replaceState(window.history.state, "", url);
-    navigateToPage("results");
-    setSharedFilesScope(approvalScope);
-  }, [approvalScope, navigateToPage]);
-
-  useEffect(() => {
-    if (principal?.auth_method !== "federated") return;
-    const url = new URL(window.location.href);
-    const offerId = url.searchParams.get("module_offer");
-    if (!offerId) return;
-    url.searchParams.delete("module_offer");
-    window.history.replaceState(window.history.state, "", url);
-    void fetchModuleOffers().then((offers) => {
-      const offer = offers.find((entry) => entry.offer_id === offerId && entry.action === "run");
-      if (currentApprovalScope.current !== approvalScope || approvalSession.current !== sessionGeneration) return;
-      if (!offer) throw new Error("This hosted module offer is unavailable.");
-      if (offer.access === "granted") return openOfferedModule(offer);
-      setFederatedOfferLanding(true);
-      navigateToPage("org-admin");
-    }).catch(showErrorBanner);
-  }, [approvalScope, navigateToPage, openOfferedModule, principal?.auth_method, sessionGeneration, showErrorBanner]);
-
-  // Negotiated per-organisation prices for "Run Cost" (cloud workspaces only).
-  const [moduleOffers, setModuleOffers] = useState<ModuleOffer[]>([]);
-  useEffect(() => {
-    if (!isCloudMode || !principal) {
-      setModuleOffers([]);
-      return;
-    }
-    let active = true;
-    void fetchModuleOffers()
-      .then((offers) => { if (active) setModuleOffers(offers); })
-      .catch(() => { if (active) setModuleOffers([]); });
-    return () => { active = false; };
-  }, [isCloudMode, principal]);
-
   const openSettings = (section: SettingsSection = "general") => {
     setSettingsSection(section);
     setSettingsOpen(true);
@@ -767,7 +715,7 @@ export function App() {
         fetchGrantsWithUsage(),
         fetchCatalogs(),
         fetchPlugins(),
-        fetchLedger(),
+        isCloudMode ? fetchLedger() : Promise.resolve(null),
         fetchRuns(),
         fetchSavedViews().catch(() => [] as SavedViewRecord[]),
       ]);
@@ -789,15 +737,15 @@ export function App() {
     } catch (err: unknown) {
       showErrorBanner(err);
     }
-  }, [showErrorBanner]);
+  }, [isCloudMode, showErrorBanner]);
 
-  const bootstrapWorkspace = useCallback(async () => {
+  const bootstrapWorkspace = useCallback(async (cloud: boolean) => {
     const [gData, cList, pList, lState, rList, sList, projList, vList, llmCfg] =
       await Promise.all([
         fetchGrantsWithUsage(),
         fetchCatalogs(),
         fetchPlugins(),
-        fetchLedger(),
+        cloud ? fetchLedger() : Promise.resolve(null),
         fetchRuns(),
         fetchSessions(),
         fetchProjects(),
@@ -884,7 +832,7 @@ export function App() {
           const me = await fetchWhoami();
           setPrincipal(me);
           setAuthRequired(false);
-          await bootstrapWorkspace();
+          await bootstrapWorkspace(cloud);
         } catch (authErr: unknown) {
           if (cloud && authErr instanceof ApiClientError && authErr.status === 401) {
             setPrincipal(null);
@@ -1126,8 +1074,10 @@ export function App() {
       setLiveLogs(completed.logs);
     }
     // The run record is authoritative even if a secondary read is rate limited.
-    void fetchLedger().then(setLedger).catch(showErrorBanner);
-  }, [showErrorBanner]);
+    if (isCloudMode) {
+      void fetchLedger().then(setLedger).catch(showErrorBanner);
+    }
+  }, [isCloudMode, showErrorBanner]);
 
   const executePreparedQuote = useCallback(
     async (
@@ -1322,7 +1272,7 @@ export function App() {
   );
 
   const handleLogout = async () => {
-    setArchivedRunId(null);
+    setSavedRunId(null);
     if (workspaceBearer || workspaceRead) {
       void endInstalledWorkspaceSession(workspaceBearer).catch(showErrorBanner);
     }
@@ -1411,7 +1361,7 @@ export function App() {
               pending_quote: {
                 run_id: pendingQuote.run_id,
                 plugin_version: pendingQuote.plugin_version,
-                estimated_cost_act: pendingQuote.estimated_cost_act,
+                estimated_cost_milli_eur: pendingQuote.estimated_cost_milli_eur,
                 params: pendingQuoteParams,
               },
             }
@@ -1903,8 +1853,6 @@ export function App() {
     });
   }, [plugins, moduleSearch]);
 
-  const localPlayLedger = isLocalPlayLedgerContext(health, ledger);
-
   const handleWorkspaceHubChanged = useCallback(async (updated: WorkspaceHubStatus) => {
     setHealth((prev) =>
       prev
@@ -1967,7 +1915,7 @@ export function App() {
         ui_bundle_hash: offer.ui_bundle_hash ?? null,
         ui_bundle_size_bytes: offer.ui_bundle_size_bytes ?? null,
         launch_url: offer.launch_url ?? null,
-        price_milli_act: offer.price_milli_act ?? 0,
+        price_milli_eur: offer.price_milli_eur ?? 0,
       });
       const freshPlugins = await fetchPlugins();
       setPlugins(freshPlugins);
@@ -2915,7 +2863,7 @@ export function App() {
           setPrincipal(me);
           setAuthRequired(false);
           setErrorBanner(null);
-          void bootstrapWorkspace().catch((err: unknown) => showErrorBanner(err));
+          void bootstrapWorkspace(true).catch((err: unknown) => showErrorBanner(err));
         }}
       />
     );
@@ -3581,6 +3529,9 @@ export function App() {
                           const isPending = Boolean(
                             quoteObj && pendingQuote?.run_id === quoteObj.run_id,
                           );
+                          const isLocalQuote = Boolean(
+                            isLocalMode && quoteObj && !requiresExternalProviderConsent(quoteObj),
+                          );
                           return (
                             <div
                               key={ev.event_id}
@@ -3595,12 +3546,11 @@ export function App() {
                                     {targetPlugin?.manifest.name ?? pluginIdArg}
                                   </span>
                                 </div>
-                                {quoteObj && typeof quoteObj.estimated_cost_act === "number" && (
+                                {quoteObj && typeof quoteObj.estimated_cost_milli_eur === "number" && (
                                   <span className="bc-badge bc-badge-accent mono">
-                                    {formatWorkspaceAmount(
-                                      quoteObj.estimated_cost_act,
-                                      isLocalPlayLedgerContext(health, ledger, quoteObj),
-                                    )}
+                                    {isLocalQuote
+                                      ? "Local run (no charge)"
+                                      : formatMilliEur(quoteObj.estimated_cost_milli_eur)}
                                   </span>
                                 )}
                               </div>
@@ -3617,10 +3567,9 @@ export function App() {
                                   >
                                     {isConfirmingRun
                                       ? "Running…"
-                                      : `Approve ${formatWorkspaceAmount(
-                                          quoteObj.estimated_cost_act,
-                                          isLocalPlayLedgerContext(health, ledger, quoteObj),
-                                        )} run`}
+                                      : isLocalQuote
+                                        ? "Approve local run"
+                                        : `Approve ${formatMilliEur(quoteObj.estimated_cost_milli_eur)} run`}
                                   </button>
                                 )}
                                 {isPending && quoteObj && requiresExternalProviderConsent(quoteObj) && (
@@ -3909,7 +3858,7 @@ export function App() {
                     isConfirmingRun &&
                     pendingQuote?.plugin_id === dockedPlugin.manifest.id && pendingQuote.plugin_version === dockedPlugin.manifest.version
                   }
-                  isLocalPlayLedger={localPlayLedger}
+                  isLocalMode={isLocalMode}
                   liveLogs={liveLogs}
                   verifyReport={verifyReport}
                   onFocus={() => handleFocusWindow(dockedWindow.id)}
@@ -4068,12 +4017,11 @@ export function App() {
                   const runtimeIcon =
                     actions.runsIn === "cloud" ? (
                       <IconAlitheaCloud size={15} />
-                    ) : actions.runsIn === "network_provider" || actions.runsIn === "provider_edge" ? (
+                    ) : actions.runsIn === "network_provider" ? (
                       <IconFrogletNode size={13} />
                     ) : (
                       <IconLaptop size={13} />
                     );
-                  const useLocalCredits = localPlayLedger && actions.runsIn === "local";
 
                   return (
                     <article
@@ -4135,7 +4083,9 @@ export function App() {
 
                       <div className="bc-module-card-footer">
                         <span className="bc-caption mono">
-                          {formatWorkspaceAmount(effectiveRunCostMilli(p, negotiatedPriceForRelease(moduleOffers, p.manifest.id, p.manifest.version)), useLocalCredits)} / run
+                          {actions.runsIn === "local"
+                            ? "Local run (no charge)"
+                            : `${formatMilliEur(effectiveRunCostMilli(p))} / run`}
                         </span>
                         <div
                           style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
@@ -4302,12 +4252,6 @@ export function App() {
                 </div>
 
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  {isCloudMode && principal && (
-                    <SharedResultFiles key={approvalScope} orgId={principal.org_id}
-                      canPublish={hasMinOrgRole(principal.role, "admin")}
-                      open={sharedFilesScope === approvalScope}
-                      onOpen={() => setSharedFilesScope(approvalScope)} onClose={() => setSharedFilesScope(null)} />
-                  )}
                   <input
                     type="search"
                     className="bc-input"
@@ -4326,9 +4270,10 @@ export function App() {
                 </div>
               </div>
 
-              {archivedRunId && (
-                <SavedRunDialog key={archivedRunId} runId={archivedRunId} verifyReport={verifyReport}
-                  onClose={() => setArchivedRunId(null)} onUpdate={updateRun}
+              {savedRunId && (
+                <SavedRunDialog key={savedRunId} runId={savedRunId} verifyReport={verifyReport}
+                  isLocalMode={isLocalMode}
+                  onClose={() => setSavedRunId(null)} onUpdate={updateRun}
                   onReverify={(run, tamper) => void handleReverifyReceipt(run, tamper)} />
               )}
               {health?.workspace_hub_url && !isCloudMode && (workspaceBearer || workspaceRead) && (
@@ -4376,8 +4321,10 @@ export function App() {
                           <div className="bc-caption mono" style={{ marginTop: 4 }}>
                             {r.run_id.slice(0, 16)} ·{" "}
                             {new Date(r.created_at).toLocaleString()} ·{" "}
-                            Quoted {formatWorkspaceAmount(r.quote.estimated_cost_act, isLocalPlayLedgerContext(health, ledger, r.quote))} ·{" "}
-                            {r.artifacts.length} output file(s)
+                            {isLocalMode && !requiresExternalProviderConsent(r.quote)
+                              ? "Local run (no charge)"
+                              : `Quoted ${formatMilliEur(r.quote.estimated_cost_milli_eur)}`}{" "}
+                            · {r.artifacts.length} output file(s)
                           </div>
                           <CapacityRequest run={r} onUpdate={updateRun} />
                           {r.quote.dataset_grant_summary && (
@@ -4406,12 +4353,6 @@ export function App() {
                                 <span>Provenance</span>
                               </button>
                             )}
-                            {isCloudMode && principal && r.org_id === principal.org_id
-                              && hasMinOrgRole(principal.role, "admin") && r.status === "succeeded" && r.receipt_verified && (
-                              <ShareResultButton key={approvalScope} run={r} />
-                            )}
-                            {isCloudMode && principal && r.org_id === principal.org_id &&
-                              r.status === "succeeded" && r.receipt_verified && <ArchiveResult runId={r.run_id} />}
                             {runPlugin?.has_custom_ui && (
                               <button
                                 type="button"
@@ -4428,7 +4369,7 @@ export function App() {
                               data-testid={`open-results-${r.run_id}`}
                               onClick={() => runPlugin
                                 ? openOrFocusModuleWindow(runPlugin, "results", r.run_id)
-                                : setArchivedRunId(r.run_id)}
+                                : setSavedRunId(r.run_id)}
                             >
                               <IconWindowOpen size={14} />
                               <span>Open Results</span>
@@ -4557,7 +4498,6 @@ export function App() {
             ledger={ledger}
             onRefreshWorkspace={refreshWorkspaceData}
             onOpenModuleOffer={openOfferedModule}
-            initialTab={federatedOfferLanding ? "module-offers" : "overview"}
           />
         )}
 
@@ -4572,7 +4512,6 @@ export function App() {
 
       {/* ==================== FLOATING MODULE WINDOWS + TRAY ==================== */}
       <FloatingWindowsLayer
-        moduleOffers={moduleOffers}
         windows={windows}
         plugins={plugins}
         runs={runs}
@@ -4585,7 +4524,7 @@ export function App() {
         pendingQuote={pendingQuote}
         pendingQuoteParams={pendingQuoteParams}
         isConfirmingRun={isConfirmingRun}
-        isLocalPlayLedger={localPlayLedger}
+        isLocalMode={isLocalMode}
         liveLogs={liveLogs}
         verifyReport={verifyReport}
         onFocusWindow={handleFocusWindow}
@@ -4676,7 +4615,7 @@ export function App() {
 
       {pendingQuote && <PaidRunConsent key={pendingQuote.run_id} quote={pendingQuote}
         params={pendingQuoteParams} busy={isConfirmingRun} error={paidQuotes[0]?.error}
-        isLocalPlayLedger={isLocalPlayLedgerContext(health, ledger, pendingQuote)}
+        isLocalRun={isLocalMode && !requiresExternalProviderConsent(pendingQuote)}
         onApprove={handleConfirmPendingRun} onDismiss={declinePaidRun} />}
 
       {lightboxImage && (

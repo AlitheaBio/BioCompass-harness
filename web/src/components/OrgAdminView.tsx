@@ -7,50 +7,42 @@ import { DocumentsPanel } from "./DocumentsPanel";
 import { ModuleOffersView } from "./ModuleOffersView";
 import { WebhooksPanel } from "./WebhooksPanel";
 import {
-  approveDatasetOffer,
   createApiKey,
   createGrant,
   createOrgInvitation,
   deleteGrant,
-  enrollNode,
   enrollTotp,
   fetchApiKeys,
   fetchAuditLogs,
   fetchDatasetOffers,
-  fetchDatasetOfferRequests,
-  fetchNodes,
   fetchOrgInvitations,
   fetchOrgMembers,
   formatErrorInline,
   publishDatasetOffer,
   revokeApiKey,
-  revokeNode,
   subscribeDatasetOffer,
   updateGrant,
   updateOrgMemberRole,
   verifyTotp,
 } from "../api";
 import {
-  formatMilliAct,
+  formatMilliEur,
   hasMinOrgRole,
   type ApiKeyRecord,
   type AuditLogRecord,
   type AuthPrincipal,
   type CatalogManifest,
   type CreatedApiKey,
-  type CreatedNodeEnrollment,
   type CreatedOrgInvitation,
   type DatasetGrant,
   type DatasetHostingMode,
   type DatasetOfferRecord,
-  type DatasetOfferRequest,
   type DatasetOfferScope,
   type FilterExpr,
   type GrantAccessLevel,
   type GrantUsageSummary,
   type LedgerState,
   type ModuleOffer,
-  type NodeSummaryRecord,
   type OrgInvitationRecord,
   type OrgMemberRecord,
   type OrgRole,
@@ -60,7 +52,6 @@ import {
   IconCheck,
   IconCopy,
   IconDatabase,
-  IconFrogletNode,
   IconPlus,
   IconShield,
   IconTrash,
@@ -89,7 +80,6 @@ type OrgSubTab =
   | "offers"
   | "module-offers"
   | "client-cloud-import"
-  | "nodes"
   | "audit";
 
 export function OrgAdminView({
@@ -103,7 +93,6 @@ export function OrgAdminView({
   initialTab = "overview",
 }: OrgAdminViewProps) {
   const isOrgAdmin = hasMinOrgRole(principal.role, "admin");
-  const canRequestOffer = hasMinOrgRole(principal.role, "member");
   const [subTab, setSubTab] = useState<OrgSubTab>(initialTab);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,8 +104,6 @@ export function OrgAdminView({
   const [invitations, setInvitations] = useState<OrgInvitationRecord[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKeyRecord[]>([]);
   const [datasetOffers, setDatasetOffers] = useState<DatasetOfferRecord[]>([]);
-  const [offerRequests, setOfferRequests] = useState<DatasetOfferRequest[]>([]);
-  const [nodes, setNodes] = useState<NodeSummaryRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
 
   // Invite form
@@ -151,7 +138,6 @@ export function OrgAdminView({
   const [offerNodeId, setOfferNodeId] = useState("");
   const [offerScope, setOfferScope] = useState<DatasetOfferScope>("private");
   const [offerRecipients, setOfferRecipients] = useState("");
-  const [offerApproval, setOfferApproval] = useState(false);
   const [offerTitle, setOfferTitle] = useState("");
   const [offerDescription, setOfferDescription] = useState("");
   const [offerDefaultLevel, setOfferDefaultLevel] =
@@ -159,12 +145,7 @@ export function OrgAdminView({
   const [offerDailyBudget, setOfferDailyBudget] = useState("500");
   const [offerMaxRows, setOfferMaxRows] = useState("250");
   // Entered in euros (to the cent); sent to the hub in milli-euro.
-  const [offerPriceMilliAct, setOfferPriceMilliAct] = useState("0");
-
-  // Hospital-Edge Node form
-  const [nodeIdInput, setNodeIdInput] = useState("");
-  const [nodePublicKey, setNodePublicKey] = useState("");
-  const [createdNode, setCreatedNode] = useState<CreatedNodeEnrollment | null>(null);
+  const [offerPriceEur, setOfferPriceEur] = useState("0");
 
   const copyToClipboard = (id: string, val: string) => {
     void navigator.clipboard?.writeText(val);
@@ -178,12 +159,7 @@ export function OrgAdminView({
     setError(null);
     try {
       if (subTab === "offers") {
-        const [offers, requests] = await Promise.all([
-          fetchDatasetOffers(),
-          canRequestOffer ? fetchDatasetOfferRequests() : Promise.resolve([]),
-        ]);
-        setDatasetOffers(offers);
-        setOfferRequests(requests);
+        setDatasetOffers(await fetchDatasetOffers());
       }
       if (!isOrgAdmin) return;
       if (subTab === "members") {
@@ -192,15 +168,13 @@ export function OrgAdminView({
         setInvitations(pending);
       } else if (subTab === "security") {
         setApiKeys(await fetchApiKeys());
-      } else if (subTab === "nodes") {
-        setNodes(await fetchNodes());
       } else if (subTab === "audit") {
         setAuditLogs(await fetchAuditLogs());
       }
     } catch (err: unknown) {
       setError(formatErrorInline(err));
     }
-  }, [canRequestOffer, isOrgAdmin, subTab]);
+  }, [isOrgAdmin, subTab]);
 
   useEffect(() => {
     void refreshAdminLists();
@@ -215,13 +189,13 @@ export function OrgAdminView({
     }
   }, [catalogs, grantCatalogId, offerCatalogId]);
 
-  const actLeftTodayDisplay = (() => {
-    if (!ledger || ledger.daily_act_breaker_milli == null) {
+  const eurLeftTodayDisplay = (() => {
+    if (!ledger || ledger.daily_spend_breaker_milli_eur == null) {
       return "Unlimited";
     }
-    const spent = ledger.daily_act_spent_milli ?? 0;
-    const remaining = Math.max(0, ledger.daily_act_breaker_milli - spent);
-    return `${formatMilliAct(remaining)} / ${formatMilliAct(ledger.daily_act_breaker_milli)}`;
+    const spent = ledger.daily_spent_milli_eur ?? 0;
+    const remaining = Math.max(0, ledger.daily_spend_breaker_milli_eur - spent);
+    return `${formatMilliEur(remaining)} / ${formatMilliEur(ledger.daily_spend_breaker_milli_eur)}`;
   })();
 
   const handleCreateInvite = async (e: React.FormEvent) => {
@@ -407,7 +381,7 @@ export function OrgAdminView({
         catalog_id: offerCatalogId.trim(),
         scope: offerScope,
         allowed_orgs: offerScope === "custom_shared" ? offerRecipients.split(",").map((org) => org.trim()).filter(Boolean) : [],
-        approval_required: offerApproval,
+        approval_required: false,
         hosting_mode: offerHostingMode,
         ...(offerHostingMode === "node_hosted" && offerNodeId.trim()
           ? { node_id: offerNodeId.trim() }
@@ -417,7 +391,7 @@ export function OrgAdminView({
         default_level: offerDefaultLevel,
         daily_row_budget: budget != null && Number.isFinite(budget) ? budget : null,
         max_rows_per_query: Number(offerMaxRows) || 250,
-        price_milli_act: Math.round((Number(offerPriceMilliAct) || 0) * 1000),
+        price_milli_eur: Math.round((Number(offerPriceEur) || 0) * 1000),
       });
       setOfferTitle("");
       setOfferDescription("");
@@ -436,68 +410,9 @@ export function OrgAdminView({
     setStatusMsg(null);
     try {
       const res = await subscribeDatasetOffer(offerId);
-      setStatusMsg(res.status === "pending" ? "Access requested. Publisher approval is pending."
+      setStatusMsg(res.status === "pending" ? "Subscription pending."
         : `Access granted for ${res.offer.title}.`);
       await Promise.all([refreshAdminLists(), onRefreshWorkspace()]);
-    } catch (err: unknown) {
-      setError(formatErrorInline(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleApproveOffer = async (request: DatasetOfferRequest) => {
-    setBusy(true);
-    setError(null);
-    setStatusMsg(null);
-    try {
-      await approveDatasetOffer(request.offer_id, request.subscriber_org_id);
-      setStatusMsg(`Approved ${request.title} for ${request.subscriber_org_id}.`);
-      await Promise.all([refreshAdminLists(), onRefreshWorkspace()]);
-    } catch (err: unknown) {
-      setError(formatErrorInline(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleEnrollEdgeNode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!nodeIdInput.trim()) return;
-    const publicKey = nodePublicKey.trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(publicKey)) {
-      setError("Enter the 64-character signing public key generated on the customer node.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setStatusMsg(null);
-    try {
-      const res = await enrollNode({
-        node_id: nodeIdInput.trim(),
-        mode: "provider-edge",
-        org_id: principal.org_id,
-        provider_pubkey: publicKey,
-      });
-      setCreatedNode(res);
-      setNodeIdInput("");
-      setNodePublicKey("");
-      setStatusMsg(`Enrolled provider-edge node ${res.node_id}.`);
-      await refreshAdminLists();
-    } catch (err: unknown) {
-      setError(formatErrorInline(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleRevokeEdgeNode = async (nodeId: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await revokeNode(nodeId);
-      setStatusMsg(`Revoked node ${nodeId}.`);
-      await refreshAdminLists();
     } catch (err: unknown) {
       setError(formatErrorInline(err));
     } finally {
@@ -516,8 +431,7 @@ export function OrgAdminView({
     { id: "grants", label: "Dataset Grants", adminOnly: true },
     { id: "offers", label: "Dataset Offers" },
     { id: "module-offers", label: "Module Offers" },
-    { id: "client-cloud-import", label: "Client Cloud Import", adminOnly: true },
-    { id: "nodes", label: "Provider-Edge Nodes", adminOnly: true },
+    { id: "client-cloud-import", label: "Catalog Placement", adminOnly: true },
     { id: "audit", label: "Audit Trail", adminOnly: true },
   ];
 
@@ -530,12 +444,6 @@ export function OrgAdminView({
             <p className="bc-page-subtitle">
               Organization <span className="mono">{principal.org_id}</span> · Role{" "}
               <span className="bc-badge bc-badge-accent mono">{principal.role}</span>
-              {principal.tier_id && (
-                <>
-                  {" "}
-                  · Tier <span className="bc-chip mono">{principal.tier_id}</span>
-                </>
-              )}
             </p>
           </div>
         </div>
@@ -554,7 +462,6 @@ export function OrgAdminView({
                   data-active={String(subTab === t.id)}
                   className="bc-filter-pill"
                   onClick={() => {
-                    if (t.id !== "nodes") setCreatedNode(null);
                     setSubTab(t.id);
                     setError(null);
                     setStatusMsg(null);
@@ -606,9 +513,11 @@ export function OrgAdminView({
                 <strong
                   className="mono"
                   style={{ fontSize: 18, color: "var(--bc-accent)" }}
-                  data-testid="org-available-act"
+                  data-testid="org-available-eur"
                 >
-                  {ledger?.available_display ?? "€0.00"}
+                  {ledger
+                    ? (ledger.available_display ?? formatMilliEur(ledger.available_milli_eur))
+                    : "€0.00"}
                 </strong>
               </div>
               <div className="bc-meta-item">
@@ -616,17 +525,13 @@ export function OrgAdminView({
                 <strong
                   className="mono"
                   style={{ fontSize: 16 }}
-                  data-testid="org-act-left-today"
+                  data-testid="org-eur-left-today"
                 >
-                  {actLeftTodayDisplay}
+                  {eurLeftTodayDisplay}
                 </strong>
               </div>
               <div className="bc-meta-item">
-                <span className="bc-caption">Subscription Tier</span>
-                <span className="mono">{ledger?.tier_id ?? principal.tier_id ?? "standard"}</span>
-              </div>
-              <div className="bc-meta-item">
-                <span className="bc-caption">Trial / Account Expiry</span>
+                <span className="bc-caption">Account Expiry</span>
                 <span className="mono">
                   {ledger?.expires_at
                     ? new Date(ledger.expires_at).toLocaleDateString()
@@ -1269,8 +1174,7 @@ export function OrgAdminView({
                 <div>
                   <span className="bc-card-title">Froglet Dataset Offers Marketplace</span>
                   <p className="bc-caption" style={{ marginTop: 2 }}>
-                    Subscribe to cloud-hosted or hospital-edge governed datasets with signed, euro-denominated
-                    settlement.
+                    Subscribe to governed datasets with signed, euro-denominated settlement.
                   </p>
                 </div>
               </div>
@@ -1312,16 +1216,16 @@ export function OrgAdminView({
                             </span>
                           </td>
                           <td className="mono">{off.default_level}</td>
-                          <td className="mono">{formatMilliAct(off.price_milli_act)}</td>
+                          <td className="mono">{formatMilliEur(off.price_milli_eur)}</td>
                           <td style={{ textAlign: "right" }}>
                             <button
                               type="button"
                               data-testid={`subscribe-offer-btn-${off.offer_id}`}
                               className="bc-btn bc-btn-primary bc-btn-sm"
-                              disabled={busy || !off.active || !(off.approval_required ? canRequestOffer : isOrgAdmin)}
+                              disabled={busy || !off.active || !isOrgAdmin}
                               onClick={() => void handleSubscribeOffer(off.offer_id)}
                             >
-                              {off.approval_required ? "Request access" : "Subscribe"}
+                              Subscribe
                             </button>
                           </td>
                         </tr>
@@ -1331,24 +1235,6 @@ export function OrgAdminView({
                 </div>
               )}
             </div>
-
-            {offerRequests.length > 0 && (
-              <section className="bc-card" aria-label="Dataset access requests">
-                <h3 className="bc-card-title">Access requests</h3>
-                {offerRequests.map((request) => (
-                  <div className="bc-card-header" key={`${request.offer_id}:${request.subscriber_org_id}`}>
-                    <div>
-                      <strong>{request.title}</strong>
-                      <p className="bc-caption">{request.subscriber_org_id} · {request.status === "pending" ? "Pending" : "Approved"}</p>
-                    </div>
-                    {isOrgAdmin && request.publisher_org_id === principal.org_id && request.status === "pending" && (
-                      <button type="button" className="bc-btn bc-btn-primary bc-btn-sm" disabled={busy}
-                        onClick={() => void handleApproveOffer(request)}>Approve {request.title}</button>
-                    )}
-                  </div>
-                ))}
-              </section>
-            )}
 
             {isOrgAdmin && (
               <div className="bc-card">
@@ -1379,19 +1265,19 @@ export function OrgAdminView({
                       value={offerHostingMode}
                       onChange={(e) => setOfferHostingMode(e.target.value as DatasetHostingMode)}
                     >
-                      <option value="cloud_hosted">cloud_hosted (Alithea Cloud S3)</option>
-                      <option value="node_hosted">node_hosted (Hospital-Edge Node)</option>
+                      <option value="cloud_hosted">cloud_hosted (Cloud S3)</option>
+                      <option value="node_hosted">node_hosted (Worker Node)</option>
                     </select>
                   </label>
 
                   {offerHostingMode === "node_hosted" && (
                     <label className="bc-field">
-                      <span className="bc-field-label">Hospital-Edge Node ID</span>
+                      <span className="bc-field-label">Worker Node ID</span>
                       <input
                         type="text"
                         required
                         className="bc-input mono"
-                        placeholder="zurich-hospital-edge-1"
+                        placeholder="worker-node-01"
                         value={offerNodeId}
                         onChange={(e) => setOfferNodeId(e.target.value)}
                       />
@@ -1427,14 +1313,6 @@ export function OrgAdminView({
                     </label>
                   )}
                   {offerScope === "global" && <p className="bc-caption">The offer title, description, and dataset identifier are public.</p>}
-                  <label className="bc-field">
-                    <span className="bc-field-label">Access process</span>
-                    <select className="bc-input" value={offerApproval ? "approval" : "self_service"}
-                      onChange={(e) => setOfferApproval(e.target.value === "approval")}>
-                      <option value="self_service">Self-service</option>
-                      <option value="approval">Publisher approval required</option>
-                    </select>
-                  </label>
 
                   <label className="bc-field">
                     <span className="bc-field-label">Granted Access Level</span>
@@ -1455,8 +1333,8 @@ export function OrgAdminView({
                       min={0}
                       step="0.01"
                       className="bc-input mono"
-                      value={offerPriceMilliAct}
-                      onChange={(e) => setOfferPriceMilliAct(e.target.value)}
+                      value={offerPriceEur}
+                      onChange={(e) => setOfferPriceEur(e.target.value)}
                     />
                   </label>
 
@@ -1505,163 +1383,6 @@ export function OrgAdminView({
                 </form>
               </div>
             )}
-          </div>
-        )}
-
-        {subTab === "nodes" && isOrgAdmin && (
-          <div className="bc-settings-stack">
-            <div className="bc-card">
-              <div className="bc-card-header">
-                <div>
-                  <span className="bc-card-title">Enroll Provider-Edge Worker Node</span>
-                  <p className="bc-caption" style={{ marginTop: 2 }}>
-                    Self-enroll an org-isolated <code className="mono">provider-edge</code> node bound to{" "}
-                    <span className="mono">{principal.org_id}</span>. Provider nodes receive zero Alithea
-                    database or S3 credentials and execute only this organization&apos;s offers or
-                    consented buyer inputs (non-demo tiers only).
-                  </p>
-                </div>
-              </div>
-
-              <form
-                onSubmit={(e) => void handleEnrollEdgeNode(e)}
-                style={{
-                  marginTop: 10,
-                  display: "flex",
-                  gap: 8,
-                  flexWrap: "wrap",
-                  alignItems: "flex-end",
-                }}
-              >
-                <label className="bc-field" style={{ flex: 1, minWidth: 200 }}>
-                  <span className="bc-field-label">Node ID</span>
-                  <input
-                    type="text"
-                    required
-                    data-testid="enroll-edge-node-id"
-                    className="bc-input mono"
-                    placeholder="provider-edge-node-01"
-                    value={nodeIdInput}
-                    onChange={(e) => setNodeIdInput(e.target.value)}
-                  />
-                </label>
-                <label className="bc-field" style={{ flex: 1, minWidth: 200 }}>
-                  <span className="bc-field-label">Node signing public key</span>
-                  <input
-                    type="text"
-                    className="bc-input mono"
-                    required
-                    pattern="[a-fA-F0-9]{64}"
-                    maxLength={64}
-                    title="Enter the 64-character public key printed by the worker"
-                    placeholder="64-character BIP340 signing key"
-                    value={nodePublicKey}
-                    onChange={(e) => setNodePublicKey(e.target.value)}
-                  />
-                </label>
-                <button
-                  type="submit"
-                  data-testid="enroll-edge-node-btn"
-                  className="bc-btn bc-btn-primary"
-                  disabled={busy}
-                >
-                  <IconFrogletNode size={14} />
-                  <span>Enroll Provider-Edge Node</span>
-                </button>
-              </form>
-
-              {createdNode && (
-                <div
-                  data-testid="enrolled-node-credential-banner"
-                  style={{
-                    marginTop: 12,
-                    padding: "10px 12px",
-                    borderRadius: "var(--bc-radius-sm)",
-                    background: "var(--bc-bg-subtle)",
-                    border: "1px solid var(--bc-accent)",
-                  }}
-                >
-                  <div className="bc-caption" style={{ marginBottom: 4 }}>
-                    Save this credential in a private file on the worker. Start the worker with{" "}
-                    <code className="mono">--node-credential-file &lt;path&gt;</code>.
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <code className="mono" style={{ wordBreak: "break-all" }}>
-                      {createdNode.raw_credential}
-                    </code>
-                    <button
-                      type="button"
-                      className="bc-btn bc-btn-sm"
-                      onClick={() => copyToClipboard("nodecred", createdNode.raw_credential)}
-                    >
-                      {copiedId === "nodecred" ? <IconCheck size={12} /> : <IconCopy size={12} />}
-                      <span>{copiedId === "nodecred" ? "Copied" : "Copy"}</span>
-                    </button>
-                    <button type="button" className="bc-btn bc-btn-sm" onClick={() => setCreatedNode(null)}>
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="bc-card">
-              <div className="bc-card-header" style={{ marginBottom: 8 }}>
-                <span className="bc-card-title">Organization Nodes ({nodes.length})</span>
-              </div>
-              {nodes.length === 0 ? (
-                <div className="bc-empty-note">No provider-edge nodes enrolled yet.</div>
-              ) : (
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Node ID</th>
-                        <th>Mode</th>
-                        <th>Status</th>
-                        <th>Pubkey</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {nodes.map((n) => (
-                        <tr key={n.node_id}>
-                          <td className="mono">{n.node_id}</td>
-                          <td className="mono">{n.mode}</td>
-                          <td>
-                            <span
-                              className={`bc-badge ${
-                                n.online ? "bc-badge-success" : "bc-badge-neutral"
-                              }`}
-                            >
-                              {n.status}
-                            </span>
-                          </td>
-                          <td className="mono bc-caption">
-                            {n.provider_pubkey
-                              ? `${n.provider_pubkey.slice(0, 16)}…`
-                              : "Pending heartbeat"}
-                          </td>
-                          <td style={{ textAlign: "right" }}>
-                            {n.status !== "revoked" && (
-                              <button
-                                type="button"
-                                className="bc-btn bc-btn-sm"
-                                disabled={busy}
-                                onClick={() => void handleRevokeEdgeNode(n.node_id)}
-                              >
-                                <IconTrash size={12} />
-                                <span>Revoke</span>
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
           </div>
         )}
 

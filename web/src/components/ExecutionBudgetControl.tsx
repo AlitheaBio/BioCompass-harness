@@ -9,9 +9,9 @@ export function readExecutionBudget(form: HTMLFormElement): ExecutionBudget | un
   const amount = String(fields.get("execution-budget-amount") ?? "");
   const match = /^(\d+)(?:\.(\d{1,3}))?$/.exec(amount);
   if (match) {
-    const milliAct = Number(match[1] + (match[2] ?? "").padEnd(3, "0"));
-    if (Number.isSafeInteger(milliAct) && milliAct > 0) {
-      return { mode, limit_milli_act: milliAct };
+    const milliEur = Number(match[1] + (match[2] ?? "").padEnd(3, "0"));
+    if (Number.isSafeInteger(milliEur) && milliEur > 0) {
+      return { mode, limit_milli_eur: milliEur };
     }
   }
   throw new Error("Enter a positive EUR amount with up to three decimal places.");

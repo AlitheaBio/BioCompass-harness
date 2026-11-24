@@ -75,11 +75,11 @@ async fn installed(state: &AppState, id: &PluginId, version: &str) -> CompassRes
     let manifest = plugin.manifest;
     let contract = manifest.dataset_import_contract()?;
     if !manifest.network.is_airgapped()
-        || manifest.price_milli_act != 0
+        || !manifest.price_milli_eur.is_zero()
         || manifest
             .offers
             .iter()
-            .any(|offer| offer.price_milli_act != 0 || offer.base_fee_milli_act != 0)
+            .any(|offer| !offer.price_milli_eur.is_zero() || !offer.base_fee_milli_eur.is_zero())
     {
         return Err(CompassError::AccessDenied(
             "this upload requires a free, airgapped importer".into(),

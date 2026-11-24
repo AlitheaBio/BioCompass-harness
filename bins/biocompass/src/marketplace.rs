@@ -4,7 +4,7 @@
 use crate::cloud_client::CallerAuth;
 use crate::state::DeploymentMode;
 use biocompass_core_traits::{
-    CompassError, CompassResult, ModuleRunsIn, ModuleSource, PluginId,
+    CompassError, CompassResult, MilliEur, ModuleRunsIn, ModuleSource, PluginId,
 };
 use biocompass_plugin_spec::{
     NetworkPolicy, PluginExecutionPlane, PluginInputs, PluginManifest, PluginResources,
@@ -80,7 +80,7 @@ pub struct MarketplaceOfferSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_milli_act: Option<i64>,
+    pub price_milli_eur: Option<MilliEur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// The signed `froglet/v1` offer document this summary was parsed from (never serialized).
@@ -108,7 +108,7 @@ pub struct SubscribedNetworkOffer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_url: Option<String>,
     #[serde(default)]
-    pub price_milli_act: i64,
+    pub price_milli_eur: MilliEur,
 }
 
 /// Status snapshot for the in-app Workspace Hub Chooser (`U3`).
@@ -156,7 +156,7 @@ pub struct RemoteHubModule {
     pub hub_origin: String,
     /// Verified UI attestation (`U-1`); without it the module's UI is not opened.
     pub ui_attestation: Option<crate::ui_cache::VerifiedUiAttestation>,
-    /// Origin the UI bundle is fetched from (the providing peer for federated modules).
+    /// Origin the UI bundle is fetched from (the upstream provider origin for network modules).
     pub ui_fetch_origin: String,
     /// Why a listed UI bundle was refused, if it was.
     pub ui_attestation_error: Option<String>,
@@ -588,7 +588,7 @@ impl MarketplaceClient {
         // 1. Pin (first connection) or check the hub's signing key.
         let pinned_key = self.check_hub_key(&validated_hub_url).await?;
 
-        // 2. Feed, org modules and federated network modules, fetched concurrently.
+        // 2. Feed, org modules and upstream network modules, fetched concurrently.
         let feed_url = format!("{validated_hub_url}/v1/feed");
         let (feed_result, plugins_result, network_result) = tokio::join!(
             fetch_marketplace_feed(&self.http, &feed_url),
@@ -859,7 +859,7 @@ impl MarketplaceClient {
         }
         if self.cfg.mode != DeploymentMode::Local {
             return Err(CompassError::AccessDenied(
-                "marketplace consent settings are managed locally; in cloud-web mode configure federation peers via PlatformAdmin".into(),
+                "marketplace consent settings are managed locally; in cloud-web mode configure upstream hub settings on compass-hub".into(),
             ));
         }
         if decision == MarketplaceConsentDecision::Unset {
@@ -949,7 +949,7 @@ impl MarketplaceClient {
         }
         if self.cfg.mode != DeploymentMode::Local {
             return Err(CompassError::AccessDenied(
-                "in cloud-web mode, use PlatformAdmin federation peer sync".into(),
+                "in cloud-web mode, marketplace sync is managed by the connected compass-hub".into(),
             ));
         }
 
@@ -1151,13 +1151,13 @@ impl NetworkModuleWire {
                 .filter(|h| crate::ui_cache::is_sha256_hex(h)),
             ui_bundle_size_bytes: None,
             launch_url: self.launch_url.clone(),
-            price_milli_act: None,
+            price_milli_eur: None,
             description: None,
             signed_offer: None,
         };
         let mut m = synthesize_module_from_offer(&offer, hub_origin)?;
-        // Federated bundles are fetched from the providing peer and verified against the
-        // peer-signed offer; the connected hub only endorses the peer's key.
+        // Network bundles are fetched from the upstream provider origin and verified against the
+        // provider-signed offer; the connected hub endorses the provider's key.
         if let Some(origin) = self
             .peer_origin
             .as_deref()
@@ -1618,9 +1618,10 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 .and_then(|p| p.get("launch_url"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let price_milli_act = payload
-                .and_then(|p| p.pointer("/pricing/price_milli_act").or_else(|| p.get("price_milli_act")))
-                .and_then(Value::as_i64);
+            let price_milli_eur = payload
+                .and_then(|p| p.pointer("/pricing/price_milli_eur").or_else(|| p.get("price_milli_eur")))
+                .and_then(Value::as_i64)
+                .map(MilliEur::from_milli);
             let plugin_id = match kind.as_str() {
                 "run" | "download" if title.contains('/') => Some(title.clone()),
                 _ => None,
@@ -1636,7 +1637,7 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 ui_bundle_hash,
                 ui_bundle_size_bytes,
                 launch_url,
-                price_milli_act,
+                price_milli_eur,
                 description: None,
                 signed_offer: entry.get("document").cloned(),
             });
@@ -1716,7 +1717,10 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 .get("launch_url")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let price_milli_act = item.get("price_milli_act").and_then(Value::as_i64);
+            let price_milli_eur = item
+                .get("price_milli_eur")
+                .and_then(Value::as_i64)
+                .map(MilliEur::from_milli);
             let description = item
                 .get("description")
                 .and_then(Value::as_str)
@@ -1731,7 +1735,7 @@ pub(crate) fn parse_marketplace_feed(parsed: &Value) -> (usize, Vec<MarketplaceO
                 ui_bundle_hash,
                 ui_bundle_size_bytes,
                 launch_url,
-                price_milli_act,
+                price_milli_eur,
                 description,
                 signed_offer: None,
             }
@@ -1880,10 +1884,10 @@ fn synthesize_module_from_offer(
         runtime_join_queries: std::collections::BTreeMap::new(),
         child_modules: Default::default(),
         max_child_wait_sec: None,
-        max_child_spend_milli_act: None,
+        max_child_spend_milli_eur: None,
         image: format!("network://{hub_origin}/offers/{}", offer.id),
         network: NetworkPolicy::default(),
-        price_milli_act: offer.price_milli_act.unwrap_or(0),
+        price_milli_eur: offer.price_milli_eur.unwrap_or(MilliEur::ZERO),
         offers: Vec::new(),
         resources: PluginResources::default(),
         inputs: PluginInputs::default(),
@@ -1929,7 +1933,7 @@ fn synthesize_module_from_subscription(sub: &SubscribedNetworkOffer) -> Option<R
         ui_bundle_hash: sub.ui_bundle_hash.clone(),
         ui_bundle_size_bytes: sub.ui_bundle_size_bytes,
         launch_url: sub.launch_url.clone(),
-        price_milli_act: Some(sub.price_milli_act),
+        price_milli_eur: Some(sub.price_milli_eur),
         description: (!sub.description.is_empty()).then(|| sub.description.clone()),
         signed_offer: None,
     };
@@ -2413,7 +2417,7 @@ mod tests {
                                 "category": "Proteomics",
                                 "execution": "cloud_only",
                                 "image": "registry.example.org/mod@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                "price_milli_act": 2500,
+                                "price_milli_eur": 2500,
                                 "ui": { "entry": "ui/dist/index.html" }
                             },
                             "has_ui_bundle": true,
@@ -2578,7 +2582,7 @@ mod tests {
             ui_bundle_hash: None,
             ui_bundle_size_bytes: None,
             launch_url: None,
-            price_milli_act: 0,
+            price_milli_eur: MilliEur::ZERO,
         };
         let tmp = tempfile::tempdir().unwrap();
         let unconsented = MarketplaceClient::new(tmp.path(), local_cfg("https://hub.example.org")).unwrap();

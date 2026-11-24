@@ -70,7 +70,7 @@ fn session(
         "quote": {
             "run_id": format!("run-{org}"), "plugin_id": "synthetic/reader", "plugin_version": "1",
             "image_ref": "synthetic/reader", "target_node_id": "synthetic-node",
-            "estimated_cost_act": 0, "workload_hash": "11".repeat(32),
+            "estimated_cost_milli_eur": 0, "workload_hash": "11".repeat(32),
             "froglet_quote": {}, "expires_at": "2026-01-01T00:05:00Z"
         }
     }))

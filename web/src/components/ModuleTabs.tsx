@@ -6,10 +6,9 @@ import { ProvenancePanel } from "./ProvenancePanel";
 import { ScientificViews } from "./ScientificViews";
 import {
   effectiveRunCostMilli,
-  formatWorkspaceAmount,
+  formatMilliEur,
   runStatusLabel,
   type DatasetGrant,
-  type NegotiatedModuleOfferPrice,
   type RunVerification,
   type PluginSummary,
   type ResolvedPluginOffer,
@@ -210,7 +209,7 @@ export function ModuleApiTab({
   sessionId,
   isFocused,
   isConfirmingRun,
-  isLocalPlayLedger = false,
+  isLocalMode = false,
   onSyncDraftParams,
   onRunApiTest,
   onQuoteConfirmed,
@@ -222,7 +221,7 @@ export function ModuleApiTab({
   sessionId?: string;
   isFocused: boolean;
   isConfirmingRun: boolean;
-  isLocalPlayLedger?: boolean;
+  isLocalMode?: boolean;
   onSyncDraftParams?: (pluginId: string, params: Record<string, unknown>) => void;
   onRunApiTest?: (
     params: Record<string, unknown>,
@@ -231,8 +230,11 @@ export function ModuleApiTab({
   onQuoteConfirmed?: (completed: RunRecord) => Promise<void> | void;
   onInspectRun: (runId: string) => void;
 }) {
-  const fmtAmount = (milli: number) =>
-    formatWorkspaceAmount(milli, isLocalPlayLedger && plugin.runs_in !== "cloud" && plugin.runs_in !== "network_provider" && plugin.runs_in !== "provider_edge");
+  const isLocalRun =
+    plugin.runs_in === "local" ||
+    (isLocalMode && plugin.runs_in !== "cloud" && plugin.runs_in !== "network_provider");
+  const fmtAmount = (milliEur: number) =>
+    isLocalRun ? "Local run (no charge)" : formatMilliEur(milliEur);
   const schema = plugin.manifest.inputs.schema ?? {};
   const schemaProps =
     (schema["properties"] as Record<string, SchemaPropertySpec> | undefined) ?? {};
@@ -249,8 +251,8 @@ export function ModuleApiTab({
       {
         id: "default",
         name: "Standard Run",
-        price_milli_act: plugin.manifest.price_milli_act,
-        base_fee_milli_act: 0,
+        price_milli_eur: plugin.manifest.price_milli_eur,
+        base_fee_milli_eur: 0,
         max_input_bytes: 64 * 1024 * 1024,
         max_output_bytes: 32 * 1024 * 1024,
         max_runtime_sec: plugin.manifest.resources.timeout_sec,
@@ -435,7 +437,7 @@ export function ModuleApiTab({
             <p className="bc-caption" style={{ marginTop: 3 }}>
               Two-phase verifiable execution over {plugin.marketplace_offer_id ? "REST" : "REST or BioCompass MCP"}. Active grant:{" "}
               <strong>{activeGrant?.label ?? "Default"}</strong> · Cost:{" "}
-              <strong>{fmtAmount(plugin.manifest.price_milli_act)}</strong>
+              <strong>{fmtAmount(plugin.manifest.price_milli_eur)}</strong>
             </p>
           </div>
           <span className="bc-badge bc-badge-accent mono">{plugin.marketplace_offer_id ? "REST" : "REST + MCP"}</span>
@@ -556,7 +558,7 @@ export function ModuleApiTab({
             >
               {effectiveOffers.map((off) => (
                 <option key={off.id} value={off.id}>
-                  {off.name} ({fmtAmount(off.price_milli_act)})
+                  {off.name} ({fmtAmount(off.price_milli_eur)})
                 </option>
               ))}
             </select>
@@ -600,7 +602,7 @@ export function ModuleApiTab({
           }}
         >
           <span>Offer: {selectedOffer.name}</span>
-          <span>Price: {fmtAmount(selectedOffer.price_milli_act)}</span>
+          <span>Price: {fmtAmount(selectedOffer.price_milli_eur)}</span>
           <span>
             Max Input: {(selectedOffer.max_input_bytes / (1024 * 1024)).toFixed(1)} MiB
           </span>
@@ -639,7 +641,7 @@ export function ModuleApiTab({
                   Signed Froglet Quote · {preparedQuote.offer_name ?? selectedOffer.name}
                 </strong>
                 <span className="bc-badge bc-badge-accent mono">
-                  {fmtAmount(preparedQuote.estimated_cost_act)}
+                  {fmtAmount(preparedQuote.estimated_cost_milli_eur)}
                 </span>
               </div>
               <span className="bc-caption mono">
@@ -675,11 +677,12 @@ export function ModuleApiTab({
                 Memory:{" "}
                 {preparedQuote.max_memory_mb ?? selectedOffer.max_memory_mb} MiB
               </span>
-              {typeof preparedQuote.base_fee_act === "number" &&
-                preparedQuote.base_fee_act > 0 && (
+              {!isLocalRun &&
+                typeof preparedQuote.base_fee_milli_eur === "number" &&
+                preparedQuote.base_fee_milli_eur > 0 && (
                   <span>
                     Non-refundable failed-run base fee:{" "}
-                    {fmtAmount(preparedQuote.base_fee_act)}
+                    {fmtAmount(preparedQuote.base_fee_milli_eur)}
                   </span>
                 )}
             </div>
@@ -806,7 +809,7 @@ export function ModuleApiTab({
                 <span className="mono bc-caption">{lastTestRun.run_id}</span>
                 <span className="bc-caption">
                   {lastTestRun.artifacts.length} artifact(s) ·{" "}
-                  Quoted {fmtAmount(lastTestRun.quote.estimated_cost_act)}
+                  {isLocalRun ? "Local run (no charge)" : `Quoted ${formatMilliEur(lastTestRun.quote.estimated_cost_milli_eur)}`}
                 </span>
               </div>
               <button
@@ -934,7 +937,7 @@ export function ModuleRunsTab({
   requestedRunId,
   isFocused,
   isConfirmingRun,
-  isLocalPlayLedger = false,
+  isLocalMode = false,
   liveLogs,
   verifyReport,
   onClearRequestedRunId,
@@ -946,13 +949,17 @@ export function ModuleRunsTab({
   requestedRunId?: string | null;
   isFocused: boolean;
   isConfirmingRun: boolean;
-  isLocalPlayLedger?: boolean;
+  isLocalMode?: boolean;
   liveLogs: string[];
   verifyReport: RunVerification | null;
   onClearRequestedRunId?: () => void;
   onUpdateRun: (run: RunRecord) => void;
   onReverifyChain: (run: RunRecord, tamperOneByte: boolean) => void;
 }) {
+  const isLocalRun = plugin
+    ? plugin.runs_in === "local" ||
+      (isLocalMode && plugin.runs_in !== "cloud" && plugin.runs_in !== "network_provider")
+    : isLocalMode;
   const moduleName = plugin?.manifest.name ?? runs[0]?.plugin_id ?? "this module";
   const [selectedRunId, setSelectedRunId] = useState<string | null>(
     () => requestedRunId ?? runs[0]?.run_id ?? null,
@@ -1065,7 +1072,12 @@ export function ModuleRunsTab({
                       <span>{formatRunTimestamp(run.created_at)}</span>
                       {duration && <span>· {duration}</span>}
                       <span>· {run.artifacts.length} file(s)</span>
-                      <span>· Quoted {formatWorkspaceAmount(run.quote.estimated_cost_act, isLocalPlayLedger)}</span>
+                      <span>
+                        ·{" "}
+                        {isLocalRun
+                          ? "Local run (no charge)"
+                          : `Quoted ${formatMilliEur(run.quote.estimated_cost_milli_eur)}`}
+                      </span>
                       {run.receipt_verified && (
                         <span className="bc-run-verified-dot" title="Schnorr receipt verified">
                           <IconShield size={12} />
@@ -1299,15 +1311,15 @@ export function ModuleRunsTab({
 export function ModuleAboutTab({
   plugin,
   isFocused,
-  isLocalPlayLedger = false,
-  negotiatedPrice = null,
+  isLocalMode = false,
 }: {
   plugin: PluginSummary;
   isFocused: boolean;
-  isLocalPlayLedger?: boolean;
-  /** This organization's negotiated price for the release, when one applies. */
-  negotiatedPrice?: NegotiatedModuleOfferPrice | null;
+  isLocalMode?: boolean;
 }) {
+  const isLocalRun =
+    plugin.runs_in === "local" ||
+    (isLocalMode && plugin.runs_in !== "cloud" && plugin.runs_in !== "network_provider");
   const schema = plugin.manifest.inputs.schema ?? {};
   const schemaProps =
     (schema["properties"] as Record<string, SchemaPropertySpec> | undefined) ?? {};
@@ -1375,14 +1387,9 @@ export function ModuleAboutTab({
         <div className="bc-meta-item">
           <span className="bc-caption">Run Cost</span>
           <span data-testid="module-run-cost">
-            {formatWorkspaceAmount(
-              effectiveRunCostMilli(plugin, negotiatedPrice),
-              isLocalPlayLedger &&
-                plugin.runs_in !== "cloud" &&
-                plugin.runs_in !== "network_provider" &&
-                plugin.runs_in !== "provider_edge",
-            )}
-            {negotiatedPrice && <span className="bc-caption"> (negotiated)</span>}
+            {isLocalRun
+              ? "Local run (no charge)"
+              : formatMilliEur(effectiveRunCostMilli(plugin))}
           </span>
         </div>
         <div className="bc-meta-item">

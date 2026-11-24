@@ -1,7 +1,7 @@
 //! Signed module attestations (`U-1`): a hub signs, for every module version it lists, the UI
 //! bundle hash and size, the container image digest and its own key, using the same `froglet/v1`
 //! RFC 8785 JCS + BIP340 Schnorr artifact signing as the run chain. A workspace pins the hub key
-//! and verifies the attestation (and, for federated modules, the providing peer's signed offer)
+//! and verifies the attestation (and, for network-provider modules, the provider's signed offer)
 //! before it caches or serves any UI bundle.
 
 use froglet_protocol::crypto::{NodeSigningKey, public_key_hex, sign_message_hex};
@@ -15,15 +15,15 @@ pub const MODULE_ATTESTATION_ARTIFACT_TYPE: &str = "bc.module_attestation.v1";
 /// Offer capability carrying a UI bundle hash inside a signed `froglet/v1` offer.
 pub const UI_BUNDLE_HASH_CAPABILITY_PREFIX: &str = "biocompass.ui_bundle_hash.v1:";
 
-/// The connected hub's statement that a federated peer it approved provides this module.
+/// The connected hub's statement that an upstream provider supplies this module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderEndorsement {
     pub peer_id: String,
-    /// The peer's signing key as recorded in the hub's approved federation peers.
+    /// The upstream provider's signing key.
     pub peer_pubkey: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_origin: Option<String>,
-    /// Hash of the peer-signed `froglet/v1` offer that carries the UI bundle hash.
+    /// Hash of the provider-signed `froglet/v1` offer that carries the UI bundle hash.
     pub offer_hash: String,
 }
 
@@ -54,7 +54,7 @@ pub enum AttestationError {
     UntrustedSigner { pinned: String, presented: String },
     /// Attested values differ from what is being opened.
     Mismatch(String),
-    /// The federated peer's signed offer failed verification.
+    /// The upstream provider's signed offer failed verification.
     ProviderOffer(String),
 }
 
@@ -132,7 +132,7 @@ pub fn attestation_signer(doc: &Value) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// For a federated module: verify the peer-signed `froglet/v1` offer against the endorsement in a
+/// For an upstream provider module: verify the provider-signed `froglet/v1` offer against the endorsement in a
 /// verified hub attestation, and that the offer signs the same UI bundle hash.
 pub fn verify_provider_offer(
     attested: &ModuleAttestationPayload,

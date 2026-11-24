@@ -2,9 +2,8 @@
 #![cfg(unix)]
 
 use biocompass_core_traits::{
-    CreditAmountAct, LocalFsBlobStore, OrgId, PaymentGateway, PluginId, PrepareRunRequest,
-    RunDispatcher, RunStatus, SessionStore, SqliteActLedger, SqliteSessionStore,
-    StandardOciPolicyVerifier,
+    LocalFsBlobStore, MilliEur, OrgId, PluginId, PrepareRunRequest, RunDispatcher, RunStatus,
+    SessionStore, SqliteSessionStore, StandardOciPolicyVerifier,
 };
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
 use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
@@ -44,13 +43,6 @@ printf '{"number":%s}\n' "$number" > "$out/result.json"
     InProcessNodeRuntime::new(NodeRuntimeDeps {
         keys: NodeKeypairSet::load_or_generate(dir.join("keys")).unwrap(),
         session_store: Arc::new(SqliteSessionStore::open(dir.join("sessions.sqlite")).unwrap()),
-        payment_gateway: Arc::new(
-            SqliteActLedger::open(
-                dir.join("ledger.sqlite"),
-                CreditAmountAct::from_whole_act(20),
-            )
-            .unwrap(),
-        ),
         blob_store: Arc::new(LocalFsBlobStore::new(dir.join("store")).unwrap()),
         oci_registry: Arc::new(StandardOciPolicyVerifier::strict_pinned()),
         oci_runner: Arc::new(OciContainerRunner::from_engine(DetectedEngine {
@@ -77,7 +69,7 @@ name="Number"
 version="{major}.0.0"
 execution="local"
 network="none"
-price_milli_act={price}
+price_milli_eur={price}
 image="localhost/fixture/number@sha256:{}"
 "#,
             major.to_string().repeat(64)
@@ -128,8 +120,8 @@ async fn exact_release_and_existing_quote_survive_new_registration() {
     );
     assert_eq!(explicit.image_ref, old_quote.image_ref);
     assert_ne!(explicit.image_ref, latest.image_ref);
-    assert_eq!(explicit.estimated_cost_act.milli_act(), 2000);
-    assert_eq!(latest.estimated_cost_act.milli_act(), 7000);
+    assert_eq!(explicit.estimated_cost_milli_eur, MilliEur::from_milli(2000));
+    assert_eq!(latest.estimated_cost_milli_eur, MilliEur::from_milli(7000));
     assert_eq!(node.list_plugins().await.len(), 1);
     assert_eq!(node.list_plugins().await[0].manifest.version, "2.0.0");
     for requested in ["1", "1.*", " ", "1.0.0 ", "9.0.0"] {
@@ -141,7 +133,7 @@ async fn exact_release_and_existing_quote_survive_new_registration() {
     for mutated in [
         {
             let mut p = one.clone();
-            p.manifest.price_milli_act += 1000;
+            p.manifest.price_milli_eur += MilliEur::from_milli(1000);
             p
         },
         {
@@ -171,23 +163,10 @@ async fn exact_release_and_existing_quote_survive_new_registration() {
                 .froglet_receipt
         );
     }
-    let ledger = SqliteActLedger::open(
-        dir.path().join("ledger.sqlite"),
-        CreditAmountAct::from_whole_act(20),
-    )
-    .unwrap();
-    assert_eq!(
-        ledger
-            .available_balance(&OrgId::from("local-customer"))
-            .await
-            .unwrap()
-            .milli_act(),
-        9000
-    );
 }
 
 #[tokio::test]
-async fn altered_manifest_after_restart_cannot_be_confirmed_or_charged() {
+async fn altered_manifest_after_restart_cannot_be_confirmed() {
     let dir = tempdir().unwrap();
     let original = runtime(dir.path());
     let one = release(dir.path(), 1, 2000);
@@ -205,19 +184,6 @@ async fn altered_manifest_after_restart_cannot_be_confirmed_or_charged() {
             .await
             .is_err()
     );
-    let ledger = SqliteActLedger::open(
-        dir.path().join("ledger.sqlite"),
-        CreditAmountAct::from_whole_act(20),
-    )
-    .unwrap();
-    let org = OrgId::from("local-customer");
-    assert!(
-        ledger
-            .run_reservation(&org, &prepared.run_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
     let store = SqliteSessionStore::open(dir.path().join("sessions.sqlite")).unwrap();
     assert_eq!(
         store.get_run(&prepared.run_id).await.unwrap().status,
@@ -226,7 +192,7 @@ async fn altered_manifest_after_restart_cannot_be_confirmed_or_charged() {
 }
 
 #[tokio::test]
-async fn modified_price_in_stored_quote_cannot_reserve_credits() {
+async fn modified_price_in_stored_quote_cannot_be_confirmed() {
     let dir = tempdir().unwrap();
     let node = runtime(dir.path());
     node.register_plugin(release(dir.path(), 1, 2000))
@@ -235,20 +201,12 @@ async fn modified_price_in_stored_quote_cannot_reserve_credits() {
     let quote = node.prepare_run(request(Some("1.0.0"))).await.unwrap();
     let store = SqliteSessionStore::open(dir.path().join("sessions.sqlite")).unwrap();
     let mut row = store.get_run(&quote.run_id).await.unwrap();
-    row.quote.estimated_cost_act = CreditAmountAct::from_whole_act(7);
+    row.quote.estimated_cost_milli_eur = MilliEur::from_eur(7);
     store.save_run(&row).await.unwrap();
     assert!(node.confirm_run(&quote.run_id, "approval").await.is_err());
-    let ledger = SqliteActLedger::open(
-        dir.path().join("ledger.sqlite"),
-        CreditAmountAct::from_whole_act(20),
-    )
-    .unwrap();
-    assert!(
-        ledger
-            .run_reservation(&row.org_id, &quote.run_id)
-            .await
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        store.get_run(&quote.run_id).await.unwrap().status,
+        RunStatus::Prepared
     );
 }
 
@@ -297,17 +255,10 @@ async fn selected_cloud_only_release_is_visible_but_never_prepared_or_confirmed_
         restarted.confirm_run(&held.run_id, "original-key").await,
         Err(CompassError::AccessDenied(_))
     ));
-    let ledger = SqliteActLedger::open(
-        dir.path().join("ledger.sqlite"),
-        CreditAmountAct::from_whole_act(20),
-    )
-    .unwrap();
-    assert!(
-        ledger
-            .run_reservation(&OrgId::from("local-customer"), &held.run_id)
-            .await
-            .unwrap()
-            .is_none()
+    let store = SqliteSessionStore::open(dir.path().join("sessions.sqlite")).unwrap();
+    assert_eq!(
+        store.get_run(&held.run_id).await.unwrap().status,
+        RunStatus::Prepared
     );
 }
 

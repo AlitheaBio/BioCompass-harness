@@ -22,7 +22,7 @@ fn run() -> RunRecord {
         "run_id":"r1","org_id":"buyer","session_id":null,"plugin_id":"measure","plugin_version":"1",
         "status":"succeeded","params":{},"grant":null,"result_json":{"value":1},
         "quote":{"run_id":"r1","plugin_id":"measure","plugin_version":"1","image_ref":"image@sha256:abc",
-            "target_node_id":"worker","estimated_cost_act":17,"workload_hash":hash(b"work"),
+            "target_node_id":"worker","estimated_cost_milli_eur":17,"workload_hash":hash(b"work"),
             "dataset_grant_summary":null,"froglet_quote":{"signer":"provider"},"expires_at":"2026-01-01T12:00:00Z"},
         "artifacts":[{"name":"nested/raw.dat","blob_key":"remote/external","media_type":"application/octet-stream",
             "sha256":hash(b"binary\x00"),"size_bytes":7}],

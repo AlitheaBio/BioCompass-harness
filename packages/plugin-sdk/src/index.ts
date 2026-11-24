@@ -7,7 +7,7 @@
  * - Source-window verification (`event.source === iframe.contentWindow` on host;
  *   `event.source === window.parent` inside sandboxed plugin).
  * - Two-step consent gate: `prepareRun` only requests a signed Froglet `Quote` and surfaces the
- *   host's user confirmation card; sandboxed plugins cannot confirm runs or spend ACT directly.
+ *   host's user confirmation card; sandboxed plugins cannot confirm runs or spend EUR directly.
  */
 
 export const BIOCOMPASS_RPC_CHANNEL = "biocompass.plugin.rpc.v1" as const;
@@ -178,10 +178,20 @@ export interface SdkRunQuote {
   plugin_version: string;
   image_ref: string;
   target_node_id: string;
-  estimated_cost_act: number;
+  estimated_cost_milli_eur: number;
   workload_hash: string;
   dataset_grant_summary: string | null;
   expires_at: string;
+}
+
+/** Format a milli-EUR integer as euros to the cent (`€0.00`, `€5.00`, `-€0.05`). */
+export function formatMilliEur(milliEur: number): string {
+  const abs = Math.abs(milliEur);
+  const totalCents = Math.floor((abs + 5) / 10);
+  const sign = milliEur < 0 && totalCents > 0 ? "-" : "";
+  const whole = Math.floor(totalCents / 100);
+  const frac = String(totalCents % 100).padStart(2, "0");
+  return `${sign}€${whole}.${frac}`;
 }
 
 export interface SdkArtifactRef {

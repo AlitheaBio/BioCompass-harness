@@ -78,7 +78,7 @@ impl WorkloadDescriptor {
 /// Compute the deterministic RFC 8785 JCS SHA-256 `workload_hash` over every execution-critical input (`B6`, `W6`).
 ///
 /// `node-runtime`, `compass-hub`, and `froglet-node` all call this single function independently and
-/// compare the result against the signed Froglet `Quote` & `Deal` before reserving ACT or launching any container.
+/// compare the result against the signed Froglet `Quote` & `Deal` before reserving EUR or launching any container.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_canonical_workload_hash(
     plugin_id: &PluginId,

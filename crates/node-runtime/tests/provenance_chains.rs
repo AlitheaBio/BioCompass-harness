@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use biocompass_core_traits::{
-    CreditAmountAct, ErrorCode, ExtensionRefStage, LocalFsBlobStore, OciImageRef,
+    ErrorCode, ExtensionRefStage, LocalFsBlobStore, OciImageRef,
     OciRegistryClient, OrgId, PluginId, PrepareRunRequest, RunDispatcher, RunId, RunInput,
-    RunStatus, SqliteActLedger, SqliteSessionStore, expected_extension_refs, verify_extension_refs,
+    RunStatus, SqliteSessionStore, expected_extension_refs, verify_extension_refs,
 };
 use biocompass_node_runtime::{
     InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps, verify_froglet_chain_offline,
@@ -34,7 +34,7 @@ fn write_plugin_manifest(dir: &Path, id: &str, max_input_bytes: u64, child_modul
     let children_toml = if child_modules.is_empty() {
         String::new()
     } else if child_modules == ["caller"] {
-        "child_modules = \"caller\"\nmax_child_wait_sec = 60\nmax_child_spend_milli_act = 0\n".to_owned()
+        "child_modules = \"caller\"\nmax_child_wait_sec = 60\nmax_child_spend_milli_eur = 0\n".to_owned()
     } else {
         let quoted: Vec<String> = child_modules.iter().map(|m| format!("\"{m}\"")).collect();
         format!(
@@ -58,7 +58,7 @@ timeout_sec = 10
 [[offers]]
 id = "default"
 name = "Default"
-price_milli_act = 0
+price_milli_eur = 0
 max_input_bytes = {max_input_bytes}
 max_output_bytes = 1048576
 
@@ -140,7 +140,6 @@ fn build_runtime(tmp: &Path) -> (Arc<InProcessNodeRuntime>, Arc<LocalFsBlobStore
     let keys = NodeKeypairSet::load_or_generate(tmp.join("keys")).unwrap();
     let session_store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let blob_store = Arc::new(LocalFsBlobStore::new(tmp.join("blobs")).unwrap());
-    let ledger = Arc::new(SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(100)).unwrap());
     let oci_runner = Arc::new(OciContainerRunner::from_engine(DetectedEngine {
         kind: EngineKind::Docker,
         binary_path: fake_docker,
@@ -153,7 +152,6 @@ fn build_runtime(tmp: &Path) -> (Arc<InProcessNodeRuntime>, Arc<LocalFsBlobStore
             session_store: session_store.clone(),
             blob_store: blob_store.clone(),
             oci_registry: Arc::new(LocalTagRegistry),
-            payment_gateway: ledger,
             oci_runner,
             stage_root_dir: tmp.join("stages"),
             allow_local_dev_tags: true,

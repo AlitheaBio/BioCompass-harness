@@ -9,7 +9,7 @@ execution = "either"
 requires_catalog_level = "compute_only"
 image = "ghcr.io/alitheabio/hla-motif-enrichment:2.0.0"
 network = "none"
-price_milli_act = 5000
+price_milli_eur = 5000
 
 [resources]
 cpus = 2
@@ -21,8 +21,8 @@ pids_limit = 256
 [[offers]]
 id = "standard"
 name = "Standard Cohort Enrichment"
-price_milli_act = 5000
-base_fee_milli_act = 0
+price_milli_eur = 5000
+base_fee_milli_eur = 0
 max_input_bytes = 1048576
 max_output_bytes = 67108864
 max_runtime_sec = 120
@@ -31,8 +31,8 @@ max_memory_mb = 2048
 [[offers]]
 id = "deep_scan"
 name = "Extended Cohort Enrichment"
-price_milli_act = 10000
-base_fee_milli_act = 1000
+price_milli_eur = 10000
+base_fee_milli_eur = 1000
 max_input_bytes = 4194304
 max_output_bytes = 268435456
 max_runtime_sec = 300

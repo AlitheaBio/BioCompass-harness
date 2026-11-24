@@ -1,9 +1,9 @@
 //! The 5 cloud-agnostic capability traits decoupling domain crates from deployment backing services.
 //!
-//! - Local (`biocompass up`): SQLite WAL + POSIX `~/.biocompass/store` + in-process `NodeRuntime` + SQLite ACT ledger.
-//! - Cloud (`compass-hub` + `biocompass --mode cloud-web`): PostgreSQL 16 + S3 REST v4 + OCI Distribution v1.1 + WSS `froglet-node` pool + Mollie/B2B ACT ledger.
+//! - Local (`biocompass up`): SQLite WAL + POSIX `~/.biocompass/store` + in-process `NodeRuntime` (`settlement_method = "none"`).
+//! - Cloud (`compass-hub` + `biocompass --mode cloud-web`): PostgreSQL 16 + S3 REST v4 + OCI Distribution v1.1 + worker pool + PostgreSQL EUR ledger.
 
-use crate::ids::{CreditAmountAct, OrgId, ProjectId, RunId, SessionId};
+use crate::ids::{MilliEur, OrgId, ProjectId, RunId, SessionId};
 use crate::types::{
     CompassResult, LedgerTx, OciImageRef, PrepareRunRequest, ProjectRecord, RunLogEvent, RunQuote,
     RunRecord, RunReservation, SessionEvent, SessionEventKind, SessionRecord,
@@ -132,37 +132,37 @@ pub trait RunDispatcher: Send + Sync {
     /// sign a `froglet/v1` `Quote`, and persist a `Prepared` run awaiting user confirmation.
     async fn prepare_run(&self, req: PrepareRunRequest) -> CompassResult<RunQuote>;
 
-    /// Step 2 (`Confirm`): reserve ACT credits, materialize grant-masked `/in/data/*.parquet`,
-    /// run the hardened container, verify & sign the `froglet/v1` `Receipt`, and settle ACT credits.
+    /// Step 2 (`Confirm`): reserve EUR balance (when billed), materialize `/in/data/*.parquet`,
+    /// run the hardened container, verify & sign the `froglet/v1` `Receipt`, and settle.
     async fn confirm_run(&self, run_id: &RunId, idempotency_key: &str) -> CompassResult<RunRecord>;
 
     /// Subscribe to live container stdout/stderr and stage events for a run.
     fn subscribe_logs(&self) -> broadcast::Receiver<RunLogEvent>;
 }
 
-/// 5. Pluggable double-entry ACT credit ledger & top-up gateway (No-op/SQLite locally; B2B Invoice + Mollie in Cloud).
+/// 5. Pluggable double-entry EUR credit ledger (PostgreSQL + B2B Invoice / card / marketplace in Cloud).
 #[async_trait]
-pub trait PaymentGateway: Send + Sync {
-    /// Inspect the original confirmation terms when this gateway owns native run recovery.
+pub trait Ledger: Send + Sync {
+    /// Inspect the original confirmation terms when this ledger exposes run reservations.
     async fn run_reservation(
         &self,
         _org_id: &OrgId,
         _run_id: &RunId,
     ) -> CompassResult<Option<RunReservation>> {
         Err(crate::types::CompassError::Payment(
-            "this gateway does not expose native run reservations".into(),
+            "this ledger does not expose native run reservations".into(),
         ))
     }
 
-    /// Return available (unreserved) ACT balance for `org_id`.
-    async fn available_balance(&self, org_id: &OrgId) -> CompassResult<CreditAmountAct>;
+    /// Return available (unreserved) EUR balance for `org_id`.
+    async fn available_balance(&self, org_id: &OrgId) -> CompassResult<MilliEur>;
 
-    /// Atomically reserve `amount` ACT before dispatching a confirmed `Deal`.
+    /// Atomically reserve `amount` EUR before dispatching a confirmed `Deal`.
     async fn reserve_for_run(
         &self,
         org_id: &OrgId,
         run_id: &RunId,
-        amount: CreditAmountAct,
+        amount: MilliEur,
         idempotency_key: &str,
     ) -> CompassResult<LedgerTx>;
 
@@ -174,7 +174,7 @@ pub trait PaymentGateway: Send + Sync {
         receipt_hash: &str,
     ) -> CompassResult<LedgerTx>;
 
-    /// Refund reserved ACT back to `org_id` if container execution fails, times out, or is canceled.
+    /// Refund reserved EUR back to `org_id` if container execution fails, times out, or is canceled.
     async fn refund_run(
         &self,
         org_id: &OrgId,
@@ -182,11 +182,11 @@ pub trait PaymentGateway: Send + Sync {
         reason: &str,
     ) -> CompassResult<LedgerTx>;
 
-    /// Credit `org_id` via zero-vendor manual B2B PO/invoice or verified webhook (e.g. Mollie EU).
+    /// Credit `org_id` via manual B2B PO/invoice or verified payment webhook.
     async fn credit_topup(
         &self,
         org_id: &OrgId,
-        amount: CreditAmountAct,
+        amount: MilliEur,
         reference: &str,
         via_webhook: bool,
     ) -> CompassResult<LedgerTx>;

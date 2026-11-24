@@ -1,5 +1,5 @@
 /**
- * Validate external / federated URLs before rendering in `<a href>` or `window.location.assign`
+ * Validate external URLs before rendering in `<a href>` or `window.location.assign`
  * (`SEC-09`, `SEC-32`). Only `https:`, `http:`, and optional single-slash relative `/...` paths
  * are allowed; rejects control characters, `javascript:`, `vbscript:`, `data:`, `//`, `/\`.
  */
@@ -40,11 +40,9 @@ export function isSafeHttpUrl(
   }
 }
 
-export function sanitizeFederatedLaunchUrl(raw: string): string | null {
+export function safeLaunchUrl(raw: string): string | null {
   return isSafeHttpUrl(raw, { allowRelative: true });
 }
-
-export const safeLaunchUrl = sanitizeFederatedLaunchUrl;
 
 const SAFE_RASTER_DATA_IMAGE_RE =
   /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i;

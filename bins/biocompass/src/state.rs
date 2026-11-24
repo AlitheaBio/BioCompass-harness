@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use biocompass_agent_core::llm::LlmProviderConfig;
 use biocompass_agent_core::{AgentConfig, AgentRuntime};
 use biocompass_core_traits::{
-    BlobStore, CatalogId, CompassError, CompassResult, CreditAmountAct, DatasetGrant, GrantLevel,
-    LocalFsBlobStore, NodeId, OciImageRef, OciRegistryClient, OrgId, PaymentGateway, PluginId,
-    QueryAst, RunDispatcher, SessionStore, SqliteActLedger, SqliteSessionStore,
+    BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant, GrantLevel,
+    Ledger, LocalFsBlobStore, NodeId, OciImageRef, OciRegistryClient, OrgId, PluginId,
+    QueryAst, RunDispatcher, SessionStore, SqliteSessionStore,
 };
 use biocompass_data_engine::{
     CatalogSummary, DuckDbCatalogEngine, QueryTableResult, seed_demo_hla_catalog,
@@ -254,7 +254,7 @@ pub struct AppState {
     pub local_sqlite: Option<Arc<SqliteSessionStore>>,
     pub local_runtime: Option<Arc<InProcessNodeRuntime>>,
     pub blob_store: Arc<dyn BlobStore>,
-    pub payment_gateway: Arc<dyn PaymentGateway>,
+    pub ledger: Option<Arc<dyn Ledger>>,
     pub dispatcher: Arc<dyn RunDispatcher>,
     pub registry: Arc<dyn WorkspaceRegistryPort>,
     pub installed_workspace: Option<Arc<crate::workspace::InstalledWorkspace>>,
@@ -327,12 +327,6 @@ impl AppState {
         let sqlite_store = Arc::new(SqliteSessionStore::open(root.join("sessions.sqlite"))?);
         let session_store: Arc<dyn SessionStore> = sqlite_store.clone();
         let blob_store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::new(root.join("store"))?);
-        let payment_gateway: Arc<dyn PaymentGateway> = Arc::new(SqliteActLedger::open(
-            root.join("ledger.sqlite"),
-            CreditAmountAct::from_whole_act(250),
-        )?);
-
-        let _ = payment_gateway.available_balance(&default_org_id).await?;
 
         let oci_runner = Arc::new(OciContainerRunner::detect().await?);
         let oci_registry: Arc<dyn OciRegistryClient> = Arc::new(WorkstationImageVerifier {
@@ -352,7 +346,6 @@ impl AppState {
             session_store: session_store.clone(),
             blob_store: blob_store.clone(),
             oci_registry,
-            payment_gateway: payment_gateway.clone(),
             oci_runner: oci_runner.clone(),
             stage_root_dir: root.join("stages"),
             allow_local_dev_tags,
@@ -438,7 +431,7 @@ impl AppState {
             local_sqlite: Some(sqlite_store),
             local_runtime: Some(runtime.clone()),
             blob_store,
-            payment_gateway,
+            ledger: None,
             dispatcher: runtime.clone(),
             registry: runtime,
             local_owner: None,
@@ -481,7 +474,7 @@ impl AppState {
 
         let session_store: Arc<dyn SessionStore> = hub.clone();
         let blob_store: Arc<dyn BlobStore> = hub.clone();
-        let payment_gateway: Arc<dyn PaymentGateway> = hub.clone();
+        let ledger: Arc<dyn Ledger> = hub.clone();
         let dispatcher: Arc<dyn RunDispatcher> = hub.clone();
         let registry: Arc<dyn WorkspaceRegistryPort> = hub.clone();
 
@@ -526,7 +519,7 @@ impl AppState {
             local_sqlite: None,
             local_runtime: None,
             blob_store,
-            payment_gateway,
+            ledger: Some(ledger),
             dispatcher,
             registry,
             local_owner: None,

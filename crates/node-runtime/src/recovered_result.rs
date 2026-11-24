@@ -288,8 +288,7 @@ async fn recover_legacy_artifacts(
 mod tests {
     use super::*;
     use biocompass_core_traits::{
-        CreditAmountAct, LocalFsBlobStore, OrgId, SqliteActLedger, SqliteSessionStore,
-        StandardOciPolicyVerifier,
+        LocalFsBlobStore, OrgId, SqliteSessionStore, StandardOciPolicyVerifier,
     };
     use biocompass_oci_runner::{DetectedEngine, EngineKind};
     use tempfile::tempdir;
@@ -303,10 +302,6 @@ mod tests {
             session_store: Arc::new(SqliteSessionStore::open(temp.path().join("sessions"))?),
             blob_store: blobs.clone(),
             oci_registry: Arc::new(StandardOciPolicyVerifier::strict_pinned()),
-            payment_gateway: Arc::new(SqliteActLedger::open(
-                temp.path().join("ledger"),
-                CreditAmountAct::from_whole_act(0),
-            )?),
             oci_runner: Arc::new(OciContainerRunner::from_engine(DetectedEngine {
                 kind: EngineKind::Podman,
                 binary_path: PathBuf::new(),
@@ -500,7 +495,7 @@ type="object"
         for name in [
             "offer_id",
             "offer_name",
-            "base_fee_act",
+            "base_fee_milli_eur",
             "max_input_bytes",
             "max_output_bytes",
             "max_runtime_sec",

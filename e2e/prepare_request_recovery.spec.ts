@@ -5,7 +5,7 @@ test("a tab recovers its caller's lost quote and gives the next prepare a new ke
   const version = "1.0.0";
   const image = "fixture/paint@sha256:" + "a".repeat(64);
   const manifest = {id:module, name:"Paint", version, description:"", category:"utility", image,
-    network:"none", price_milli_act:5000, resources:{cpus:1,memory_mb:64,gpu:0,timeout_sec:30,pids_limit:16},
+    network:"none", price_milli_eur:5000, resources:{cpus:1,memory_mb:64,gpu:0,timeout_sec:30,pids_limit:16},
     inputs:{schema:{}},views:[]};
   const plugin = {manifest,installed:true,views:[],author:"Fixture",has_custom_ui:false,
     execution_target:"cloud",execution_label:"Cloud"};
@@ -24,7 +24,7 @@ test("a tab recovers its caller's lost quote and gives the next prepare a new ke
       // The response is lost only after the server recorded A's original request.
       if (received.length === 1) return route.abort("connectionreset");
       return route.fulfill({json:{run_id:run,plugin_id:module,plugin_version:version,image_ref:image,
-        target_node_id:"fixture",offer_id:"default",offer_name:"Default",estimated_cost_act:5000,
+        target_node_id:"fixture",offer_id:"default",offer_name:"Default",estimated_cost_milli_eur:5000,
         workload_hash:"f".repeat(64),froglet_quote:{},expires_at:"2099-01-01T00:00:00Z"}});
     }
     const fixtures: Record<string,unknown> = {
@@ -32,7 +32,7 @@ test("a tab recovers its caller's lost quote and gives the next prepare a new ke
       "auth/whoami":{org_id:"fixture-org",actor:caller,user_id:caller,auth_method:"session",role:"member"},
       catalogs:{catalogs:[]},grants:{grants:[],grant_usage:[]},plugins:{plugins:[plugin]},
       projects:{projects:[]},runs:{runs:[]},sessions:{sessions:[]},"saved-views":{views:[]},
-      ledger:{available_milli_act:20000,reserved_milli_act:0,transactions:[]},"llm/config":{configured:false,providers:[]},
+      ledger:{available_milli_eur:20000,reserved_milli_eur:0,transactions:[]},"llm/config":{configured:false,providers:[]},
     };
     return route.fulfill({status:path in fixtures ? 200 : 404,json:fixtures[path] ?? {error:"fixture not found"}});
   });

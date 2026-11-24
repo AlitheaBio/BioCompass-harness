@@ -81,7 +81,7 @@ impl McpErrorCode {
             | ErrorCode::AgentCredentialExpired
             | ErrorCode::AgentCredentialRevoked => Self::Unauthorized,
             ErrorCode::InsufficientFunds
-            | ErrorCode::DailyActBreakerExceeded
+            | ErrorCode::DailySpendBreakerExceeded
             | ErrorCode::AgentCeilingExceeded
             | ErrorCode::PaymentError => Self::PaymentRequired,
             ErrorCode::OffListModule

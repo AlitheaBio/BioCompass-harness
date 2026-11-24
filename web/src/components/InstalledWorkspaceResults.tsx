@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  ApiClientError, archiveWorkspaceResult, downloadInstalledWorkspaceResult, fetchInstalledWorkspaceRuns,
+  ApiClientError, downloadInstalledWorkspaceResult, fetchInstalledWorkspaceRuns,
   formatErrorInline, type InstalledResultsPage,
 } from "../api";
 import { workspaceReadHandle } from "../workspaceReadSession";
@@ -117,11 +117,6 @@ export function InstalledWorkspaceResults({ bearer, handle, refresh = 0, search 
             {run.artifacts.map(({ name }) =>
               <button type="button" key={name} className="bc-btn bc-btn-secondary" disabled={busy}
                 onClick={() => void perform(() => download(run.run_id, name))}>Download {name}</button>)}
-            {bearer && !page?.offline && <button type="button" className="bc-btn bc-btn-secondary" disabled={busy}
-              onClick={() => void perform(async () => {
-                await archiveWorkspaceResult(run.run_id, bearer);
-                setMessage("Result archived to cloud storage.");
-              })}>Archive result</button>}
           </div>
           {opened?.id === run.run_id && <pre className="bc-code-pre" aria-label="Saved result contents">{opened.text}</pre>}
         </div>

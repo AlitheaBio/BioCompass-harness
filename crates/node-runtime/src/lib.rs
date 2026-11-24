@@ -1,7 +1,7 @@
 //! `biocompass-node-runtime`: Two-step `Prepare -> Confirm` Froglet v1 execution node runtime.
 //!
 //! Orchestrates JSON Schema input validation, OCI Distribution v1.1 manifest verification,
-//! double-entry ACT credit reservation/settlement/refund, DuckDB Grant-masked `/in/data/*.parquet`
+//! local execution (`settlement_method = "none"`), DuckDB Grant-masked `/in/data/*.parquet`
 //! materialization, hardened `OciContainerRunner` execution, `BlobStore` stage-out, and
 //! RFC 8785 JCS + `secp256k1` BIP340 Schnorr 5-artifact (`Descriptor -> Offer -> Quote -> Deal -> Receipt`)
 //! chain signing & verification via `froglet-protocol` and `froglet-verify`.
@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use biocompass_core_traits::{
     ArtifactRef, BlobStore, CatalogId, CompassError, CompassResult, DatasetGrant,
     ExtensionRefStage, FilterExpr, GrantLevel, NodeId, OciImageRef, OciRegistryClient, OrgId,
-    PaymentGateway, PluginId, PrepareRunRequest, QueryAst, RunDispatcher, RunId, RunInput,
+    PluginId, PrepareRunRequest, QueryAst, RunDispatcher, RunId, RunInput,
     RunLogEvent, RunQuote, RunRecord, RunStatus, SessionEventKind, SessionStore,
     canonicalize_run_inputs, compute_canonical_workload_hash, expected_extension_refs,
     verify_extension_refs,
@@ -182,13 +182,12 @@ impl Drop for StageDirGuard {
     }
 }
 
-/// Dependency injection bundle for `InProcessNodeRuntime` (zero `if is_cloud` branching).
+/// Dependency injection bundle for `InProcessNodeRuntime` (local laptop mode, `settlement_method = "none"`).
 pub struct NodeRuntimeDeps {
     pub keys: NodeKeypairSet,
     pub session_store: Arc<dyn SessionStore>,
     pub blob_store: Arc<dyn BlobStore>,
     pub oci_registry: Arc<dyn OciRegistryClient>,
-    pub payment_gateway: Arc<dyn PaymentGateway>,
     pub oci_runner: Arc<OciContainerRunner>,
     pub stage_root_dir: PathBuf,
     pub allow_local_dev_tags: bool,
@@ -217,7 +216,7 @@ pub fn release_terms_hash(plugin: &LoadedPlugin) -> CompassResult<String> {
         "format": "biocompass.native-module-terms.v1",
         "id": m.id, "version": m.version, "image": m.image, "execution": m.execution,
         "requires_catalog_level": m.requires_catalog_level, "network": m.network,
-        "resources": m.resources, "inputs": m.inputs, "offers": m.offers, "price_milli_act": m.price_milli_act
+        "resources": m.resources, "inputs": m.inputs, "offers": m.offers, "price_milli_eur": m.price_milli_eur
     });
     if let Some(contract) = m.dataset_input_contract.as_deref() {
         terms["dataset_input_contract"] = json!(contract);
@@ -234,8 +233,8 @@ pub fn release_terms_hash(plugin: &LoadedPlugin) -> CompassResult<String> {
     if let Some(wait_sec) = m.max_child_wait_sec {
         terms["max_child_wait_sec"] = json!(wait_sec);
     }
-    if let Some(cap) = m.max_child_spend_milli_act {
-        terms["max_child_spend_milli_act"] = json!(cap);
+    if let Some(cap) = m.max_child_spend_milli_eur {
+        terms["max_child_spend_milli_eur"] = json!(cap);
     }
     let bytes = canonical_json::to_vec(&terms)
         .map_err(|e| CompassError::Protocol(format!("canonicalize native module terms: {e}")))?;
@@ -305,7 +304,6 @@ pub struct InProcessNodeRuntime {
     session_store: Arc<dyn SessionStore>,
     blob_store: Arc<dyn BlobStore>,
     oci_registry: Arc<dyn OciRegistryClient>,
-    payment_gateway: Arc<dyn PaymentGateway>,
     oci_runner: Arc<OciContainerRunner>,
     plugins: RwLock<HashMap<PluginId, PluginReleases>>,
     catalogs: RwLock<HashMap<CatalogId, DuckDbCatalogEngine>>,
@@ -339,7 +337,6 @@ impl InProcessNodeRuntime {
             session_store: deps.session_store,
             blob_store: deps.blob_store,
             oci_registry: deps.oci_registry,
-            payment_gateway: deps.payment_gateway,
             oci_runner: Arc::new(runner),
             plugins: RwLock::new(HashMap::new()),
             catalogs: RwLock::new(HashMap::new()),
@@ -354,7 +351,7 @@ impl InProcessNodeRuntime {
 
     /// Enable laptop child runs (`W7`): a confirmed parent declaring `child_modules` gets an
     /// in-process broker that prepares and confirms each child locally as the local user,
-    /// reserving from the local play ledger and bounded by the parent's signed child spend cap.
+    /// bounded by the parent's signed child spend cap (`settlement_method = "none"`).
     pub fn enable_local_child_runs(self: &Arc<Self>) {
         let _ = self.child_runtime.set(Arc::downgrade(self));
     }
@@ -367,15 +364,15 @@ impl InProcessNodeRuntime {
         if run.parent_run_id.is_some() {
             return None;
         }
-        let cap = plugin.manifest.effective_max_child_spend_milli_act()?;
+        let cap = plugin.manifest.effective_max_child_spend_milli_eur()?;
         let runtime = self.child_runtime.get()?.clone();
         Some(Arc::new(local_child::LocalChildBroker {
             runtime,
             org_id: run.org_id.clone(),
             session_id: run.session_id.clone(),
             parent_run_id: run.run_id.clone(),
-            spend_cap_milli: cap,
-            spent_milli: std::sync::atomic::AtomicI64::new(0),
+            spend_cap_milli_eur: cap.as_milli(),
+            spent_milli_eur: std::sync::atomic::AtomicI64::new(0),
         }))
     }
 
@@ -1157,9 +1154,8 @@ impl InProcessNodeRuntime {
         Ok(cumulative)
     }
 
-    /// Execute everything inside a reserved ACT + signed `Deal` scope so every outcome produces
-    /// a cryptographically verified 5-artifact chain (`succeeded` or `failed`) and never leaks
-    /// reserved ACT credits.
+    /// Execute everything inside a signed `Deal` scope (`settlement_method = "none"`) so every
+    /// outcome produces a cryptographically verified 5-artifact chain (`succeeded` or `failed`).
     #[allow(clippy::too_many_arguments)]
     async fn execute_confirmed_deal(
         &self,
@@ -2248,7 +2244,7 @@ impl RunDispatcher for InProcessNodeRuntime {
 
         let run_id =
             RunId::new(format!("run-{}", Uuid::new_v4().simple())).map_err(CompassError::Internal)?;
-        let estimated_cost_act = selected_offer.total_cost_act();
+        let estimated_cost_milli_eur = selected_offer.total_cost();
         let quote = RunQuote {
             run_id: run_id.clone(),
             plugin_id: plugin.manifest.id.clone(),
@@ -2257,8 +2253,8 @@ impl RunDispatcher for InProcessNodeRuntime {
             target_node_id: self.node_id.clone(),
             offer_id: selected_offer.id.clone(),
             offer_name: selected_offer.name.clone(),
-            base_fee_act: selected_offer.base_fee_act(),
-            estimated_cost_act,
+            base_fee_milli_eur: selected_offer.base_fee(),
+            estimated_cost_milli_eur,
             max_input_bytes: selected_offer.max_input_bytes,
             max_output_bytes: selected_offer.max_output_bytes,
             max_runtime_sec: selected_offer.max_runtime_sec,
@@ -2288,8 +2284,8 @@ impl RunDispatcher for InProcessNodeRuntime {
             parent_run_id: req.parent_run_id,
             agent_credential_id: req.agent_credential_id,
             agent_tool_call_id: req.agent_tool_call_id,
-            module_fee_milli_act: Some(selected_offer.total_milli_act()),
-            dataset_fee_milli_act: None,
+            module_fee_milli_eur: Some(selected_offer.total_cost()),
+            dataset_fee_milli_eur: None,
             quote: quote.clone(),
             result_json: None,
             artifacts: Vec::new(),
@@ -2309,14 +2305,13 @@ impl RunDispatcher for InProcessNodeRuntime {
                     session_id,
                     SessionEventKind::RunPrepared,
                     &format!(
-                        "Prepared plugin '{}' ({}) — awaiting explicit user confirmation.",
-                        plugin.manifest.id,
-                        estimated_cost_act.display_local_credits()
+                        "Prepared plugin '{}' (local run, no charge) — awaiting explicit user confirmation.",
+                        plugin.manifest.id
                     ),
                     json!({
                         "run_id": run_id,
                         "plugin_id": plugin.manifest.id,
-                        "estimated_cost_act": estimated_cost_act,
+                        "estimated_cost_milli_eur": estimated_cost_milli_eur,
                         "workload_hash": quote.workload_hash,
                     }),
                 )
@@ -2429,7 +2424,7 @@ impl InProcessNodeRuntime {
             let selected = plugin.manifest.resolve_offer(Some(&run.quote.offer_id))?;
             if *expected != release_terms_hash(&plugin)?
                 || signed_offer.payload.offer_id != format!("{}:{}", run.plugin_id, selected.id)
-                || selected.total_cost_act() != run.quote.estimated_cost_act
+                || selected.total_cost() != run.quote.estimated_cost_milli_eur
             {
                 return Err(CompassError::IntegrityViolation(format!(
                     "installed module or stored price differs from the signed offer for run '{run_id}'"
@@ -2564,16 +2559,7 @@ impl InProcessNodeRuntime {
         let deal_doc = serde_json::to_value(&signed_deal)
             .map_err(|e| CompassError::Internal(format!("serialize deal: {e}")))?;
 
-        // Reserve ACT credits BEFORE launching any compute.
-        self.payment_gateway
-            .reserve_for_run(
-                &run.org_id,
-                run_id,
-                run.quote.estimated_cost_act,
-                idempotency_key,
-            )
-            .await?;
-
+        // Local runs execute with `settlement_method = "none"` (no local billing ledger).
         run.status = RunStatus::Running;
         run.froglet_chain.push(deal_doc.clone());
         self.session_store.save_run(&run).await?;
@@ -2627,8 +2613,7 @@ async fn sha256_file_streaming(path: &Path) -> CompassResult<(String, u64)> {
 mod sec_31_tests {
     use super::*;
     use biocompass_core_traits::{
-        CreditAmountAct, LocalFsBlobStore, OciRegistryClient, OrgId, SqliteActLedger,
-        SqliteSessionStore,
+        LocalFsBlobStore, OciRegistryClient, OrgId, SqliteSessionStore,
     };
     use biocompass_data_engine::seed_demo_hla_catalog;
     use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
@@ -2648,8 +2633,6 @@ mod sec_31_tests {
         let keys = NodeKeypairSet::load_or_generate(tmp.path().join("keys")).unwrap();
         let session_store = Arc::new(SqliteSessionStore::in_memory().unwrap());
         let blob_store = Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).unwrap());
-        let ledger =
-            Arc::new(SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(100)).unwrap());
         let fake_docker = tmp.path().join("fake-docker");
         std::fs::write(&fake_docker, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
@@ -2668,7 +2651,6 @@ mod sec_31_tests {
             session_store: session_store.clone(),
             blob_store,
             oci_registry: Arc::new(LocalTagRegistry),
-            payment_gateway: ledger,
             oci_runner,
             stage_root_dir: tmp.path().join("stages"),
             allow_local_dev_tags: true,
@@ -2787,8 +2769,7 @@ mod sec_31_tests {
 mod stage_inputs_tests {
     use super::*;
     use biocompass_core_traits::{
-        CreditAmountAct, LocalFsBlobStore, SqliteActLedger, SqliteSessionStore,
-        StandardOciPolicyVerifier,
+        LocalFsBlobStore, SqliteSessionStore, StandardOciPolicyVerifier,
     };
     use biocompass_oci_runner::{DetectedEngine, EngineKind, OciContainerRunner};
 
@@ -2799,9 +2780,6 @@ mod stage_inputs_tests {
             session_store: Arc::new(SqliteSessionStore::in_memory().unwrap()),
             blob_store: blobs.clone(),
             oci_registry: Arc::new(StandardOciPolicyVerifier::strict_pinned()),
-            payment_gateway: Arc::new(
-                SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(0)).unwrap(),
-            ),
             oci_runner: Arc::new(OciContainerRunner::from_engine(DetectedEngine {
                 kind: EngineKind::Podman,
                 binary_path: PathBuf::new(),

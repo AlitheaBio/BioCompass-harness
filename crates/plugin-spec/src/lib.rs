@@ -8,7 +8,7 @@ pub use hla_capabilities::validate_reviewed_hla_capabilities;
 pub use version_operations::{VersionInputKind, VersionOperationDeclaration, VersionOperationSpec, version_operation_params};
 
 use biocompass_core_traits::{
-    CompassError, CompassResult, CreditAmountAct, GrantLevel, OciImageRef, PluginId, ScopedQueryDefinition,
+    CompassError, CompassResult, GrantLevel, MilliEur, OciImageRef, PluginId, ScopedQueryDefinition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -149,9 +149,9 @@ pub struct PluginOffer {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    pub price_milli_act: i64,
+    pub price_milli_eur: MilliEur,
     #[serde(default)]
-    pub base_fee_milli_act: i64,
+    pub base_fee_milli_eur: MilliEur,
     #[serde(default = "default_offer_max_input_bytes")]
     pub max_input_bytes: u64,
     #[serde(default = "default_offer_max_output_bytes")]
@@ -167,8 +167,8 @@ pub struct PluginOffer {
 pub struct ResolvedPluginOffer {
     pub id: String,
     pub name: String,
-    pub price_milli_act: i64,
-    pub base_fee_milli_act: i64,
+    pub price_milli_eur: MilliEur,
+    pub base_fee_milli_eur: MilliEur,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
     pub max_runtime_sec: u64,
@@ -176,16 +176,12 @@ pub struct ResolvedPluginOffer {
 }
 
 impl ResolvedPluginOffer {
-    pub const fn total_milli_act(&self) -> i64 {
-        self.base_fee_milli_act.saturating_add(self.price_milli_act)
+    pub const fn total_cost(&self) -> MilliEur {
+        self.base_fee_milli_eur.saturating_add(self.price_milli_eur)
     }
 
-    pub const fn total_cost_act(&self) -> CreditAmountAct {
-        CreditAmountAct::from_milli_act(self.total_milli_act())
-    }
-
-    pub const fn base_fee_act(&self) -> CreditAmountAct {
-        CreditAmountAct::from_milli_act(self.base_fee_milli_act)
+    pub const fn base_fee(&self) -> MilliEur {
+        self.base_fee_milli_eur
     }
 }
 
@@ -196,9 +192,9 @@ pub const MAX_CHILD_MODULES: usize = 32;
 /// Maximum cumulative wait time (seconds) a parent module may pause while awaiting child runs (`W7`, 24 h).
 pub const MAX_CHILD_WAIT_SEC: u64 = 86_400;
 /// Platform default child spend cap per parent run when the manifest omits one (`W7`, 10.00 EUR).
-pub const DEFAULT_MAX_CHILD_SPEND_MILLI_ACT: i64 = 10_000;
-/// Upper bound accepted for a manifest `max_child_spend_milli_act` (`W7`, 10,000.00 EUR).
-pub const MAX_CHILD_SPEND_MILLI_ACT: i64 = 10_000_000;
+pub const DEFAULT_MAX_CHILD_SPEND_MILLI_EUR: MilliEur = MilliEur::from_milli(10_000);
+/// Upper bound accepted for a manifest `max_child_spend_milli_eur` (`W7`, 10,000.00 EUR).
+pub const MAX_CHILD_SPEND_MILLI_EUR: MilliEur = MilliEur::from_milli(10_000_000);
 /// Manifest keyword for [`ChildModules::Caller`].
 pub const CHILD_MODULES_CALLER: &str = "caller";
 
@@ -342,14 +338,14 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_child_wait_sec: Option<u64>,
     /// Signed cap (milli-EUR) on the total spend of all children of one parent run (`W7`).
-    /// When omitted the platform default ([`DEFAULT_MAX_CHILD_SPEND_MILLI_ACT`]) applies.
+    /// When omitted the platform default ([`DEFAULT_MAX_CHILD_SPEND_MILLI_EUR`]) applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_child_spend_milli_act: Option<i64>,
+    pub max_child_spend_milli_eur: Option<MilliEur>,
     pub image: String,
     #[serde(default)]
     pub network: NetworkPolicy,
-    #[serde(default = "default_price_milli_act")]
-    pub price_milli_act: i64,
+    #[serde(default = "default_price_milli_eur")]
+    pub price_milli_eur: MilliEur,
     #[serde(default)]
     pub offers: Vec<PluginOffer>,
     #[serde(default)]
@@ -371,8 +367,8 @@ pub struct PluginManifest {
 fn default_category() -> String {
     "Bioinformatics".into()
 }
-const fn default_price_milli_act() -> i64 {
-    5_000
+const fn default_price_milli_eur() -> MilliEur {
+    MilliEur::from_eur(5)
 }
 
 /// The versioned resource materialization contract carried by an importer manifest.
@@ -400,10 +396,10 @@ impl PluginManifest {
 
     /// Signed per-parent child spend cap: the manifest value, or the platform default when the
     /// module declares child modules; `None` for modules that cannot start children (`W7`).
-    pub fn effective_max_child_spend_milli_act(&self) -> Option<i64> {
+    pub fn effective_max_child_spend_milli_eur(&self) -> Option<MilliEur> {
         self.child_modules
             .declares_children()
-            .then(|| self.max_child_spend_milli_act.unwrap_or(DEFAULT_MAX_CHILD_SPEND_MILLI_ACT))
+            .then(|| self.max_child_spend_milli_eur.unwrap_or(DEFAULT_MAX_CHILD_SPEND_MILLI_EUR))
     }
 
     /// Modules with an explicit provider input contract require an authorized dataset at quote time.
@@ -481,9 +477,9 @@ impl PluginManifest {
                 "plugin resources require cpus >= 1 and memory_mb >= 64".into(),
             ));
         }
-        if self.price_milli_act < 0 {
+        if self.price_milli_eur.is_negative() {
             return Err(CompassError::Validation(
-                "plugin price_milli_act cannot be negative".into(),
+                "plugin price_milli_eur cannot be negative".into(),
             ));
         }
         if !self.offers.is_empty() {
@@ -506,9 +502,9 @@ impl PluginManifest {
                         "duplicate offer id '{oid}' in plugin.toml"
                     )));
                 }
-                if offer.price_milli_act < 0 || offer.base_fee_milli_act < 0 {
+                if offer.price_milli_eur.is_negative() || offer.base_fee_milli_eur.is_negative() {
                     return Err(CompassError::Validation(format!(
-                        "offer '{oid}' cannot have negative price_milli_act or base_fee_milli_act"
+                        "offer '{oid}' cannot have negative price_milli_eur or base_fee_milli_eur"
                     )));
                 }
                 let runtime_sec = offer.max_runtime_sec.unwrap_or(self.resources.timeout_sec);
@@ -609,16 +605,18 @@ impl PluginManifest {
                 "max_child_wait_sec must be between 1 and {MAX_CHILD_WAIT_SEC} seconds, got {wait_sec}"
             )));
         }
-        if let Some(cap) = self.max_child_spend_milli_act
-            && !(0..=MAX_CHILD_SPEND_MILLI_ACT).contains(&cap)
+        if let Some(cap) = self.max_child_spend_milli_eur
+            && !(MilliEur::ZERO..=MAX_CHILD_SPEND_MILLI_EUR).contains(&cap)
         {
             return Err(CompassError::Validation(format!(
-                "max_child_spend_milli_act must be between 0 and {MAX_CHILD_SPEND_MILLI_ACT}, got {cap}"
+                "max_child_spend_milli_eur must be between 0 and {}, got {}",
+                MAX_CHILD_SPEND_MILLI_EUR.as_milli(),
+                cap.as_milli()
             )));
         }
-        if self.max_child_spend_milli_act.is_some() && self.child_modules.is_empty() {
+        if self.max_child_spend_milli_eur.is_some() && self.child_modules.is_empty() {
             return Err(CompassError::Validation(
-                "max_child_spend_milli_act requires child_modules".into(),
+                "max_child_spend_milli_eur requires child_modules".into(),
             ));
         }
         if self.inputs.schema.get("x-biocompass-import").is_some() {
@@ -633,14 +631,14 @@ impl PluginManifest {
     }
 
     /// Return the effective Offer list (`[[offers]]` if declared, or 1 synthesized default Offer
-    /// from top-level `price_milli_act` and `[resources]`, §6.2).
+    /// from top-level `price_milli_eur` and `[resources]`, §6.2).
     pub fn effective_offers(&self) -> Vec<ResolvedPluginOffer> {
         if self.offers.is_empty() {
             return vec![ResolvedPluginOffer {
                 id: "default".into(),
                 name: "Standard Run".into(),
-                price_milli_act: self.price_milli_act,
-                base_fee_milli_act: 0,
+                price_milli_eur: self.price_milli_eur,
+                base_fee_milli_eur: MilliEur::ZERO,
                 max_input_bytes: default_offer_max_input_bytes(),
                 max_output_bytes: default_offer_max_output_bytes(),
                 max_runtime_sec: self.resources.timeout_sec.max(1),
@@ -659,8 +657,8 @@ impl PluginManifest {
                 ResolvedPluginOffer {
                     id,
                     name,
-                    price_milli_act: o.price_milli_act,
-                    base_fee_milli_act: o.base_fee_milli_act,
+                    price_milli_eur: o.price_milli_eur,
+                    base_fee_milli_eur: o.base_fee_milli_eur,
                     max_input_bytes: o.max_input_bytes,
                     max_output_bytes: o.max_output_bytes,
                     max_runtime_sec: o.max_runtime_sec.unwrap_or(self.resources.timeout_sec).max(1),
@@ -705,9 +703,9 @@ impl PluginManifest {
         Ok(())
     }
 
-    /// Return default estimated run cost in `CreditAmountAct`.
-    pub fn estimated_cost_act(&self) -> CreditAmountAct {
-        self.effective_offers()[0].total_cost_act()
+    /// Return default estimated run cost in [`MilliEur`].
+    pub fn estimated_cost(&self) -> MilliEur {
+        self.effective_offers()[0].total_cost()
     }
 }
 
@@ -863,8 +861,8 @@ mod tests {
                 .resolve_offer(None)
                 .expect("default synthesized offer");
             assert_eq!(default_offer.id, "default");
-            assert_eq!(default_offer.price_milli_act, loaded.manifest.price_milli_act);
-            assert_eq!(default_offer.base_fee_milli_act, 0);
+            assert_eq!(default_offer.price_milli_eur, loaded.manifest.price_milli_eur);
+            assert_eq!(default_offer.base_fee_milli_eur, MilliEur::ZERO);
         }
     }
 
@@ -884,8 +882,8 @@ timeout_sec = 300
 [[offers]]
 id = "quick-scan"
 name = "Quick Scan"
-price_milli_act = 2500
-base_fee_milli_act = 500
+price_milli_eur = 2500
+base_fee_milli_eur = 500
 max_input_bytes = 4096
 max_output_bytes = 1048576
 max_runtime_sec = 30
@@ -894,7 +892,7 @@ max_memory_mb = 256
 [[offers]]
 id = "deep-cohort"
 name = "Deep Cohort Run"
-price_milli_act = 15000
+price_milli_eur = 15000
 max_input_bytes = 65536
 max_output_bytes = 67108864
 "#;
@@ -904,21 +902,21 @@ max_output_bytes = 67108864
         let quick = manifest
             .resolve_offer(Some("quick-scan"))
             .expect("resolve quick-scan");
-        assert_eq!(quick.total_milli_act(), 3_000);
+        assert_eq!(quick.total_cost(), MilliEur::from_milli(3_000));
         assert_eq!(quick.max_runtime_sec, 30);
         assert_eq!(quick.max_memory_mb, 256);
 
         let deep = manifest
             .resolve_offer(Some("deep-cohort"))
             .expect("resolve deep-cohort");
-        assert_eq!(deep.total_milli_act(), 15_000);
+        assert_eq!(deep.total_cost(), MilliEur::from_milli(15_000));
         assert_eq!(deep.max_runtime_sec, 300);
         assert_eq!(deep.max_memory_mb, 2048);
 
         assert!(manifest.resolve_offer(Some("nonexistent")).is_err());
 
         let dup_toml = format!(
-            "{toml_doc}\n[[offers]]\nid = \"quick-scan\"\nprice_milli_act = 1000\n"
+            "{toml_doc}\n[[offers]]\nid = \"quick-scan\"\nprice_milli_eur = 1000\n"
         );
         assert!(PluginManifest::from_toml_str(&dup_toml, true).is_err());
     }
@@ -1056,8 +1054,8 @@ max_child_wait_sec = 3600
         assert!(parsed.child_modules.permits("alithea/peptide-qc"));
         assert!(!parsed.child_modules.permits("alithea/other"));
         assert_eq!(
-            parsed.effective_max_child_spend_milli_act(),
-            Some(DEFAULT_MAX_CHILD_SPEND_MILLI_ACT)
+            parsed.effective_max_child_spend_milli_eur(),
+            Some(DEFAULT_MAX_CHILD_SPEND_MILLI_EUR)
         );
 
         // `"caller"` follows the initiating principal's authority and round-trips as a string.
@@ -1067,12 +1065,15 @@ name = "Notebook"
 version = "1.0.0"
 image = "local/notebook:dev"
 child_modules = "caller"
-max_child_spend_milli_act = 2500
+max_child_spend_milli_eur = 2500
 "#;
         let caller = PluginManifest::from_toml_str(caller_toml, true).expect("caller child_modules");
         assert!(caller.child_modules.is_caller());
         assert!(caller.child_modules.permits("alithea/anything"));
-        assert_eq!(caller.effective_max_child_spend_milli_act(), Some(2500));
+        assert_eq!(
+            caller.effective_max_child_spend_milli_eur(),
+            Some(MilliEur::from_milli(2500))
+        );
         let as_json = serde_json::to_value(&caller).unwrap();
         assert_eq!(as_json["child_modules"], json!("caller"));
         let back: PluginManifest = serde_json::from_value(as_json).unwrap();
@@ -1081,8 +1082,8 @@ max_child_spend_milli_act = 2500
         // Any other keyword, and a cap without children, are rejected.
         for bad in [
             "child_modules = \"everyone\"\n",
-            "max_child_spend_milli_act = 100\n",
-            "child_modules = \"caller\"\nmax_child_spend_milli_act = -1\n",
+            "max_child_spend_milli_eur = 100\n",
+            "child_modules = \"caller\"\nmax_child_spend_milli_eur = -1\n",
         ] {
             let doc = format!(
                 "id = \"alithea/notebook\"\nname = \"N\"\nversion = \"1.0.0\"\nimage = \"local/n:dev\"\n{bad}"
@@ -1096,7 +1097,7 @@ max_child_spend_milli_act = 2500
         )
         .unwrap();
         assert!(plain.child_modules.is_empty());
-        assert_eq!(plain.effective_max_child_spend_milli_act(), None);
+        assert_eq!(plain.effective_max_child_spend_milli_eur(), None);
 
         // Self-reference rejected
         let self_ref = r#"

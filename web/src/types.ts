@@ -34,7 +34,7 @@ export interface SubscribedNetworkOffer {
   ui_bundle_hash?: string | null;
   ui_bundle_size_bytes?: number | null;
   launch_url?: string | null;
-  price_milli_act?: number;
+  price_milli_eur?: number;
 }
 
 export interface MarketplaceOfferSummary {
@@ -47,7 +47,7 @@ export interface MarketplaceOfferSummary {
   ui_bundle_hash?: string | null;
   ui_bundle_size_bytes?: number | null;
   launch_url?: string | null;
-  price_milli_act?: number | null;
+  price_milli_eur?: number | null;
   description?: string | null;
 }
 
@@ -264,8 +264,8 @@ export interface DeclarativeViewSpec {
 export interface PluginOfferSpec {
   id: string;
   name: string;
-  price_milli_act: number;
-  base_fee_milli_act: number;
+  price_milli_eur: number;
+  base_fee_milli_eur: number;
   max_input_bytes: number;
   max_output_bytes: number;
   max_runtime_sec?: number | null;
@@ -275,8 +275,8 @@ export interface PluginOfferSpec {
 export interface ResolvedPluginOffer {
   id: string;
   name: string;
-  price_milli_act: number;
-  base_fee_milli_act: number;
+  price_milli_eur: number;
+  base_fee_milli_eur: number;
   max_input_bytes: number;
   max_output_bytes: number;
   max_runtime_sec: number;
@@ -295,7 +295,8 @@ export interface PluginManifest {
   requires_catalog_level?: GrantAccessLevel;
   image: string;
   network: string | { allow_domains: string[] };
-  price_milli_act: number;
+  price_milli_eur: number;
+  max_child_spend_milli_eur?: number | null;
   offers?: PluginOfferSpec[];
   resources: {
     cpus: number;
@@ -331,7 +332,7 @@ export interface ModuleDownload {
 
 export type ModuleOfferAction = "run" | "download";
 export type ModuleOfferScope = "private" | "custom_shared" | "global";
-export type ModuleOfferAccess = "granted" | "pending" | "request_required" | "tier_restricted";
+export type ModuleOfferAccess = "granted" | "pending" | "request_required";
 
 export interface ModuleOffer {
   offer_id: string;
@@ -345,43 +346,12 @@ export interface ModuleOffer {
   serving_org_id?: string | null;
   target_node_id?: string | null;
   access?: ModuleOfferAccess;
-  negotiated_price?: NegotiatedModuleOfferPrice | null;
   ui_bundle_hash?: string | null;
   ui_bundle_size_bytes?: number | null;
 }
 
-export interface FederatedOfferSummary {
-  offer_id: string;
-  publisher_org_id?: string | null;
-  plugin_id?: string | null;
-  version?: string | null;
-  catalog_id?: string | null;
-  title: string;
-  action: ModuleOfferAction | "dataset" | string;
-  scope: ModuleOfferScope | string;
-  approval_required?: boolean;
-  access?: ModuleOfferAccess;
-}
-
-export interface FederatedModuleOffer {
-  offer_kind?: "run" | "download" | "dataset" | string;
-  peer_id?: string;
-  offer_hash?: string;
-  offer: FederatedOfferSummary;
-  provider: string;
-  launch_url: string | null;
-}
-
-export interface ModuleOfferRequest {
-  offer_id: string;
-  title: string;
-  publisher_org_id: string;
-  subscriber_org_id: string;
-  access: "granted" | "pending";
-}
-
 export type ModuleSource = "workspace" | "org_cloud" | "network_provider";
-export type ModuleRunsIn = "local" | "cloud" | "provider_edge" | "network_provider";
+export type ModuleRunsIn = "local" | "cloud" | "network_provider";
 
 export interface PluginSummary {
   marketplace_offer_id?: string;
@@ -418,8 +388,8 @@ export interface RunQuote {
   target_node_id: string;
   offer_id?: string;
   offer_name?: string;
-  base_fee_act?: number;
-  estimated_cost_act: number;
+  base_fee_milli_eur?: number;
+  estimated_cost_milli_eur: number;
   max_input_bytes?: number;
   max_output_bytes?: number;
   max_runtime_sec?: number;
@@ -431,18 +401,6 @@ export interface RunQuote {
   external_provider_org?: string | null;
   external_provider_notice?: string | null;
   froglet_quote: Record<string, unknown>;
-  expires_at: string;
-}
-
-export interface ResultShare {
-  share_id: string;
-  owner_org_id: string;
-  recipient_org_id: string;
-  filename: string;
-  media_type: string;
-  byte_length: number;
-  sha256: string;
-  created_at: string;
   expires_at: string;
 }
 
@@ -491,8 +449,8 @@ export interface RunRecord {
   parent_run_id?: string | null;
   agent_credential_id?: string | null;
   agent_tool_call_id?: string | null;
-  module_fee_milli_act?: number | null;
-  dataset_fee_milli_act?: number | null;
+  module_fee_milli_eur?: number | null;
+  dataset_fee_milli_eur?: number | null;
   quote: RunQuote;
   result_json: Record<string, unknown> | null;
   artifacts: ArtifactRef[];
@@ -536,8 +494,8 @@ export interface LedgerTx {
   org_id: string;
   run_id: string | null;
   kind: string;
-  delta_act: number;
-  balance_after_act: number;
+  delta_milli_eur: number;
+  balance_after_milli_eur: number;
   receipt_hash?: string | null;
   reference: string;
   created_at: string;
@@ -545,13 +503,11 @@ export interface LedgerTx {
 
 export interface LedgerState {
   org_id: string;
-  tier_id?: string;
-  available_milli_act: number;
-  available_display: string;
-  is_local_play_ledger?: boolean;
-  currency_label?: string;
-  daily_act_spent_milli?: number;
-  daily_act_breaker_milli?: number | null;
+  available_milli_eur: number;
+  reserved_milli_eur?: number;
+  available_display?: string;
+  daily_spent_milli_eur?: number;
+  daily_spend_breaker_milli_eur?: number | null;
   expires_at?: string | null;
   transactions: LedgerTx[];
 }
@@ -691,63 +647,23 @@ function splitRoundedCents(milliUnits: number): { sign: string; whole: number; f
   return { sign, whole, frac };
 }
 
-/** Format milli-EUR / milli-ACT as euros to the cent (`€1.00`, `€0.05`, `€12.34`). */
-export function formatMilliEur(milliAct: number): string {
-  const { sign, whole, frac } = splitRoundedCents(milliAct);
+/** Format milli-EUR as euros to the cent (`€0.00`, `€5.00`, `-€0.05`). */
+export function formatMilliEur(milliEur: number): string {
+  const { sign, whole, frac } = splitRoundedCents(milliEur);
   return `${sign}€${whole}.${frac}`;
 }
 
-/** Format cloud/hub credit amounts in euros to the cent (`1 ACT = 1 EUR`). */
-export function formatMilliAct(milliAct: number): string {
-  return formatMilliEur(milliAct);
-}
-
 /**
- * Format local workstation play-ledger amounts (NEVER labelled `€` or `EUR` per Plan Default #3).
- */
-export function formatLocalPlayCredits(milliAct: number): string {
-  const { sign, whole, frac } = splitRoundedCents(milliAct);
-  return `${sign}${whole}.${frac} credits`;
-}
-
-/** Format an amount using either the local play-credits unit or EUR depending on workspace mode. */
-export function formatWorkspaceAmount(milliAct: number, isLocalPlayLedger: boolean): string {
-  return isLocalPlayLedger ? formatLocalPlayCredits(milliAct) : formatMilliEur(milliAct);
-}
-
-/**
- * The per-run price an organization actually pays (price + base fee, milli-units): the negotiated
- * offer price when one applies to this release, otherwise the module's default offer.
+ * The per-run price an organization pays (price + base fee, milli-EUR) from the module's default offer.
  */
 export function effectiveRunCostMilli(
-  plugin: { manifest: Pick<PluginManifest, "price_milli_act" | "offers">; effective_offers?: ResolvedPluginOffer[] },
-  negotiated?: Pick<NegotiatedModuleOfferPrice, "price_milli_act" | "base_fee_milli_act"> | null,
+  plugin: { manifest: Pick<PluginManifest, "price_milli_eur" | "offers">; effective_offers?: ResolvedPluginOffer[] },
 ): number {
-  if (negotiated) {
-    return negotiated.price_milli_act + negotiated.base_fee_milli_act;
-  }
   const offer = plugin.effective_offers?.[0] ?? plugin.manifest.offers?.[0];
   if (offer) {
-    return offer.price_milli_act + offer.base_fee_milli_act;
+    return offer.price_milli_eur + offer.base_fee_milli_eur;
   }
-  return plugin.manifest.price_milli_act;
-}
-
-/** The negotiated price of this organization's offer for one module release, if any. */
-export function negotiatedPriceForRelease(
-  offers: Pick<ModuleOffer, "plugin_id" | "version" | "action" | "negotiated_price">[],
-  pluginId: string,
-  version: string,
-): NegotiatedModuleOfferPrice | null {
-  return (
-    offers.find(
-      (offer) =>
-        offer.plugin_id === pluginId &&
-        offer.version === version &&
-        offer.action === "run" &&
-        offer.negotiated_price != null,
-    )?.negotiated_price ?? null
-  );
+  return plugin.manifest.price_milli_eur;
 }
 
 export type OrgRole = "owner" | "admin" | "developer" | "member" | "viewer";
@@ -760,7 +676,6 @@ export interface AuthPrincipal {
   actor: string;
   email?: string;
   role: OrgRole | string;
-  tier_id?: string;
   org_expires_at?: string | null;
   is_platform_admin: boolean;
   auth_method?: string;
@@ -941,13 +856,6 @@ export interface HostedHlaPublication {
 
 export type DatasetHostingMode = "cloud_hosted" | "node_hosted";
 export type DatasetOfferScope = "private" | "custom_shared" | "global";
-export interface DatasetOfferRequest {
-  offer_id: string;
-  title: string;
-  publisher_org_id: string;
-  subscriber_org_id: string;
-  status: "pending" | "approved";
-}
 export type DatasetOfferSubscription =
   | { status: "pending"; offer_id: string; subscriber_org_id: string }
   | { status: "granted"; offer: DatasetOfferRecord; grant: DatasetGrant };
@@ -968,7 +876,7 @@ export interface DatasetOfferRecord {
   row_scope?: FilterExpr | null;
   daily_row_budget?: number | null;
   max_rows_per_query: number;
-  price_milli_act: number;
+  price_milli_eur: number;
   provider_pubkey: string;
   descriptor_doc: Record<string, unknown>;
   froglet_offer_doc: Record<string, unknown>;
@@ -1006,51 +914,7 @@ export interface CuratedModuleApprovalRecord {
   created_at: string;
 }
 
-export interface TierDefaultGrant {
-  catalog_id: string;
-  label: string;
-  level: GrantAccessLevel;
-  row_scope?: FilterExpr | null;
-  daily_row_budget?: number | null;
-  max_rows_per_query: number;
-  allow_local_export: boolean;
-}
-
-export interface TierDefinitionRecord {
-  tier_id: string;
-  name: string;
-  duration_days: number | null;
-  max_users: number;
-  initial_act_milli: number;
-  daily_act_breaker_milli: number | null;
-  storage_quota_bytes: number;
-  max_snapshots_per_catalog: number;
-  burst_rpm: number;
-  allowed_modules: string[] | null;
-  allow_custom_modules: boolean;
-  default_grants: TierDefaultGrant[];
-  default_module_offer_ids: string[];
-  default_dataset_offer_ids: string[];
-  updated_at: string;
-}
-
-export interface UpdateTierInput {
-  name: string;
-  duration_days: number | null;
-  max_users: number;
-  initial_act_milli: number;
-  daily_act_breaker_milli: number | null;
-  storage_quota_bytes: number;
-  max_snapshots_per_catalog: number;
-  burst_rpm: number;
-  allowed_modules: string[] | null;
-  allow_custom_modules: boolean;
-  default_grants: TierDefaultGrant[];
-  default_module_offer_ids?: string[];
-  default_dataset_offer_ids?: string[];
-}
-
-export type NodeMode = "cloud-pool" | "query-provider" | "provider-edge" | "hospital-edge";
+export type NodeMode = "cloud-pool";
 
 export interface NodeSummaryRecord {
   node_id: string;
@@ -1071,29 +935,6 @@ export interface CreatedNodeEnrollment {
   provider_pubkey: string;
   mode: NodeMode;
   raw_credential: string;
-}
-
-export type FederationPeerStatus = "pending" | "approved" | "rejected" | "suspended";
-
-export interface FederationPeerRecord {
-  id: string;
-  peer_url: string;
-  peer_pubkey: string;
-  org_name: string;
-  status: FederationPeerStatus;
-  requested_at: string;
-  approved_by?: string | null;
-  approved_at?: string | null;
-  last_sync_at?: string | null;
-  last_error?: string | null;
-  enabled: boolean;
-  role: string;
-  label: string;
-  origin: string;
-  backchannel: string;
-  home_org: string | null;
-  destination_org: string | null;
-  archive_enabled: boolean;
 }
 
 export interface EnumerationMonitorEntry {
@@ -1133,10 +974,10 @@ export interface AgentCredentialRecord {
   token_prefix: string;
   allowed_catalogs: string[] | null;
   allowed_modules: string[] | null;
-  daily_ceiling_milli_act: number | null;
-  total_ceiling_milli_act: number | null;
-  spent_total_milli_act: number;
-  spent_today_milli_act?: number;
+  daily_ceiling_milli_eur: number | null;
+  total_ceiling_milli_eur: number | null;
+  spent_total_milli_eur: number;
+  spent_today_milli_eur?: number;
   /** True when no daily ceiling is set (spend bounded only by the org balance and breaker). */
   unlimited_daily?: boolean;
   /** True when no total ceiling is set. */
@@ -1152,11 +993,11 @@ export interface AgentCredentialRecord {
 /** Which spending ceilings a credential lacks (server flags win; fall back to null ceilings). */
 export function unlimitedCeilings(cred: Pick<
   AgentCredentialRecord,
-  "unlimited_daily" | "unlimited_total" | "daily_ceiling_milli_act" | "total_ceiling_milli_act"
+  "unlimited_daily" | "unlimited_total" | "daily_ceiling_milli_eur" | "total_ceiling_milli_eur"
 >): { daily: boolean; total: boolean } {
   return {
-    daily: cred.unlimited_daily ?? cred.daily_ceiling_milli_act == null,
-    total: cred.unlimited_total ?? cred.total_ceiling_milli_act == null,
+    daily: cred.unlimited_daily ?? cred.daily_ceiling_milli_eur == null,
+    total: cred.unlimited_total ?? cred.total_ceiling_milli_eur == null,
   };
 }
 
@@ -1181,22 +1022,14 @@ export interface CreateAgentCredentialInput {
   expires_in_days?: number;
   allowed_catalogs?: string[] | null;
   allowed_modules?: string[] | null;
-  daily_ceiling_milli_act?: number | null;
-  total_ceiling_milli_act?: number | null;
+  daily_ceiling_milli_eur?: number | null;
+  total_ceiling_milli_eur?: number | null;
   burst_per_minute?: number;
 }
 
 export interface CreatedAgentCredential {
   credential: AgentCredentialRecord;
   raw_token: string;
-}
-
-export interface NegotiatedModuleOfferPrice {
-  offer_id: string;
-  manifest_offer_id: string;
-  price_milli_act: number;
-  base_fee_milli_act: number;
-  updated_at: string;
 }
 
 export interface BillingStatementTotals {
@@ -1394,32 +1227,3 @@ export interface ProvenanceBundle {
 }
 
 export type CatalogDataPlacement = "stays_with_alithea" | "licensable_copy";
-
-export interface OutboundRegistrationResult {
-  registered: boolean;
-  target_hub_url: string;
-  local_peer_id: string;
-  local_peer_pubkey: string;
-  recorded_provider_peer_id?: string | null;
-  remote_response: Record<string, unknown>;
-}
-
-export interface ImportedFederatedModuleResult {
-  imported: boolean;
-  plugin_id: string;
-  version: string;
-  image_digest: string;
-  ui_bundle_hash?: string | null;
-  visibility: string;
-}
-
-export interface ImportedFederatedCatalogResult {
-  imported: boolean;
-  catalog: {
-    id: string;
-    name?: string;
-    latest_snapshot_id?: number;
-    dataset_digest?: string;
-  };
-  shard_count: number;
-}

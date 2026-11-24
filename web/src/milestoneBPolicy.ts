@@ -13,8 +13,8 @@ export interface ExternalProviderConsentInfo {
 }
 
 /**
- * Returns true whenever a prepared quote routes execution to an external provider org's
- * `provider-edge` node (`[A2]`), requiring explicit buyer data-boundary consent.
+ * Returns true whenever a prepared quote routes execution to an external network provider
+ * (`[A2]`), requiring explicit buyer data-boundary consent.
  */
 export function requiresExternalProviderConsent(
   quote: Pick<
@@ -31,18 +31,18 @@ export function requiresExternalProviderConsent(
 }
 
 /**
- * Any paid run OR any external `provider-edge` run (even 0-ACT) MUST require explicit consent.
+ * Any paid run OR any external provider run (even €0.00) MUST require explicit consent.
  */
 export function shouldPromptQuoteConsent(
   quote: Pick<
     RunQuote,
-    | "estimated_cost_act"
+    | "estimated_cost_milli_eur"
     | "serving_org_id"
     | "external_provider_org"
     | "external_provider_notice"
   >,
 ): boolean {
-  return quote.estimated_cost_act !== 0 || requiresExternalProviderConsent(quote);
+  return quote.estimated_cost_milli_eur !== 0 || requiresExternalProviderConsent(quote);
 }
 
 export function getExternalProviderConsentInfo(
@@ -59,10 +59,10 @@ export function getExternalProviderConsentInfo(
     quote.external_provider_org?.trim() ||
     quote.serving_org_id?.trim() ||
     "External Provider";
-  const nodeId = quote.target_node_id || "provider-edge";
+  const nodeId = quote.target_node_id || "external-provider";
   const notice =
     quote.external_provider_notice?.trim() ||
-    `This run will send your parameters and uploaded inputs to an external provider-edge node (${nodeId}) operated by ${providerLabel}. Protected or compute_only Alithea catalogs are never materialized to external provider nodes.`;
+    `This run will send your parameters and uploaded inputs to an external provider node (${nodeId}) operated by ${providerLabel}. Protected or compute_only Alithea catalogs are never materialized to external provider nodes.`;
   return {
     providerLabel,
     servingOrgId: quote.serving_org_id?.trim() || null,
@@ -109,26 +109,4 @@ export function shouldShowMarketplaceConsentModal(
   if (health?.mode !== "local") return false;
   if (!status || status.airgapped) return false;
   return Boolean(status.prompt_required);
-}
-
-/**
- * Formats the module release or dataset catalog target column for federated offers,
- * safely handling `plugin_id == null` (`catalog_id`) on federated `dataset` offers.
- */
-export function formatFederatedOfferTarget(offer: {
-  offer_id: string;
-  plugin_id?: string | null;
-  version?: string | null;
-  catalog_id?: string | null;
-}): string {
-  const pluginId = offer.plugin_id?.trim();
-  if (pluginId) {
-    const version = offer.version?.trim();
-    return version ? `${pluginId} · ${version}` : pluginId;
-  }
-  const catalogId = offer.catalog_id?.trim();
-  if (catalogId) {
-    return catalogId;
-  }
-  return offer.offer_id;
 }

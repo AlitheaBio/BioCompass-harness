@@ -5,9 +5,9 @@
 
 use async_trait::async_trait;
 use biocompass_core_traits::{
-    CompassError, CompassResult, CreditAmountAct, DatasetGrant, LocalFsBlobStore, OciImageRef,
+    CompassError, CompassResult, DatasetGrant, LocalFsBlobStore, OciImageRef,
     OciRegistryClient, OrgId, PluginId, PrepareRunRequest, RunDispatcher, RunStatus,
-    SqliteActLedger, SqliteSessionStore,
+    SqliteSessionStore,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
@@ -115,13 +115,6 @@ esac
     InProcessNodeRuntime::new(NodeRuntimeDeps {
         keys: NodeKeypairSet::load_or_generate(dir.join("keys")).unwrap(),
         session_store: Arc::new(SqliteSessionStore::open(dir.join("sessions.sqlite")).unwrap()),
-        payment_gateway: Arc::new(
-            SqliteActLedger::open(
-                dir.join("ledger.sqlite"),
-                CreditAmountAct::from_whole_act(50),
-            )
-            .unwrap(),
-        ),
         blob_store: Arc::new(LocalFsBlobStore::new(dir.join("store")).unwrap()),
         oci_registry: Arc::new(verifier),
         oci_runner,
@@ -157,7 +150,7 @@ version = "1.0.0"
 execution = "either"
 requires_catalog_level = "compute_only"
 network = "none"
-price_milli_act = 5000
+price_milli_eur = 5000
 image = "127.0.0.1:1/alithea/demo-bundled@sha256:{pinned_digest}"
 "#
         ),
@@ -186,7 +179,7 @@ name = "Unbundled Module"
 version = "1.0.0"
 execution = "local"
 network = "none"
-price_milli_act = 0
+price_milli_eur = 0
 image = "127.0.0.1:1/customer/unbundled@sha256:{}"
 "#,
             "2".repeat(64)
@@ -300,7 +293,7 @@ version = "1.0.0"
 execution = "either"
 requires_catalog_level = "compute_only"
 network = "none"
-price_milli_act = 5000
+price_milli_eur = 5000
 image = "ghcr.io/alitheabio/demo-source:1.0.0"
 "#,
     )
@@ -330,7 +323,7 @@ name = "Unpinned User Module"
 version = "1.0.0"
 execution = "local"
 network = "none"
-price_milli_act = 0
+price_milli_eur = 0
 image = "ghcr.io/customer/unpinned-user:1.0.0"
 "#,
     )

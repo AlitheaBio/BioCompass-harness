@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeFederatedLaunchUrl } from "../src/safeUrl.ts";
+import { safeLaunchUrl } from "../src/safeUrl.ts";
 
 test("sec_09_blocks_javascript_data_vbscript_and_protocol_relative_launch_urls", () => {
   for (const malicious of [
@@ -16,7 +16,7 @@ test("sec_09_blocks_javascript_data_vbscript_and_protocol_relative_launch_urls",
     "   ",
   ]) {
     assert.equal(
-      sanitizeFederatedLaunchUrl(malicious),
+      safeLaunchUrl(malicious),
       null,
       `expected malicious launch_url '${malicious}' to be blocked`,
     );
@@ -25,15 +25,15 @@ test("sec_09_blocks_javascript_data_vbscript_and_protocol_relative_launch_urls",
 
 test("sec_09_allows_https_http_and_safe_relative_launch_urls", () => {
   assert.equal(
-    sanitizeFederatedLaunchUrl("https://partner.biocompass.io/federation/launch?code=abc"),
-    "https://partner.biocompass.io/federation/launch?code=abc",
+    safeLaunchUrl("https://provider.biocompass.io/offers/mo-123"),
+    "https://provider.biocompass.io/offers/mo-123",
   );
   assert.equal(
-    sanitizeFederatedLaunchUrl("http://127.0.0.1:18200/federation/launch"),
-    "http://127.0.0.1:18200/federation/launch",
+    safeLaunchUrl("http://127.0.0.1:18200/offers/mo-123"),
+    "http://127.0.0.1:18200/offers/mo-123",
   );
   assert.equal(
-    sanitizeFederatedLaunchUrl("/api/v1/auth/federation/launch?offer=mo-123"),
-    "/api/v1/auth/federation/launch?offer=mo-123",
+    safeLaunchUrl("/api/v1/module-offers/mo-123"),
+    "/api/v1/module-offers/mo-123",
   );
 });

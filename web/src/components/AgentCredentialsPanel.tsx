@@ -6,7 +6,7 @@ import {
   revokeAgentCredential,
 } from "../api";
 import {
-  formatMilliAct,
+  formatMilliEur,
   type AgentCredentialRecord,
   type AgentCredentialRole,
   type CreatedAgentCredential,
@@ -94,8 +94,8 @@ export function AgentCredentialsPanel({
         expires_in_days: Math.max(1, Number.parseInt(expiresInDays, 10) || 30),
         allowed_catalogs: parseCsvAllowlist(allowedCatalogs),
         allowed_modules: parseCsvAllowlist(allowedModules),
-        daily_ceiling_milli_act: parseEurToMilli(dailyCapEur),
-        total_ceiling_milli_act: parseEurToMilli(totalCapEur),
+        daily_ceiling_milli_eur: parseEurToMilli(dailyCapEur),
+        total_ceiling_milli_eur: parseEurToMilli(totalCapEur),
         burst_per_minute: Math.max(1, Number.parseInt(burstPerMinute, 10) || 60),
       });
       setCreated(res);
@@ -340,8 +340,8 @@ export function AgentCredentialsPanel({
                         <div>Mod: {cred.allowed_modules ? cred.allowed_modules.join(", ") || "none" : "all"}</div>
                       </td>
                       <td className="mono">
-                        {cred.daily_ceiling_milli_act != null ? formatMilliAct(cred.daily_ceiling_milli_act) : "unlimited"} /{" "}
-                        {cred.total_ceiling_milli_act != null ? formatMilliAct(cred.total_ceiling_milli_act) : "unlimited"}
+                        {cred.daily_ceiling_milli_eur != null ? formatMilliEur(cred.daily_ceiling_milli_eur) : "unlimited"} /{" "}
+                        {cred.total_ceiling_milli_eur != null ? formatMilliEur(cred.total_ceiling_milli_eur) : "unlimited"}
                         {(() => {
                           const lacks = unlimitedCeilings(cred);
                           const warning = unlimitedCeilingWarning(lacks.daily, lacks.total);
@@ -358,8 +358,8 @@ export function AgentCredentialsPanel({
                         })()}
                       </td>
                       <td className="mono">
-                        {formatMilliAct(cred.spent_today_milli_act ?? 0)} today
-                        <div className="bc-caption">{formatMilliAct(cred.spent_total_milli_act)} total</div>
+                        {formatMilliEur(cred.spent_today_milli_eur ?? 0)} today
+                        <div className="bc-caption">{formatMilliEur(cred.spent_total_milli_eur)} total</div>
                       </td>
                       <td className="bc-caption mono">{new Date(cred.expires_at).toLocaleDateString()}</td>
                       <td>

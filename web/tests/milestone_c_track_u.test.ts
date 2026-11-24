@@ -7,16 +7,10 @@ import { fileURLToPath } from "node:url";
 import {
   formatModuleRunsInLabel,
   formatModuleSourceLabel,
-  isLocalPlayLedgerContext,
   networkRunHandoff,
   resolveModuleCardActions,
 } from "../src/moduleListPolicy.ts";
-import {
-  formatLocalPlayCredits,
-  formatMilliAct,
-  formatMilliEur,
-  formatWorkspaceAmount,
-} from "../src/types.ts";
+import { formatMilliEur } from "../src/types.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webSrc = resolve(here, "../src");
@@ -25,40 +19,16 @@ function readSrc(relPath: string): string {
   return readFileSync(resolve(webSrc, relPath), "utf8");
 }
 
-test("[H3] formatMilliAct / formatMilliEur formats euros to the cent and local play credits never use EUR", () => {
-  assert.equal(formatMilliAct(0), "€0.00");
-  assert.equal(formatMilliAct(50), "€0.05");
-  assert.equal(formatMilliAct(1000), "€1.00");
-  assert.equal(formatMilliAct(12340), "€12.34");
-  assert.equal(formatMilliAct(12345), "€12.35");
-  assert.equal(formatMilliAct(-50), "-€0.05");
-  assert.equal(formatMilliAct(-4), "€0.00");
+test("[H3] formatMilliEur formats milli-EUR values as euros to the cent", () => {
+  assert.equal(formatMilliEur(0), "€0.00");
+  assert.equal(formatMilliEur(50), "€0.05");
+  assert.equal(formatMilliEur(1000), "€1.00");
+  assert.equal(formatMilliEur(5000), "€5.00");
+  assert.equal(formatMilliEur(12340), "€12.34");
+  assert.equal(formatMilliEur(12345), "€12.35");
+  assert.equal(formatMilliEur(-50), "-€0.05");
+  assert.equal(formatMilliEur(-4), "€0.00");
   assert.equal(formatMilliEur(250000), "€250.00");
-
-  for (const val of [0, 50, 1000, 5000, 12340, 250000, -5000]) {
-    const localStr = formatLocalPlayCredits(val);
-    assert.ok(!localStr.includes("€"), `local play credits must not contain €: ${localStr}`);
-    assert.ok(
-      !localStr.toUpperCase().includes("EUR"),
-      `local play credits must not contain EUR: ${localStr}`,
-    );
-    assert.ok(localStr.endsWith(" credits"), `expected credits label: ${localStr}`);
-  }
-  assert.equal(formatLocalPlayCredits(5000), "5.00 credits");
-  assert.equal(formatWorkspaceAmount(5000, true), "5.00 credits");
-  assert.equal(formatWorkspaceAmount(5000, false), "€5.00");
-
-  // Local mode uses play credits for local runs, but EUR for external provider quotes and cloud mode.
-  assert.equal(isLocalPlayLedgerContext({ mode: "local" }, { is_local_play_ledger: true }), true);
-  assert.equal(isLocalPlayLedgerContext({ mode: "cloud-web" }, { is_local_play_ledger: false }), false);
-  assert.equal(
-    isLocalPlayLedgerContext(
-      { mode: "local" },
-      { is_local_play_ledger: true },
-      { serving_org_id: "org-partner", external_provider_org: "Partner Bio" },
-    ),
-    false,
-  );
 });
 
 test("[U2] unified module list semantics separate source from runs_in with exact Open/Install/Remove buttons", () => {
@@ -158,12 +128,12 @@ test("[U2] unified module list semantics separate source from runs_in with exact
     "Network provider",
   );
   assert.equal(
-    formatModuleRunsInLabel({ runs_in: "provider_edge", execution_target: "froglet_node" }),
+    formatModuleRunsInLabel({ runs_in: "network_provider", execution_target: "froglet_node" }),
     "Provider node",
   );
 });
 
-test("[C1/U3/U4] API client and Enterprise UI panels wire every Milestone C1 route from #82", () => {
+test("[C1/U3] API client and Enterprise UI panels wire retained Milestone C1 routes", () => {
   const apiSrc = readSrc("api.ts");
   for (const route of [
     "/api/v1/workspace/hub",
@@ -174,9 +144,6 @@ test("[C1/U3/U4] API client and Enterprise UI panels wire every Milestone C1 rou
     "/api/v1/webhooks",
     "/api/v1/documents",
     "/provenance",
-    "/api/v1/admin/federation/register-outbound",
-    "/api/v1/admin/federation/import-module",
-    "/api/v1/admin/federation/import-catalog",
     "/placement",
   ]) {
     assert.ok(apiSrc.includes(route), `api.ts missing route ${route}`);
@@ -200,19 +167,9 @@ test("[C1/U3/U4] API client and Enterprise UI panels wire every Milestone C1 rou
   assert.match(stmtSrc, /g\.dataset_fee_milli_eur/);
   assert.match(stmtSrc, /entry\.settled_milli_eur/);
 
-  const offersSrc = readSrc("components/ModuleOffersView.tsx");
-  assert.match(offersSrc, /offer\.negotiated_price/);
-
-  const u4Src = readSrc("components/ClientCloudImportPanel.tsx");
-  assert.match(u4Src, /target_hub_url/);
-  assert.match(u4Src, /source_hub_url/);
-  assert.match(u4Src, /marketplace_offer_id/);
-  assert.match(u4Src, /res\.shard_count/);
-
   assert.match(apiSrc, /toRfc3339StatementBound/);
   assert.match(apiSrc, /data\.webhooks/);
   assert.match(apiSrc, /data\.webhook/);
-  assert.match(apiSrc, /data\.price/);
   assert.match(apiSrc, /data\.document/);
 
   const provSrc = readSrc("components/ProvenancePanel.tsx");

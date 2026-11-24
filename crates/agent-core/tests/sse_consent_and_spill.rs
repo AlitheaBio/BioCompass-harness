@@ -2,7 +2,7 @@
 //! 1. Unconfigured LLM returns `CompassError::UpstreamLlm` (proving zero fake canned replies in `src/`).
 //! 2. Consent-Gate Invariant: `allowed_tool_definitions()` exposes zero confirm tools, rogue `confirm_run`
 //!    tool calls from an adversarial LLM are rejected with `CONSENT_GATE_ENFORCED`, and `prepare_plugin_run`
-//!    halts at `RunStatus::Prepared` with 0 ACT spent.
+//!    halts at `RunStatus::Prepared` with zero confirmed execution.
 //! 3. `> 60 KB` tool payload spills into `BlobStore` under `DEFAULT_SPILL_THRESHOLD_BYTES` (`48 KB`),
 //!    delivering `< 2 KB` compact summary + valid `blob_key` to the upstream LLM context window.
 
@@ -16,9 +16,8 @@ use biocompass_agent_core::llm::{LlmProviderConfig, LlmWireProtocol};
 use biocompass_agent_core::tools::allowed_tool_definitions;
 use biocompass_agent_core::{AgentConfig, AgentRuntime, AgentStreamEvent};
 use biocompass_core_traits::{
-    BlobStore, CatalogId, CompassError, CreditAmountAct, DatasetGrant, LocalFsBlobStore, OrgId,
-    PaymentGateway, RunStatus, SessionEventKind, SessionStore, SqliteActLedger, SqliteSessionStore,
-    StandardOciPolicyVerifier,
+    BlobStore, CatalogId, CompassError, DatasetGrant, LocalFsBlobStore, MilliEur, OrgId,
+    RunStatus, SessionEventKind, SessionStore, SqliteSessionStore, StandardOciPolicyVerifier,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps};
@@ -178,8 +177,6 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
     let session_store = Arc::new(SqliteSessionStore::in_memory().expect("session store"));
     let blob_store =
         Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).expect("blob store"));
-    let initial_act = CreditAmountAct::from_whole_act(50);
-    let ledger = Arc::new(SqliteActLedger::in_memory(initial_act).expect("ledger"));
     let oci_registry = Arc::new(StandardOciPolicyVerifier::strict_pinned());
     let oci_runner = Arc::new(OciContainerRunner::detect().await.expect("oci runner"));
 
@@ -189,7 +186,6 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
             session_store: session_store.clone(),
             blob_store: blob_store.clone(),
             oci_registry,
-            payment_gateway: ledger.clone(),
             oci_runner,
             stage_root_dir: tmp.path().join("stages"),
             allow_local_dev_tags: false,
@@ -286,17 +282,13 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
     assert_eq!(summary.prepared_quotes.len(), 1);
     let prepared_quote = &summary.prepared_quotes[0];
 
-    // Verify the run is strictly in `Prepared` state and ZERO ACT credits were deducted or reserved!
+    // Verify the run is strictly in `Prepared` state with no Deal signed!
     let stored_run = session_store
         .get_run(&prepared_quote.run_id)
         .await
         .expect("get prepared run");
     assert_eq!(stored_run.status, RunStatus::Prepared);
-    assert_eq!(
-        ledger.available_balance(&org_id).await.expect("balance"),
-        initial_act,
-        "ACT balance was touched without explicit human/API confirmation!"
-    );
+    assert_eq!(stored_run.froglet_chain.len(), 3);
 
     // Verify rogue `confirm_run` tool call received explicit CONSENT_GATE_ENFORCED denial in the 2nd LLM HTTP request!
     {
@@ -445,9 +437,6 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
     let keys = NodeKeypairSet::load_or_generate(tmp.path().join("keys")).expect("keys");
     let session_store = Arc::new(SqliteSessionStore::in_memory().expect("session store"));
     let blob_store = Arc::new(LocalFsBlobStore::new(tmp.path().join("blobs")).expect("blob store"));
-    let ledger = Arc::new(
-        SqliteActLedger::in_memory(CreditAmountAct::from_whole_act(50)).expect("ledger"),
-    );
 
     let cat_dir = tmp.path().join("cat");
     seed_demo_hla_catalog(&cat_dir).expect("seed catalog");
@@ -461,7 +450,6 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
         InProcessNodeRuntime::new(NodeRuntimeDeps {
             session_store: session_store.clone(),
             blob_store: blob_store.clone(),
-            payment_gateway: ledger,
             oci_registry,
             oci_runner,
             keys,
@@ -506,8 +494,8 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
         parent_run_id: None,
         agent_credential_id: None,
         agent_tool_call_id: None,
-        module_fee_milli_act: None,
-        dataset_fee_milli_act: None,
+        module_fee_milli_eur: None,
+        dataset_fee_milli_eur: None,
         quote: RunQuote {
             run_id: run_id.clone(),
             plugin_id,
@@ -516,8 +504,8 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
             target_node_id: NodeId::new("node-1").expect("node"),
             offer_id: "default".into(),
             offer_name: "Standard Run".into(),
-            base_fee_act: CreditAmountAct(0),
-            estimated_cost_act: CreditAmountAct(0),
+            base_fee_milli_eur: MilliEur::ZERO,
+            estimated_cost_milli_eur: MilliEur::ZERO,
             max_input_bytes: 10 * 1024 * 1024,
             max_output_bytes: 256 * 1024 * 1024,
             max_runtime_sec: 1800,

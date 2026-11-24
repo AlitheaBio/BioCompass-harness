@@ -108,7 +108,7 @@ impl CachedUiBundle {
 }
 
 /// A module attestation whose signature was verified against a pinned hub key (`U-1`), and for a
-/// federated module also the providing peer's signed offer. Only verification code can build one.
+/// network-provider module also the provider's signed offer. Only verification code can build one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedUiAttestation {
     pub plugin_id: String,
@@ -117,7 +117,7 @@ pub struct VerifiedUiAttestation {
     pub ui_bundle_size_bytes: Option<u64>,
     /// Key the attestation was verified against (the pinned hub key).
     pub hub_key: String,
-    /// Federated provider key, when the bundle is attested by an approved peer's signed offer.
+    /// Upstream provider key, when the bundle is attested by a provider's signed offer.
     pub provider_key: Option<String>,
     /// Private: only verification code in this module can construct one.
     verified_at: Instant,
@@ -125,7 +125,7 @@ pub struct VerifiedUiAttestation {
 
 impl VerifiedUiAttestation {
     /// Verify a hub-signed attestation document against `pinned_hub_key` (and, when it endorses
-    /// a federated provider, the peer-signed offer) and bind it to `plugin_id@version`.
+    /// an upstream provider, the provider-signed offer) and bind it to `plugin_id@version`.
     pub fn verify(
         doc: &serde_json::Value,
         pinned_hub_key: &str,
@@ -160,7 +160,7 @@ impl VerifiedUiAttestation {
             }
             (Some(_), None) => {
                 return Err(CompassError::ui_bundle_tampered(
-                    "UI_ATTESTATION_INVALID: federated module is missing its provider-signed offer",
+                    "UI_ATTESTATION_INVALID: network provider module is missing its provider-signed offer",
                 ));
             }
             (None, _) => None,

@@ -27,7 +27,7 @@ async fn agent_preparation_shares_gateway_limit_and_preserves_budget_and_selecti
                 prepares.send(body).unwrap();
                 Json(json!({
                     "run_id":"r1","plugin_id":"test/echo","plugin_version":"2","offer_id":"paid",
-                    "image_ref":"fixture","target_node_id":"node","estimated_cost_act":2000,
+                    "image_ref":"fixture","target_node_id":"node","estimated_cost_milli_eur":2000,
                     "workload_hash":"hash","froglet_quote":{},"expires_at":"2030-01-01T00:00:00Z"
                 }))
             }
@@ -61,7 +61,7 @@ async fn agent_preparation_shares_gateway_limit_and_preserves_budget_and_selecti
                 hub,
                 &SessionId::from("session"),
                 &ExecutionBudget::Finite {
-                    limit_milli_act: allowance,
+                    limit_milli_eur: allowance,
                 },
                 None,
             )

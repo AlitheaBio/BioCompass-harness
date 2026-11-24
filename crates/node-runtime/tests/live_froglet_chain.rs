@@ -2,18 +2,16 @@
 //!
 //! Verifies:
 //! 1. Full `Prepare -> Confirm` lifecycle executing real `127.0.0.1:5500/alithea/hla-motif-enrichment@sha256:...`
-//!    over pre-masked DuckDB Parquet cohorts with double-entry ACT `reserve -> settle`.
+//!    over pre-masked DuckDB Parquet cohorts with `settlement_method = "none"`.
 //! 2. External standalone `froglet-verify` CLI (`--chain --json`) returning exit code `0` and `"valid": true`
 //!    on the exported 5-artifact `Descriptor -> Offer -> Quote -> Deal -> Receipt` chain.
 //! 3. Four adversarial 1-byte mutations (`result_hash`, `workload_hash`, `deal_hash`, `signature`)
 //!    all rejected with exit code `1` (`"valid": false`) by the external `froglet-verify` CLI.
-//! 4. Forced non-zero container exit (`exit 2` on missing cohort) automatically refunds 100% of
-//!    reserved ACT credits (`LedgerTxKind::RunRefund`) AND produces a valid `failed` Froglet chain.
+//! 4. Forced non-zero container exit (`exit 2` on missing cohort) produces a valid `failed` Froglet chain.
 
 use biocompass_core_traits::{
-    BlobStore, CreditAmountAct, DatasetGrant, LedgerTxKind, LocalFsBlobStore, OrgId,
-    PaymentGateway, PrepareRunRequest, RunDispatcher, RunStatus, SessionStore, SqliteActLedger,
-    SqliteSessionStore,
+    BlobStore, DatasetGrant, LocalFsBlobStore, OrgId, PrepareRunRequest, RunDispatcher, RunStatus,
+    SessionStore, SqliteSessionStore,
 };
 use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{
@@ -347,11 +345,6 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
     let blob_store = Arc::new(
         LocalFsBlobStore::new(workspace.path().join("blobs")).expect("open LocalFsBlobStore"),
     );
-    let initial_balance = CreditAmountAct::from_whole_act(50);
-    let ledger = Arc::new(
-        SqliteActLedger::open(workspace.path().join("ledger.sqlite"), initial_balance)
-            .expect("open SqliteActLedger"),
-    );
     let oci_runner = Arc::new(
         OciContainerRunner::detect()
             .await
@@ -376,7 +369,6 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         session_store: session_store.clone(),
         blob_store: blob_store.clone(),
         oci_registry,
-        payment_gateway: ledger.clone(),
         oci_runner: oci_runner.clone(),
         stage_root_dir: workspace.path().join("stages"),
         allow_local_dev_tags: false,
@@ -435,13 +427,6 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         })
         .await
         .expect("prepare_run should succeed");
-
-    // Prepare MUST NOT reserve or deduct ACT before user confirmation!
-    let pre_confirm_balance = ledger
-        .available_balance(&org_id)
-        .await
-        .expect("query balance");
-    assert_eq!(pre_confirm_balance, initial_balance);
 
     let mut log_rx = runtime.subscribe_logs();
     let run = runtime
@@ -505,13 +490,6 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
             .await
             .expect("exists froglet_chain.json")
     );
-
-    // Verify ACT ledger settled cleanly (50.00 ACT - 5.00 ACT = 45.00 ACT).
-    let post_settle_balance = ledger
-        .available_balance(&org_id)
-        .await
-        .expect("post-settle balance");
-    assert_eq!(post_settle_balance, CreditAmountAct::from_whole_act(45));
 
     // Verify ephemeral stage directory was cleaned up (0 leaked stage-* directories).
     let stage_entries: Vec<_> = std::fs::read_dir(workspace.path().join("stages"))
@@ -619,16 +597,10 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
     assert_eq!(rep_sig["valid"], json!(false));
 
     // -------------------------------------------------------------------------
-    // 4. Container Non-Zero Exit (`exit 2`) -> ACT Refund + Valid `failed` Chain
+    // 4. Container Non-Zero Exit (`exit 2`) -> Valid `failed` Chain
     // -------------------------------------------------------------------------
     // Running hla-motif-enrichment without a dataset_grant omits /in/data/cohort.parquet,
     // causing analyze.py inside the real container to print an error and exit with code 2.
-    let balance_before_fail = ledger
-        .available_balance(&org_id)
-        .await
-        .expect("balance before failing run");
-    assert_eq!(balance_before_fail, CreditAmountAct::from_whole_act(45));
-
     let fail_quote = runtime
         .prepare_run(PrepareRunRequest {
             org_id: org_id.clone(),
@@ -655,7 +627,7 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
     let failed_run = runtime
         .confirm_run(&fail_quote.run_id, "idem-gate3-fail-refund-002")
         .await
-        .expect("confirm_run records terminal Failed RunRecord + refunds ACT");
+        .expect("confirm_run records terminal Failed RunRecord");
 
     assert_eq!(failed_run.status, RunStatus::Failed);
     assert!(failed_run.receipt_verified);
@@ -667,27 +639,6 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
             .contains("non-zero code 2"),
         "expected exit code 2 failure message, got {:?}",
         failed_run.error_message
-    );
-
-    // ACT balance MUST be 100% restored to 45.00 ACT!
-    let balance_after_refund = ledger
-        .available_balance(&org_id)
-        .await
-        .expect("balance after refund");
-    assert_eq!(
-        balance_after_refund, balance_before_fail,
-        "reserved ACT was not refunded after container exit 2!"
-    );
-
-    let txs = ledger
-        .list_transactions(&org_id)
-        .await
-        .expect("list ledger transactions");
-    assert!(
-        txs.iter()
-            .any(|tx| tx.run_id.as_ref() == Some(&fail_quote.run_id)
-                && tx.kind == LedgerTxKind::RunRefund),
-        "expected explicit RunRefund ledger entry for failed container run"
     );
 
     // Even the failed run's 5-artifact Froglet chain (`deal_state = "failed"`) MUST pass external froglet-verify!

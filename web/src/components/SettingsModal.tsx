@@ -4,7 +4,6 @@ import { PersonalAccountSettings } from "./PersonalAccountSettings";
 import React, { useEffect, useState } from "react";
 import { WorkspaceHubChooser } from "./WorkspaceHubChooser";
 import { WorkspaceSettings } from "./WorkspaceSettings";
-import { isLocalPlayLedgerContext } from "../moduleListPolicy";
 import {
   IconCheck,
   IconClose,
@@ -30,7 +29,7 @@ import {
   updateLlmConfig,
 } from "../api";
 import {
-  formatWorkspaceAmount,
+  formatMilliEur,
   type DatasetGrant,
   type DiscoveredLlmBackend,
   type HealthStatus,
@@ -113,8 +112,10 @@ export function SettingsModal({
   onWorkspaceHubChanged?: (updated: WorkspaceHubStatus) => Promise<void> | void;
   onClose: () => void;
 }) {
-  const localPlayLedger = isLocalPlayLedgerContext(health, ledger);
-  const zeroDisplay = formatWorkspaceAmount(0, localPlayLedger);
+  const isLocalMode = health?.mode === "local";
+  const balanceDisplay = ledger
+    ? (ledger.available_display ?? formatMilliEur(ledger.available_milli_eur))
+    : "€0.00";
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [studioTemplate, setStudioTemplate] = useState<string>("python-uv");
   const [studioPluginId, setStudioPluginId] = useState<string>(
@@ -607,7 +608,7 @@ export function SettingsModal({
             <IconShield size={15} />
             <span style={{ flex: 1, textAlign: "left" }}>Usage</span>
             <span className="bc-settings-tab-count mono" data-testid="settings-usage-count">
-              {ledger?.available_display ?? zeroDisplay}
+              {isLocalMode ? "Local" : balanceDisplay}
             </span>
           </button>
           <button
@@ -633,7 +634,7 @@ export function SettingsModal({
               {section === "workspace" && "Workspace"}
               {section === "agent" && "Agent Backend & Subscription Connection"}
               {section === "governance" && "Data Access & Governance"}
-              {section === "usage" && "Usage & Credits"}
+              {section === "usage" && (isLocalMode ? "Usage & Local Runtime" : "Usage & EUR Balance")}
               {section === "developer" && "Developer Module Studio"}
               {section === "account" && "Personal account"}
             </h2>
@@ -1192,37 +1193,61 @@ export function SettingsModal({
             )}
 
             {section === "usage" && (() => {
+              if (isLocalMode) {
+                return (
+                  <div className="bc-settings-stack">
+                    <div className="bc-card" data-testid="usage-local-note">
+                      <div className="bc-card-title">Local Execution (No Billing)</div>
+                      <p className="bc-caption" style={{ marginTop: 6, marginBottom: 0, lineHeight: 1.55 }}>
+                        Local runs execute directly on this workstation with no billing ledger
+                        (<code>settlement_method = &quot;none&quot;</code>). Connect to a cloud hub
+                        in <strong>Settings → Workspace</strong> to view EUR balance and cloud usage.
+                      </p>
+                    </div>
+                    <div className="bc-meta-grid">
+                      <div className="bc-meta-item">
+                        <span className="bc-caption">Container Engine</span>
+                        <span className="mono">
+                          {health?.container_engine ?? "detecting..."} ({health?.mode ?? "local"})
+                        </span>
+                      </div>
+                      <div className="bc-meta-item">
+                        <span className="bc-caption">Froglet Node ID</span>
+                        <span className="mono" style={{ wordBreak: "break-all" }}>
+                          {health?.node_id ?? "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
               const txs = ledger?.transactions ?? [];
               const totalSpentMilli = txs
-                .filter((tx) => tx.delta_act < 0)
-                .reduce((acc, tx) => acc + Math.abs(tx.delta_act), 0);
+                .filter((tx) => tx.delta_milli_eur < 0)
+                .reduce((acc, tx) => acc + Math.abs(tx.delta_milli_eur), 0);
               return (
                 <div className="bc-settings-stack">
                   <div className="bc-meta-grid">
                     <div className="bc-meta-item">
-                      <span className="bc-caption">
-                        {localPlayLedger ? "Local Play Credits" : "Available Balance (EUR)"}
-                      </span>
+                      <span className="bc-caption">Available Balance (EUR)</span>
                       <strong
                         style={{ fontSize: 18, color: "var(--bc-accent)" }}
                         className="mono"
-                        data-testid="usage-available-credits"
+                        data-testid="usage-available-eur"
                       >
-                        {ledger?.available_display ?? zeroDisplay}
+                        {balanceDisplay}
                       </strong>
                     </div>
                     <div className="bc-meta-item">
-                      <span className="bc-caption">
-                        {localPlayLedger ? "Play Credits Used" : "EUR Spent"}
-                      </span>
+                      <span className="bc-caption">EUR Spent</span>
                       <strong style={{ fontSize: 16 }} className="mono">
-                        {formatWorkspaceAmount(totalSpentMilli, localPlayLedger)}
+                        {formatMilliEur(totalSpentMilli)}
                       </strong>
                     </div>
                     <div className="bc-meta-item">
                       <span className="bc-caption">Container Engine</span>
                       <span className="mono">
-                        {health?.container_engine ?? "detecting..."} ({health?.mode ?? "local"})
+                        {health?.container_engine ?? "detecting..."} ({health?.mode ?? "cloud"})
                       </span>
                     </div>
                     <div className="bc-meta-item">
@@ -1236,7 +1261,7 @@ export function SettingsModal({
                   {txs.length > 0 && (
                     <div className="bc-card">
                       <div className="bc-card-header" style={{ marginBottom: 8 }}>
-                        <span className="bc-card-title">Credit Usage Ledger</span>
+                        <span className="bc-card-title">EUR Usage Ledger</span>
                         <span className="bc-caption">{txs.length} entries</span>
                       </div>
                       <div className="table-scroll">
@@ -1265,10 +1290,10 @@ export function SettingsModal({
                                   {tx.reference}
                                 </td>
                                 <td className="mono" style={{ textAlign: "right" }}>
-                                  {formatWorkspaceAmount(tx.delta_act, localPlayLedger)}
+                                  {formatMilliEur(tx.delta_milli_eur)}
                                 </td>
                                 <td className="mono" style={{ textAlign: "right" }}>
-                                  {formatWorkspaceAmount(tx.balance_after_act, localPlayLedger)}
+                                  {formatMilliEur(tx.balance_after_milli_eur)}
                                 </td>
                               </tr>
                             ))}
