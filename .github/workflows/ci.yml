@@ -43,6 +43,24 @@ jobs:
       - name: Run gitleaks
         run: /tmp/gitleaks git . --redact --no-banner --exit-code 1 --log-opts="fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159..HEAD"
 
+  vuln-scan:
+    name: Dependency Vulnerability Gate (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Scan Cargo.lock and package-lock.json (fail on unwaived CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          skip-dirs: target,node_modules,web/node_modules,vendor
+
   web:
     name: Web SDK & UI (typecheck, unit tests, build)
     runs-on: ubuntu-latest
@@ -91,58 +109,46 @@ jobs:
       - name: Cargo test (--workspace)
         run: cargo test --workspace
 
-  publish-bundled-modules:
-    name: Publish Bundled Modules (${{ matrix.module }})
+  module-hla-motif-enrichment:
+    name: Bundled Module (hla-motif-enrichment)
     needs:
       - gitleaks
+      - vuln-scan
       - web
       - rust
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/v2-architecture' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - module: hla-motif-enrichment
-            context: plugins/hla-motif-enrichment
-            image: ghcr.io/alitheabio/hla-motif-enrichment
-          - module: hla-interactive-explorer
-            context: plugins/hla-interactive-explorer
-            image: ghcr.io/alitheabio/hla-interactive-explorer
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ matrix.image }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=sha,prefix=sha-
-      - name: Build and push digest-pinned module image
-        id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.context }}/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Record canonical @sha256 digest
-        run: |
-          echo "Published ${{ matrix.image }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      id-token: write
+    uses: ./.github/workflows/module.yml
+    with:
+      module_path: plugins/hla-motif-enrichment
+      image_name: ghcr.io/alitheabio/hla-motif-enrichment
+      use_uv: false
+      python_test_command: python3 ../test_sec_20_30_bundled_plugins.py -v
+      has_ui: false
+      run_gitleaks: false
+      publish: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/v2-architecture' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+
+  module-hla-interactive-explorer:
+    name: Bundled Module (hla-interactive-explorer)
+    needs:
+      - gitleaks
+      - vuln-scan
+      - web
+      - rust
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/module.yml
+    with:
+      module_path: plugins/hla-interactive-explorer
+      image_name: ghcr.io/alitheabio/hla-interactive-explorer
+      use_uv: false
+      python_test_command: python3 ../test_sec_20_30_bundled_plugins.py -v
+      has_ui: true
+      ui_test_command: ""
+      ui_in_harness_workspace: true
+      run_gitleaks: false
+      publish: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/v2-architecture' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}

@@ -98,6 +98,7 @@ pub fn is_valid_oci_manifest_content_type(raw: Option<&str>) -> bool {
 pub struct OciDistributionClient {
     http: Client,
     allow_loopback_http: bool,
+    loopback_https: bool,
 }
 
 impl OciDistributionClient {
@@ -112,6 +113,36 @@ impl OciDistributionClient {
         Ok(Self {
             http,
             allow_loopback_http,
+            loopback_https: false,
+        })
+    }
+
+    /// Construct an OCI Distribution v1.1 client that talks strictly over HTTPS to loopback
+    /// registries verified against the supplied PEM CA certificate (used for self-contained
+    /// TLS loopback test registries without weakening TLS validation or SSRF rules).
+    pub fn with_loopback_tls_ca_pem(ca_cert_pem: &[u8]) -> CompassResult<Self> {
+        let certs = reqwest::Certificate::from_pem_bundle(ca_cert_pem).map_err(|e| {
+            CompassError::Validation(format!("invalid loopback registry CA PEM certificate: {e}"))
+        })?;
+        if certs.is_empty() {
+            return Err(CompassError::Validation(
+                "loopback registry CA PEM bundle contains no certificates".into(),
+            ));
+        }
+        let mut builder = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20));
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+        let http = builder
+            .build()
+            .map_err(|e| CompassError::ContainerEngine(format!("build OCI TLS HTTP client: {e}")))?;
+        Ok(Self {
+            http,
+            allow_loopback_http: true,
+            loopback_https: true,
         })
     }
 
@@ -161,7 +192,7 @@ impl OciDistributionClient {
                     "loopback HTTP registry '{host_authority}' is disabled in strict TLS policy"
                 )));
             }
-            "http"
+            if self.loopback_https { "https" } else { "http" }
         } else {
             "https"
         };
@@ -438,5 +469,18 @@ mod tests {
             .await
             .expect("valid manifest must pass");
         assert_eq!(parsed.sha256_digest.as_deref(), Some(real_sha.as_str()));
+    }
+
+    #[test]
+    fn loopback_tls_client_uses_https_and_rejects_invalid_pem_or_ssrf() {
+        assert!(OciDistributionClient::with_loopback_tls_ca_pem(b"not-a-cert").is_err());
+        let mut tls_client = OciDistributionClient::new(true).unwrap();
+        tls_client.loopback_https = true;
+        let (base, _, _, is_lb, _) = tls_client
+            .split_registry_and_repo("127.0.0.1:5000/org/img")
+            .expect("loopback TLS client accepts loopback");
+        assert_eq!(base, "https://127.0.0.1:5000");
+        assert!(is_lb);
+        assert!(tls_client.split_registry_and_repo("169.254.169.254/org/img").is_err());
     }
 }

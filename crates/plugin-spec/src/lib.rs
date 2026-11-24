@@ -445,8 +445,28 @@ impl PluginManifest {
         Ok(manifest)
     }
 
+    /// Parse and validate a source-tree `plugin.toml` document (allowing canonical unpinned
+    /// `<registry>/<repo>:<tag>` refs before CI stamps `@sha256:<64-hex>` into the published manifest).
+    pub fn from_toml_source_str(raw: &str) -> CompassResult<Self> {
+        let manifest = Self::from_toml_unvalidated(raw)?;
+        manifest.validate_source()?;
+        Ok(manifest)
+    }
+
     /// Validate structural invariants, OCI reference rules, and JSON Schema syntax.
     pub fn validate(&self, allow_local_dev_tags: bool) -> CompassResult<OciImageRef> {
+        self.validate_structure()?;
+        OciImageRef::parse(&self.image, allow_local_dev_tags)
+    }
+
+    /// Validate structural invariants and JSON Schema for a source-tree `plugin.toml`
+    /// whose `image` carries a canonical tag before CI stamps an immutable `@sha256:` digest.
+    pub fn validate_source(&self) -> CompassResult<OciImageRef> {
+        self.validate_structure()?;
+        OciImageRef::parse_source_manifest_ref(&self.image)
+    }
+
+    fn validate_structure(&self) -> CompassResult<()> {
         if !self.id.as_str().contains('/') {
             return Err(CompassError::Validation(format!(
                 "plugin id '{}' must be namespaced as '<org>/<name>'",
@@ -609,7 +629,7 @@ impl PluginManifest {
             CompassError::Validation(format!("invalid [inputs.schema] JSON Schema: {e}"))
         })?;
 
-        OciImageRef::parse(&self.image, allow_local_dev_tags)
+        Ok(())
     }
 
     /// Return the effective Offer list (`[[offers]]` if declared, or 1 synthesized default Offer
@@ -742,6 +762,21 @@ pub struct LoadedPlugin {
 impl LoadedPlugin {
     /// Load a plugin directory containing `plugin.toml`, optional `SKILL.md`, and optional `ui/`.
     pub fn load_from_dir(dir: impl AsRef<Path>, allow_local_dev_tags: bool) -> CompassResult<Self> {
+        Self::load_from_dir_with(dir, |raw| {
+            PluginManifest::from_toml_str(raw, allow_local_dev_tags)
+        })
+    }
+
+    /// Load a source-tree plugin directory whose `plugin.toml` may carry an unpinned canonical tag
+    /// (`ghcr.io/alitheabio/<module>:<version>`) before CI stamps `@sha256:` into the published manifest.
+    pub fn load_source_from_dir(dir: impl AsRef<Path>) -> CompassResult<Self> {
+        Self::load_from_dir_with(dir, PluginManifest::from_toml_source_str)
+    }
+
+    fn load_from_dir_with(
+        dir: impl AsRef<Path>,
+        parse_manifest: impl FnOnce(&str) -> CompassResult<PluginManifest>,
+    ) -> CompassResult<Self> {
         let root = dir.as_ref();
         let manifest_path = root.join("plugin.toml");
         if !manifest_path.is_file() {
@@ -752,7 +787,7 @@ impl LoadedPlugin {
         }
         let raw_toml = std::fs::read_to_string(&manifest_path)
             .map_err(|e| CompassError::Storage(format!("read {}: {e}", manifest_path.display())))?;
-        let manifest = PluginManifest::from_toml_str(&raw_toml, allow_local_dev_tags)?;
+        let manifest = parse_manifest(&raw_toml)?;
 
         let skill_path = root.join("SKILL.md");
         let skill = if skill_path.is_file() {

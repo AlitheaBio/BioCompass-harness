@@ -275,3 +275,98 @@ image = "127.0.0.1:1/customer/unbundled@sha256:{}"
         "expected run logs to record bundled Dockerfile fallback notice"
     );
 }
+
+#[tokio::test]
+async fn r11_bundled_source_manifest_with_unpinned_tag_builds_locally_while_user_plugin_stays_strict() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let runtime = setup_clean_clone_runtime(root);
+
+    let catalog_dir = root.join("catalogs/hla-immunopeptidomics-v1");
+    seed_demo_hla_catalog(&catalog_dir).unwrap();
+    let catalog = DuckDbCatalogEngine::open_verified(&catalog_dir).unwrap();
+    let catalog_id = catalog.manifest().id.clone();
+    runtime.register_catalog(catalog).await.unwrap();
+
+    // Bundled plugin in git carries canonical unpinned tag (CI stamps @sha256 in published manifest).
+    let bundled_dir = root.join("bundled-plugins/demo-source");
+    fs::create_dir_all(&bundled_dir).unwrap();
+    fs::write(
+        bundled_dir.join("plugin.toml"),
+        r#"
+id = "alithea/demo-source"
+name = "Demo Source Bundled Module"
+version = "1.0.0"
+execution = "either"
+requires_catalog_level = "compute_only"
+network = "none"
+price_milli_act = 5000
+image = "ghcr.io/alitheabio/demo-source:1.0.0"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        bundled_dir.join("Dockerfile"),
+        "FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df\nUSER 65532:65532\n",
+    )
+    .unwrap();
+    let bundled_plugin = LoadedPlugin::load_source_from_dir(&bundled_dir).unwrap();
+    let source_hash = OciImageRef::parse_source_manifest_ref(&bundled_plugin.manifest.image)
+        .unwrap()
+        .canonical_module_hash();
+    runtime.register_plugin(bundled_plugin).await.unwrap();
+    runtime
+        .approve_curated_module("alithea/demo-source".into(), "1.0.0", source_hash)
+        .await;
+
+    // Non-bundled plugin with an unpinned GHCR tag MUST still be rejected at load and registration.
+    let user_dir = root.join("plugins/unpinned-user");
+    fs::create_dir_all(&user_dir).unwrap();
+    fs::write(
+        user_dir.join("plugin.toml"),
+        r#"
+id = "customer/unpinned-user"
+name = "Unpinned User Module"
+version = "1.0.0"
+execution = "local"
+network = "none"
+price_milli_act = 0
+image = "ghcr.io/customer/unpinned-user:1.0.0"
+"#,
+    )
+    .unwrap();
+    assert!(LoadedPlugin::load_from_dir(&user_dir, false).is_err());
+    let loaded_user_source = LoadedPlugin::load_source_from_dir(&user_dir).unwrap();
+    assert!(
+        runtime.register_plugin(loaded_user_source).await.is_err(),
+        "non-bundled plugin with unpinned GHCR tag must be rejected"
+    );
+
+    let org_id = OrgId::from("org-local-scientist");
+    let compute_only_grant = DatasetGrant::compute_only_partner(org_id.clone(), catalog_id);
+    let quote = runtime
+        .prepare_run(PrepareRunRequest {
+            org_id,
+            session_id: None,
+            plugin_id: PluginId::from("alithea/demo-source"),
+            plugin_version: None,
+            offer_id: None,
+            params: json!({}),
+            dataset_grant: Some(compute_only_grant),
+            inputs: Vec::new(),
+            parent_run_id: None,
+            agent_credential_id: None,
+            agent_tool_call_id: None,
+            doc_id: None,
+            doc_version: None,
+        })
+        .await
+        .expect("unpinned bundled source plugin should build via R11 fallback");
+    assert!(quote.image_ref.starts_with("local/bundled-demo-source:sha256-"));
+    let completed = runtime
+        .confirm_run(&quote.run_id, "idem-r11-unpinned-source")
+        .await
+        .expect("confirm unpinned bundled fallback run");
+    assert_eq!(completed.status, RunStatus::Succeeded);
+    assert!(completed.receipt_verified);
+}

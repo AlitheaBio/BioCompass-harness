@@ -7,7 +7,7 @@ description = "Quantifies strong-binder IC50 distributions, 8-14mer length histo
 category = "Immunopeptidomics"
 execution = "either"
 requires_catalog_level = "compute_only"
-image = "ghcr.io/alitheabio/hla-motif-enrichment@sha256:8159a58f7dfff38a43af6aad331e5eaf8eed33d1c503741df25ee9f8ace55191"
+image = "ghcr.io/alitheabio/hla-motif-enrichment:2.0.0"
 network = "none"
 price_milli_act = 5000
 

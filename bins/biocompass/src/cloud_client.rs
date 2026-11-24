@@ -1190,7 +1190,7 @@ impl WorkspaceRegistryPort for CompassHubClient {
         {
             let ui_roots = self.local_ui_roots.read().await;
             if let Some(root) = ui_roots.get(id)
-                && let Ok(loaded) = LoadedPlugin::load_from_dir(root, true)
+                && let Ok(loaded) = LoadedPlugin::load_source_from_dir(root)
             {
                 // If caller is unauthenticated (e.g., static /plugin-ui asset load for bundled plugin),
                 // prefer hub visibility check when authenticated, or fall back to bundled UI asset metadata.

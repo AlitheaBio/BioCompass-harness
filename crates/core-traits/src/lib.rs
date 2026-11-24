@@ -115,6 +115,29 @@ mod tests {
         }
         assert!(OciImageRef::parse("local/../escape:dev", true).is_err());
         assert!(OciImageRef::parse("local/ok:bad?tag", true).is_err());
+
+        // Source-tree manifests (unpinned canonical repo:version before CI stamps @sha256).
+        let src = OciImageRef::parse_source_manifest_ref("ghcr.io/alitheabio/hla-motif-enrichment:2.0.0")
+            .expect("canonical tagged source ref");
+        assert_eq!(src.repository, "ghcr.io/alitheabio/hla-motif-enrichment");
+        assert_eq!(src.sha256_digest, None);
+        assert_eq!(src.local_tag.as_deref(), Some("2.0.0"));
+        // Strict runtime parser MUST still reject unpinned tags!
+        assert!(OciImageRef::parse("ghcr.io/alitheabio/hla-motif-enrichment:2.0.0", false).is_err());
+        assert!(OciImageRef::parse("ghcr.io/alitheabio/hla-motif-enrichment:2.0.0", true).is_err());
+        // Source parser still enforces strict repository/tag hygiene and rejects untagged or malformed refs.
+        for bad_src in [
+            "ghcr.io/alitheabio/hla-motif-enrichment",
+            "127.0.0.1:5000/org/img",
+            "ghcr.io/alitheabio/../escape:1.0.0",
+            "ghcr.io/alitheabio/mod:1.0.0?x=1",
+            "ghcr.io/alitheabio/mod@sha256:short",
+        ] {
+            assert!(
+                OciImageRef::parse_source_manifest_ref(bad_src).is_err(),
+                "source manifest parser must reject '{bad_src}'"
+            );
+        }
     }
 
     #[cfg(feature = "local-sqlite")]

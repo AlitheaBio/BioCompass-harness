@@ -442,6 +442,59 @@ impl OciImageRef {
         )))
     }
 
+    /// Parse an OCI image reference from a source-tree `plugin.toml` (git checkout / bundled source),
+    /// where CI stamps `@sha256:<64-hex>` into the published package manifest rather than committing
+    /// hand-written digests into git.
+    ///
+    /// Accepts either a strict `@sha256:<64-hex>` pinned reference or a valid tagged source reference
+    /// (`<registry>/<repo>:<tag>` or `local/<slug>:<tag>`). Never used by cloud, hub, or published
+    /// runtime admission — those always call [`Self::parse`] with `allow_local_tag = false`.
+    pub fn parse_source_manifest_ref(raw: &str) -> CompassResult<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(CompassError::Validation("OCI image reference cannot be empty".into()));
+        }
+        if trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
+            || trimmed.contains('?')
+            || trimmed.contains('#')
+            || trimmed.contains('\\')
+        {
+            return Err(CompassError::Validation(format!(
+                "OCI image reference '{trimmed}' contains forbidden characters"
+            )));
+        }
+        if trimmed.contains("@sha256:") {
+            return Self::parse(trimmed, false);
+        }
+        if trimmed.contains('@') {
+            return Err(CompassError::Validation(format!(
+                "OCI source image '{trimmed}' has unsupported '@' digest form"
+            )));
+        }
+        let Some((repo, tag)) = trimmed.rsplit_once(':') else {
+            return Err(CompassError::Validation(format!(
+                "OCI source image '{trimmed}' must include an explicit tag or '@sha256:<64-hex>' digest"
+            )));
+        };
+        if repo.is_empty() || tag.contains('/') {
+            return Err(CompassError::Validation(format!(
+                "OCI source image '{trimmed}' must include an explicit tag or '@sha256:<64-hex>' digest"
+            )));
+        }
+        Self::validate_repository(repo)?;
+        if !Self::is_valid_local_tag(tag) {
+            return Err(CompassError::Validation(format!(
+                "OCI source image tag '{tag}' is invalid"
+            )));
+        }
+        Ok(Self {
+            raw: trimmed.to_owned(),
+            repository: repo.to_owned(),
+            sha256_digest: None,
+            local_tag: Some(tag.to_owned()),
+        })
+    }
+
     /// Return the 64-char hex digest used in Froglet receipts (or deterministic SHA-256 of local dev ref).
     pub fn canonical_module_hash(&self) -> String {
         if let Some(digest) = &self.sha256_digest {

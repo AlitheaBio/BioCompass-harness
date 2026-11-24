@@ -487,7 +487,7 @@ impl InProcessNodeRuntime {
             .build_local_bundled_image(&bundled_dir, slug, &plugin.manifest.version)
             .await?;
 
-        if let Ok(manifest_img) = OciImageRef::parse(&plugin.manifest.image, true)
+        if let Ok(manifest_img) = OciImageRef::parse_source_manifest_ref(&plugin.manifest.image)
             && self
                 .is_curated_module_approved(
                     &plugin.manifest.id,
@@ -605,7 +605,11 @@ impl InProcessNodeRuntime {
         installed: bool,
         commit: impl FnOnce(Option<&LoadedPlugin>) -> CompassResult<()>,
     ) -> CompassResult<()> {
-        plugin.manifest.validate(self.allow_local_dev_tags)?;
+        if self.bundled_dockerfile_dir(&plugin).is_some() {
+            plugin.manifest.validate_source()?;
+        } else {
+            plugin.manifest.validate(self.allow_local_dev_tags)?;
+        }
         let id = &plugin.manifest.id;
         let version = &plugin.manifest.version;
         let mut plugins = self.plugins.write().await;

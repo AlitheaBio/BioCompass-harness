@@ -19,7 +19,7 @@ use biocompass_data_engine::{DuckDbCatalogEngine, seed_demo_hla_catalog};
 use biocompass_node_runtime::{
     InProcessNodeRuntime, NodeKeypairSet, NodeRuntimeDeps, verify_froglet_chain_offline,
 };
-use biocompass_oci_runner::{OciContainerRunner, OciDistributionClient};
+use biocompass_oci_runner::{EngineKind, OciContainerRunner, OciDistributionClient};
 use biocompass_plugin_spec::LoadedPlugin;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -27,9 +27,14 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+const REGISTRY_IMAGE: &str = "ghcr.io/distribution/distribution:3.0.0@sha256:4ba3adf47f5c866e9a29288c758c5328ef03396cb8f5f6454463655fa8bc83e2";
+
 struct EphemeralRegistry {
     engine_bin: PathBuf,
     container_name: String,
+    _cert_dir: TempDir,
+    ca_pem: Vec<u8>,
+    podman_host_certs_dir: Option<PathBuf>,
     created_tags: Vec<String>,
 }
 
@@ -40,39 +45,137 @@ impl EphemeralRegistry {
             .local_addr()
             .unwrap()
             .port();
-        let engine_bin = runner.engine().binary_path.clone();
+        let engine = runner.engine();
+        let engine_bin = engine.binary_path.clone();
+
+        let cert_dir = TempDir::new().expect("create throwaway TLS cert dir");
+        let ca_cnf = cert_dir.path().join("ca.cnf");
+        let ca_crt = cert_dir.path().join("ca.crt");
+        let ca_key = cert_dir.path().join("ca.key");
+        let leaf_cnf = cert_dir.path().join("leaf.cnf");
+        let leaf_csr = cert_dir.path().join("registry.csr");
+        let crt_path = cert_dir.path().join("registry.crt");
+        let key_path = cert_dir.path().join("registry.key");
+        std::fs::write(
+            &ca_cnf,
+            "[req]\ndistinguished_name = dn\nprompt = no\nx509_extensions = v3_ca\n[dn]\nCN = BioCompass Test Throwaway CA\n[v3_ca]\nbasicConstraints = critical,CA:TRUE,pathlen:0\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\n",
+        )
+        .expect("write throwaway CA openssl config");
+        std::fs::write(
+            &leaf_cnf,
+            "[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = 127.0.0.1\n[v3_leaf]\nbasicConstraints = critical,CA:FALSE\nkeyUsage = critical,digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = IP:127.0.0.1,DNS:localhost\n",
+        )
+        .expect("write throwaway leaf openssl config");
+        for args in [
+            vec![
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-config", ca_cnf.to_str().unwrap(),
+                "-keyout", ca_key.to_str().unwrap(),
+                "-out", ca_crt.to_str().unwrap(),
+            ],
+            vec![
+                "req", "-new", "-newkey", "rsa:2048", "-nodes",
+                "-config", leaf_cnf.to_str().unwrap(),
+                "-keyout", key_path.to_str().unwrap(),
+                "-out", leaf_csr.to_str().unwrap(),
+            ],
+            vec![
+                "x509", "-req", "-days", "1",
+                "-in", leaf_csr.to_str().unwrap(),
+                "-CA", ca_crt.to_str().unwrap(),
+                "-CAkey", ca_key.to_str().unwrap(),
+                "-CAcreateserial",
+                "-extfile", leaf_cnf.to_str().unwrap(),
+                "-extensions", "v3_leaf",
+                "-out", crt_path.to_str().unwrap(),
+            ],
+        ] {
+            let openssl_out = Command::new("openssl")
+                .args(&args)
+                .output()
+                .expect("generate throwaway loopback TLS cert");
+            assert!(
+                openssl_out.status.success(),
+                "openssl {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&openssl_out.stderr)
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(cert_dir.path(), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod cert_dir 0755");
+            std::fs::set_permissions(&crt_path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod registry.crt 0644");
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod registry.key 0644");
+        }
+        let ca_pem = std::fs::read(&ca_crt).expect("read throwaway CA PEM");
+
+        let podman_host_certs_dir = if engine.kind == EngineKind::Podman {
+            let config_base = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .expect("resolve containers certs.d config root");
+            let host_dir = config_base
+                .join("containers/certs.d")
+                .join(format!("127.0.0.1:{port}"));
+            std::fs::create_dir_all(&host_dir).expect("create podman per-port certs.d");
+            std::fs::write(host_dir.join("ca.crt"), &ca_pem).expect("write podman throwaway ca.crt");
+            Some(host_dir)
+        } else {
+            None
+        };
+
         let container_name = format!(
             "biocompass-gate3-reg-{}-{}",
             std::process::id(),
             port
         );
-        let status = Command::new(&engine_bin)
+        let mut run_cmd = Command::new(&engine_bin);
+        run_cmd.args(["run", "-d", "--rm", "--name", &container_name]);
+        if cfg!(target_os = "linux") && engine.kind == EngineKind::Podman && engine.rootless {
+            run_cmd.args(["--security-opt", "label=disable"]);
+        }
+        let status = run_cmd
             .args([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &container_name,
                 "-p",
                 &format!("127.0.0.1:{port}:5000"),
-                "ghcr.io/distribution/distribution:3.0.0",
+                "-v",
+                &format!("{}:/certs:ro", cert_dir.path().display()),
+                "-e",
+                "REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt",
+                "-e",
+                "REGISTRY_HTTP_TLS_KEY=/certs/registry.key",
+                REGISTRY_IMAGE,
             ])
             .status()
-            .expect("start ephemeral OCI registry");
-        assert!(status.success(), "failed starting ephemeral OCI registry");
+            .expect("start ephemeral TLS OCI registry");
+        assert!(status.success(), "failed starting ephemeral TLS OCI registry");
 
+        let ca_cert = reqwest::Certificate::from_pem(&ca_pem).expect("parse throwaway CA PEM");
+        let client = reqwest::Client::builder()
+            .add_root_certificate(ca_cert)
+            .build()
+            .expect("build TLS readiness HTTP client");
+        let v2_url = format!("https://127.0.0.1:{port}/v2/");
+        let mut ready = false;
         for _ in 0..40 {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if client.get(&v2_url).send().await.is_ok_and(|r| r.status().is_success()) {
+                ready = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+        assert!(ready, "ephemeral TLS OCI registry on 127.0.0.1:{port} did not become healthy");
 
-        let tag = format!("127.0.0.1:{port}/alithea/hla-motif-enrichment:2.0.0");
+        let repo = format!("127.0.0.1:{port}/alithea/hla-motif-enrichment");
+        let tag = format!("{repo}:2.0.0");
         let mut build_cmd = Command::new(&engine_bin);
         build_cmd.arg("build");
-        if runner.engine().kind == biocompass_oci_runner::EngineKind::Docker {
+        if engine.kind == EngineKind::Docker {
             build_cmd.arg("--provenance=false");
         }
         let build_status = build_cmd
@@ -82,28 +185,66 @@ impl EphemeralRegistry {
             .expect("build hla-motif-enrichment");
         assert!(build_status.success(), "failed building hla-motif-enrichment");
 
-        let push_status = Command::new(&engine_bin)
-            .args(["push", "-q", &tag])
-            .status()
-            .expect("push hla-motif-enrichment");
-        assert!(push_status.success(), "failed pushing hla-motif-enrichment");
-
-        let inspect_out = Command::new(&engine_bin)
-            .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &tag])
-            .output()
-            .expect("inspect RepoDigests");
-        assert!(inspect_out.status.success());
-        let pinned = String::from_utf8_lossy(&inspect_out.stdout).trim().to_owned();
+        let pinned = if engine.kind == EngineKind::Podman {
+            let digest_file = cert_dir.path().join("pushed.digest");
+            let push_out = Command::new(&engine_bin)
+                .args(["push", "-q", "--digestfile", digest_file.to_str().unwrap(), &tag])
+                .output()
+                .expect("podman push hla-motif-enrichment over TLS");
+            assert!(
+                push_out.status.success(),
+                "failed pushing hla-motif-enrichment over TLS: {}",
+                String::from_utf8_lossy(&push_out.stderr)
+            );
+            let digest = std::fs::read_to_string(&digest_file)
+                .expect("read digestfile")
+                .trim()
+                .to_owned();
+            let pinned = format!("{repo}@{digest}");
+            let pull_out = Command::new(&engine_bin)
+                .args(["pull", "-q", &pinned])
+                .output()
+                .expect("podman pull pinned digest over TLS");
+            assert!(
+                pull_out.status.success(),
+                "failed pulling '{pinned}' over TLS: {}",
+                String::from_utf8_lossy(&pull_out.stderr)
+            );
+            pinned
+        } else {
+            let push_out = Command::new(&engine_bin)
+                .args(["push", "-q", &tag])
+                .output()
+                .expect("push hla-motif-enrichment to ephemeral TLS registry");
+            assert!(
+                push_out.status.success(),
+                "failed pushing hla-motif-enrichment: {}",
+                String::from_utf8_lossy(&push_out.stderr)
+            );
+            let inspect_out = Command::new(&engine_bin)
+                .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &tag])
+                .output()
+                .expect("inspect RepoDigests");
+            assert!(inspect_out.status.success());
+            String::from_utf8_lossy(&inspect_out.stdout).trim().to_owned()
+        };
         assert!(pinned.contains("@sha256:"), "expected @sha256 digest, got '{pinned}'");
 
         (
             Self {
                 engine_bin,
                 container_name,
+                _cert_dir: cert_dir,
+                ca_pem,
+                podman_host_certs_dir,
                 created_tags: vec![tag, pinned.clone()],
             },
             pinned,
         )
+    }
+
+    fn ca_pem(&self) -> &[u8] {
+        &self.ca_pem
     }
 }
 
@@ -116,6 +257,9 @@ impl Drop for EphemeralRegistry {
             let _ = Command::new(&self.engine_bin)
                 .args(["rmi", "-f", tag])
                 .output();
+        }
+        if let Some(dir) = &self.podman_host_certs_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -208,12 +352,23 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         SqliteActLedger::open(workspace.path().join("ledger.sqlite"), initial_balance)
             .expect("open SqliteActLedger"),
     );
-    let oci_registry =
-        Arc::new(OciDistributionClient::new(true).expect("create OciDistributionClient"));
     let oci_runner = Arc::new(
         OciContainerRunner::detect()
             .await
             .expect("detect active Docker/Podman container engine"),
+    );
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let motif_src = repo_root.join("plugins/hla-motif-enrichment");
+    let (ephemeral_reg, pinned_motif_image) =
+        EphemeralRegistry::start_and_push_motif(&oci_runner, &motif_src).await;
+    let oci_registry = Arc::new(
+        OciDistributionClient::with_loopback_tls_ca_pem(ephemeral_reg.ca_pem())
+            .expect("create loopback TLS OciDistributionClient"),
     );
 
     let runtime = InProcessNodeRuntime::new(NodeRuntimeDeps {
@@ -238,16 +393,8 @@ async fn gate3_live_froglet_chain_external_verifier_tamper_and_refund_suite() {
         .await
         .expect("register catalog");
 
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root")
-        .to_path_buf();
-    let motif_src = repo_root.join("plugins/hla-motif-enrichment");
-    let (_ephemeral_reg, pinned_motif_image) =
-        EphemeralRegistry::start_and_push_motif(&oci_runner, &motif_src).await;
-    let mut plugin = LoadedPlugin::load_from_dir(&motif_src, false)
-        .expect("load real pinned hla-motif-enrichment plugin");
+    let mut plugin = LoadedPlugin::load_source_from_dir(&motif_src)
+        .expect("load source hla-motif-enrichment plugin");
     plugin.manifest.image = pinned_motif_image;
     let plugin_id = plugin.manifest.id.clone();
     runtime

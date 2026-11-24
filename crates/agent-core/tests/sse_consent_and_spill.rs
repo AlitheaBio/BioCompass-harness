@@ -209,9 +209,13 @@ async fn gate4_consent_gate_invariant_spill_and_no_mock_llm_suite() {
         .and_then(Path::parent)
         .expect("repo root")
         .to_path_buf();
-    let plugin =
-        LoadedPlugin::load_from_dir(repo_root.join("plugins/hla-motif-enrichment"), false)
-            .expect("load plugin");
+    let mut plugin =
+        LoadedPlugin::load_source_from_dir(repo_root.join("plugins/hla-motif-enrichment"))
+            .expect("load source plugin");
+    plugin.manifest.image = format!(
+        "ghcr.io/alitheabio/hla-motif-enrichment@sha256:{}",
+        "8".repeat(64)
+    );
     runtime.register_plugin(plugin).await.expect("reg plugin");
 
     let org_id = OrgId::new("org-gate4").expect("org id");
@@ -619,15 +623,18 @@ async fn notebook_bridge_list_runs_artifact_and_active_module_context() {
     assert!(prompt.contains("Live Draft"));
     assert!(prompt.contains(rec.run_id.as_str()));
 
-    let plugin = LoadedPlugin::load_from_dir(
+    let mut plugin = LoadedPlugin::load_source_from_dir(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("repo root")
             .join("plugins/hla-motif-enrichment"),
-        false,
     )
-    .expect("load plugin");
+    .expect("load source plugin");
+    plugin.manifest.image = format!(
+        "ghcr.io/alitheabio/hla-motif-enrichment@sha256:{}",
+        "8".repeat(64)
+    );
     runtime.register_plugin(plugin).await.expect("reg plugin");
 
     let (tx, mut rx) = mpsc::channel::<AgentStreamEvent>(8);

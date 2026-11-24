@@ -28,6 +28,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 rusqlite.workspace = true
 biocompass-core-traits = { workspace = true, features = ["local-sqlite"] }
 tempfile.workspace = true

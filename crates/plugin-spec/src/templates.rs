@@ -230,7 +230,7 @@ Invoke `{plugin_id}` when the scientist asks to evaluate HLA class I presentatio
         TemplateKind::PythonUv => {
             files.insert(
                 "Dockerfile".into(),
-                r#"FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+                r#"FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
 ENV HOME=/tmp UV_CACHE_DIR=/tmp/uv-cache PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml main.py ./
@@ -291,7 +291,7 @@ print(f"[python-uv] Wrote /out/result.json ({len(allele_rows)} alleles)", flush=
         TemplateKind::RBioc => {
             files.insert(
                 "Dockerfile".into(),
-                r#"FROM bioconductor/bioconductor_docker:RELEASE_3_20
+                r#"FROM bioconductor/bioconductor_docker:RELEASE_3_20@sha256:5053f59de1c1a79b5a05d820ba722bae62ded0c1042e547189aa0226f111ea7e
 WORKDIR /app
 RUN R -e "install.packages(c('jsonlite', 'arrow'), repos='https://cloud.r-project.org')"
 COPY run.R /app/run.R
@@ -326,7 +326,7 @@ write_json(out, "/out/result.json", auto_unbox = TRUE, pretty = TRUE)
         TemplateKind::Nextflow => {
             files.insert(
                 "Dockerfile".into(),
-                r#"FROM nfcore/base:2.1
+                r#"FROM nfcore/base:2.1@sha256:ec9af8615a0030e43c8c26027dc4348e6d339c78cc368477338c84eceb136fc6
 WORKDIR /pipeline
 COPY main.nf nextflow.config ./
 USER 65532:65532
@@ -369,13 +369,13 @@ workflow {
             files.insert(
                 "Dockerfile".into(),
                 format!(
-                    r#"FROM rust:1.85-slim-bookworm AS builder
+                    r#"FROM rust:1.85-slim-bookworm@sha256:9f841bbe9e7d8e37ceb96ed907265a3a0df7f44e3737d0b100e7907a679acb36 AS builder
 WORKDIR /src
 COPY Cargo.toml ./
 COPY src ./src
 RUN cargo build --release
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=builder /src/target/release/{slug} /usr/local/bin/plugin
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/plugin"]

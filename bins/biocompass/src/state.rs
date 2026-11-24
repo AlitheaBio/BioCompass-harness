@@ -643,7 +643,7 @@ fn collect_bundled_ui_roots(bundled_dir: &Path) -> HashMap<PluginId, PathBuf> {
         let dir = entry.path();
         if dir.is_dir()
             && dir.join("plugin.toml").is_file()
-            && let Ok(loaded) = LoadedPlugin::load_from_dir(&dir, true)
+            && let Ok(loaded) = LoadedPlugin::load_source_from_dir(&dir)
         {
             map.insert(loaded.manifest.id, dir);
         }
@@ -695,7 +695,12 @@ async fn load_plugins_from_parent(
     dirs.sort();
     for dir in dirs {
         if dir.is_dir() && dir.join("plugin.toml").is_file() {
-            match LoadedPlugin::load_from_dir(&dir, allow_local_dev_tags) {
+            let loaded = if approve_curated {
+                LoadedPlugin::load_source_from_dir(&dir)
+            } else {
+                LoadedPlugin::load_from_dir(&dir, allow_local_dev_tags)
+            };
+            match loaded {
                 Ok(plugin) => {
                     let pid = plugin.manifest.id.clone();
                     let ver = plugin.manifest.version.clone();
@@ -711,7 +716,7 @@ async fn load_plugins_from_parent(
                         }
                         tracing::warn!("Skipping draft plugin {}: {}", dir.display(), err);
                     } else if approve_curated
-                        && let Ok(parsed_img) = OciImageRef::parse(&img_raw, true)
+                        && let Ok(parsed_img) = OciImageRef::parse_source_manifest_ref(&img_raw)
                     {
                         runtime
                             .approve_curated_module(pid, ver, parsed_img.canonical_module_hash())

@@ -7,7 +7,7 @@ description = "Interactive source-gene hotspot profiler and IC50 binding tier ex
 category = "Target Discovery"
 execution = "either"
 requires_catalog_level = "rows"
-image = "ghcr.io/alitheabio/hla-interactive-explorer@sha256:d8ac5235ee9b5e7ff6538ad69651c7491b1ce46b382166c4ec3bbada47106536"
+image = "ghcr.io/alitheabio/hla-interactive-explorer:1.0.0"
 network = "none"
 price_milli_act = 5000
 

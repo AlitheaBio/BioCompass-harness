@@ -1,0 +1,846 @@
+name: BioCompass Module Release
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: Canonical OCI image repository without tag or digest (e.g. ghcr.io/alitheabio/bc-hla-import)
+        required: true
+        type: string
+      module_path:
+        description: Path to module directory relative to repository root
+        required: false
+        type: string
+        default: "."
+      python_test_command:
+        description: Command run in module_path to execute module tests (empty string to skip)
+        required: false
+        type: string
+        default: "uv run pytest -v"
+      python_version:
+        description: Python version for module tests
+        required: false
+        type: string
+        default: "3.12"
+      use_uv:
+        description: Install uv (astral-sh/setup-uv) for module tests
+        required: false
+        type: boolean
+        default: true
+      has_ui:
+        description: Whether the module includes a sandboxed Vite UI under <module_path>/ui
+        required: false
+        type: boolean
+        default: false
+      ui_test_command:
+        description: Test command run in <module_path>/ui when has_ui is true (empty string to skip)
+        required: false
+        type: string
+        default: "npm test"
+      ui_in_harness_workspace:
+        description: Set true only for bundled modules inside BioCompass-harness using root npm workspaces
+        required: false
+        type: boolean
+        default: false
+      needs_rust_mailbox:
+        description: Checkout sibling BioCompass-harness + Rust toolchain + built plugin-sdk for real mailbox tests
+        required: false
+        type: boolean
+        default: false
+      harness_ref:
+        description: Fallback BioCompass-harness ref when checking out sibling harness
+        required: false
+        type: string
+        default: "v2-architecture"
+      run_gitleaks:
+        description: Run checksum-pinned gitleaks secret scan over repository history
+        required: false
+        type: boolean
+        default: true
+      platforms:
+        description: Target OCI build platforms (comma-separated)
+        required: false
+        type: string
+        default: "linux/amd64,linux/arm64"
+      publish:
+        description: Push multi-arch image to GHCR, sign with Cosign, attest SBOM/manifest, and run verify job
+        required: false
+        type: boolean
+        default: false
+      trivy_ignore_unfixed:
+        description: Pass --ignore-unfixed to Trivy vulnerability gate (still fails on any fixable unwaived CRITICAL/HIGH)
+        required: false
+        type: boolean
+        default: true
+      trivy_ignore_file:
+        description: Optional path to a Trivy waiver file relative to repository root
+        required: false
+        type: string
+        default: ""
+      dockerfile:
+        description: Dockerfile path relative to module_path
+        required: false
+        type: string
+        default: "Dockerfile"
+      extra_build_context:
+        description: Optional newline-separated build-contexts passed to docker/build-push-action
+        required: false
+        type: string
+        default: ""
+    outputs:
+      image_digest:
+        description: Pushed multi-arch OCI image digest (sha256:...) when publish is true
+        value: ${{ jobs.build-and-publish.outputs.image_digest }}
+      pinned_image:
+        description: Canonical digest-pinned OCI image reference (<image_name>@sha256:...) when publish is true
+        value: ${{ jobs.build-and-publish.outputs.pinned_image }}
+      manifest_artifact:
+        description: Uploaded workflow artifact name containing stamped plugin.toml, package-manifest.json, and sbom.cdx.json
+        value: ${{ jobs.build-and-publish.outputs.manifest_artifact }}
+
+jobs:
+  gitleaks:
+    name: Secret Scan (gitleaks)
+    if: ${{ inputs.run_gitleaks }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks 8.30.1 (checksum-pinned binary)
+        run: |
+          curl -sSLo /tmp/gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+      - name: Run gitleaks
+        run: /tmp/gitleaks git . --redact --no-banner --exit-code 1
+
+  policy:
+    name: Dockerfile Digest Pinning & Manifest Policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Enforce digest-pinned Dockerfile base images & digest-free git plugin.toml
+        env:
+          MODULE_PATH: ${{ inputs.module_path }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys, tomllib
+
+          mod_dir = pathlib.Path(os.environ["MODULE_PATH"]).resolve()
+          dockerfile_path = mod_dir / os.environ["DOCKERFILE"]
+          manifest_path = mod_dir / "plugin.toml"
+          expected_image_name = os.environ["IMAGE_NAME"].strip().lower()
+
+          if not dockerfile_path.is_file():
+              sys.exit(f"ERROR: Dockerfile not found at {dockerfile_path}")
+          if not manifest_path.is_file():
+              sys.exit(f"ERROR: plugin.toml not found at {manifest_path}")
+
+          # 1. Parse Dockerfile (join line continuations, resolve ARG defaults, verify every external FROM has @sha256:<64-hex>).
+          raw_lines = dockerfile_path.read_text(encoding="utf-8").splitlines()
+          logical_lines: list[tuple[int, str]] = []
+          buf = ""
+          start_no = 1
+          for idx, line in enumerate(raw_lines, start=1):
+              stripped = line.strip()
+              if not buf:
+                  if not stripped or stripped.startswith("#"):
+                      continue
+                  start_no = idx
+              if stripped.endswith("\\"):
+                  buf += stripped[:-1] + " "
+              else:
+                  buf += stripped
+                  logical_lines.append((start_no, buf.strip()))
+                  buf = ""
+          if buf.strip():
+              logical_lines.append((start_no, buf.strip()))
+
+          global_args: dict[str, str] = {}
+          stages: set[str] = set()
+          saw_from = False
+          errors: list[str] = []
+
+          def expand_args(text: str, mapping: dict[str, str]) -> str:
+              def repl(m: re.Match[str]) -> str:
+                  name = m.group(1) or m.group(3)
+                  default = m.group(2)
+                  if name in mapping and mapping[name] != "":
+                      return mapping[name]
+                  if default is not None:
+                      return default
+                  return m.group(0)
+              return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)", repl, text)
+
+          digest_re = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+          for line_no, stmt in logical_lines:
+              parts = stmt.split(None, 1)
+              if len(parts) < 2:
+                  continue
+              instr = parts[0].upper()
+              rest = parts[1].strip()
+              if instr == "ARG" and not saw_from:
+                  if "=" in rest:
+                      k, v = rest.split("=", 1)
+                      v = v.strip().strip('"').strip("'")
+                      global_args[k.strip()] = expand_args(v, global_args)
+              elif instr == "FROM":
+                  saw_from = True
+                  tokens = rest.split()
+                  idx = 0
+                  while idx < len(tokens) and tokens[idx].startswith("--"):
+                      idx += 1
+                  if idx >= len(tokens):
+                      errors.append(f"{dockerfile_path.name}:{line_no}: malformed FROM instruction '{stmt}'")
+                      continue
+                  raw_ref = tokens[idx]
+                  resolved_ref = expand_args(raw_ref, global_args)
+                  alias = None
+                  if idx + 2 < len(tokens) and tokens[idx + 1].upper() == "AS":
+                      alias = tokens[idx + 2].lower()
+                  if resolved_ref.lower() != "scratch" and resolved_ref.lower() not in stages:
+                      if not digest_re.search(resolved_ref):
+                          errors.append(
+                              f"{dockerfile_path.name}:{line_no}: base image '{resolved_ref}' MUST be pinned by immutable '@sha256:<64-hex>' digest"
+                          )
+                  if alias:
+                      stages.add(alias)
+
+          if not saw_from:
+              errors.append(f"{dockerfile_path.name}: no FROM instruction found")
+
+          # 2. Validate plugin.toml carries canonical unpinned image ref (no hand-written @sha256: or local/loopback refs).
+          manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+          for key in ("id", "version", "image"):
+              val = manifest.get(key)
+              if not isinstance(val, str) or not val.strip():
+                  errors.append(f"plugin.toml: missing or empty '{key}'")
+          image = str(manifest.get("image", "")).strip()
+          if "@sha256:" in image or "@" in image:
+              errors.append(
+                  f"plugin.toml: image '{image}' must not carry a hand-written '@sha256:' digest; CI writes the digest into the published package manifest"
+              )
+          elif image.startswith(("127.0.0.1", "localhost", "local/")):
+              errors.append(
+                  f"plugin.toml: image '{image}' must use canonical GHCR repository '{expected_image_name}:<version>', not a local/loopback ref"
+              )
+          elif ":" not in image or image.rsplit(":", 1)[0].lower() != expected_image_name:
+              errors.append(
+                  f"plugin.toml: image '{image}' must match '{expected_image_name}:<tag>'"
+              )
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"OK: {dockerfile_path.name} base images are @sha256-pinned; plugin.toml ({manifest['id']} v{manifest['version']}) uses canonical source image '{image}'")
+          PY
+
+  test:
+    name: Module Tests
+    if: ${{ inputs.python_test_command != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository (standalone)
+        if: ${{ !inputs.needs_rust_mailbox }}
+        uses: actions/checkout@v4
+      - name: Checkout repository (with sibling BioCompass-harness)
+        if: ${{ inputs.needs_rust_mailbox }}
+        uses: actions/checkout@v4
+        with:
+          path: module
+      - name: Pick paired BioCompass-harness branch
+        if: ${{ inputs.needs_rust_mailbox }}
+        id: harness_ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          FALLBACK_REF: ${{ inputs.harness_ref }}
+        run: |
+          if git ls-remote --exit-code --heads https://github.com/AlitheaBio/BioCompass-harness.git "$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$FALLBACK_REF" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout BioCompass-harness (plugin SDK & Rust mailbox responder)
+        if: ${{ inputs.needs_rust_mailbox }}
+        uses: actions/checkout@v4
+        with:
+          repository: AlitheaBio/BioCompass-harness
+          ref: ${{ steps.harness_ref.outputs.ref }}
+          path: BioCompass-harness
+      - name: Install native build dependencies for Rust mailbox tests
+        if: ${{ inputs.needs_rust_mailbox }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev g++ cmake make
+      - name: Setup Rust toolchain (1.94.0)
+        if: ${{ inputs.needs_rust_mailbox }}
+        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Node.js 22 for mailbox/UI tests
+        if: ${{ inputs.needs_rust_mailbox }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build @biocompass/plugin-sdk
+        if: ${{ inputs.needs_rust_mailbox }}
+        working-directory: BioCompass-harness
+        run: npm ci && npm run build --workspace packages/plugin-sdk
+      - name: Install UI dependencies for Python sanitizer tests
+        if: ${{ inputs.needs_rust_mailbox && inputs.has_ui }}
+        working-directory: module/${{ inputs.module_path }}/ui
+        run: npm ci
+      - name: Install uv
+        if: ${{ inputs.use_uv }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: Setup Python
+        if: ${{ !inputs.use_uv }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+      - name: Run module test suite (standalone)
+        if: ${{ !inputs.needs_rust_mailbox }}
+        working-directory: ${{ inputs.module_path }}
+        run: ${{ inputs.python_test_command }}
+      - name: Run module test suite (with Rust mailbox harness)
+        if: ${{ inputs.needs_rust_mailbox }}
+        working-directory: module/${{ inputs.module_path }}
+        env:
+          BIOCOMPASS_HARNESS_DIR: ${{ github.workspace }}/BioCompass-harness
+          BIOCOMPASS_REQUIRE_RUST_MAILBOX: "1"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: ${{ inputs.python_test_command }}
+
+  ui:
+    name: Sandboxed Module UI (test, typecheck, build)
+    if: ${{ inputs.has_ui }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository (harness workspace)
+        if: ${{ inputs.ui_in_harness_workspace }}
+        uses: actions/checkout@v4
+      - name: Setup Node.js 22 (harness workspace)
+        if: ${{ inputs.ui_in_harness_workspace }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install workspace dependencies & build @biocompass/plugin-sdk
+        if: ${{ inputs.ui_in_harness_workspace }}
+        run: npm ci && npm run build --workspace packages/plugin-sdk
+      - name: Test, typecheck & build UI (harness workspace)
+        if: ${{ inputs.ui_in_harness_workspace }}
+        working-directory: ${{ inputs.module_path }}/ui
+        env:
+          UI_TEST_CMD: ${{ inputs.ui_test_command }}
+        run: |
+          if [ -n "$UI_TEST_CMD" ]; then
+            eval "$UI_TEST_CMD"
+          fi
+          npm run typecheck
+          npm run build
+
+      - name: Checkout repository (external module)
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        uses: actions/checkout@v4
+        with:
+          path: module
+      - name: Pick paired BioCompass-harness branch
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        id: harness_ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          FALLBACK_REF: ${{ inputs.harness_ref }}
+        run: |
+          if git ls-remote --exit-code --heads https://github.com/AlitheaBio/BioCompass-harness.git "$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$FALLBACK_REF" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout BioCompass-harness (@biocompass/plugin-sdk)
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        uses: actions/checkout@v4
+        with:
+          repository: AlitheaBio/BioCompass-harness
+          ref: ${{ steps.harness_ref.outputs.ref }}
+          path: BioCompass-harness
+      - name: Setup Node.js 22 (external module)
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: module/**/ui/package-lock.json
+      - name: Build @biocompass/plugin-sdk
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        working-directory: BioCompass-harness
+        run: npm ci && npm run build --workspace packages/plugin-sdk
+      - name: Install, test, typecheck & build UI (external module)
+        if: ${{ !inputs.ui_in_harness_workspace }}
+        working-directory: module/${{ inputs.module_path }}/ui
+        env:
+          UI_TEST_CMD: ${{ inputs.ui_test_command }}
+        run: |
+          npm ci
+          if [ -n "$UI_TEST_CMD" ]; then
+            eval "$UI_TEST_CMD"
+          fi
+          npm run typecheck
+          npm run build
+
+  build-and-publish:
+    name: Build, Scan, SBOM, Publish & Sign
+    needs:
+      - gitleaks
+      - policy
+      - test
+      - ui
+    if: ${{ always() && needs.policy.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+      pinned_image: ${{ steps.manifest.outputs.pinned_image }}
+      manifest_artifact: ${{ steps.manifest.outputs.artifact_name }}
+      trivy_ignore: ${{ steps.module.outputs.trivy_ignore }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Read module metadata & Trivy waiver path
+        id: module
+        env:
+          MODULE_PATH: ${{ inputs.module_path }}
+          TRIVY_IGNORE_FILE: ${{ inputs.trivy_ignore_file }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+
+          mod_dir = pathlib.Path(os.environ["MODULE_PATH"])
+          data = tomllib.loads((mod_dir / "plugin.toml").read_text(encoding="utf-8"))
+          mod_id = data["id"].strip()
+          version = data["version"].strip()
+          slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", mod_id).strip("-").lower()
+
+          explicit_ignore = os.environ["TRIVY_IGNORE_FILE"].strip()
+          candidates = [p for p in [explicit_ignore, str(mod_dir / ".trivyignore"), ".trivyignore"] if p]
+          trivy_ignore = ""
+          for c in candidates:
+              if pathlib.Path(c).is_file():
+                  trivy_ignore = c
+                  break
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"id={mod_id}\n")
+              out.write(f"version={version}\n")
+              out.write(f"slug={slug}\n")
+              out.write(f"trivy_ignore={trivy_ignore}\n")
+          PY
+      - name: Set up QEMU (for multi-arch arm64 builds)
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build linux/amd64 image for pre-publish vulnerability gate & SBOM
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.module_path }}
+          file: ${{ inputs.module_path }}/${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ inputs.image_name }}:ci-scan
+          build-contexts: ${{ inputs.extra_build_context }}
+          cache-from: type=gha,scope=${{ steps.module.outputs.slug }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ steps.module.outputs.slug }}-amd64
+      - name: Vulnerability gate (Trivy — fail on unwaived CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.image_name }}:ci-scan
+          format: table
+          exit-code: "1"
+          ignore-unfixed: ${{ inputs.trivy_ignore_unfixed }}
+          vuln-type: os,library
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          trivyignores: ${{ steps.module.outputs.trivy_ignore }}
+      - name: Generate CycloneDX SBOM
+        run: mkdir -p dist
+      - name: Run Syft CycloneDX SBOM generation
+        uses: anchore/sbom-action@v0.24.4
+        with:
+          image: ${{ inputs.image_name }}:ci-scan
+          format: cyclonedx-json
+          output-file: dist/sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Verify multi-arch build compiles (non-publish PR check)
+        if: ${{ !inputs.publish }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.module_path }}
+          file: ${{ inputs.module_path }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          load: false
+          push: false
+          provenance: false
+          build-contexts: ${{ inputs.extra_build_context }}
+          cache-from: type=gha,scope=${{ steps.module.outputs.slug }}-multi
+          cache-to: type=gha,mode=max,scope=${{ steps.module.outputs.slug }}-multi
+
+      - name: Log in to GHCR
+        if: ${{ inputs.publish }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract Docker metadata
+        if: ${{ inputs.publish }}
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+            type=raw,value=${{ steps.module.outputs.version }}
+      - name: Build and push multi-arch OCI image to GHCR
+        if: ${{ inputs.publish }}
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.module_path }}
+          file: ${{ inputs.module_path }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-contexts: ${{ inputs.extra_build_context }}
+          cache-from: type=gha,scope=${{ steps.module.outputs.slug }}-multi
+          cache-to: type=gha,mode=max,scope=${{ steps.module.outputs.slug }}-multi
+      - name: Stamp pushed @sha256 digest into published package manifest
+        if: ${{ inputs.publish }}
+        id: manifest
+        env:
+          MODULE_PATH: ${{ inputs.module_path }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORMS: ${{ inputs.platforms }}
+          SLUG: ${{ steps.module.outputs.slug }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, sys, tomllib
+
+          mod_dir = pathlib.Path(os.environ["MODULE_PATH"])
+          image_name = os.environ["IMAGE_NAME"].strip()
+          digest = os.environ["IMAGE_DIGEST"].strip()
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              sys.exit(f"ERROR: unexpected pushed digest '{digest}'")
+          pinned_image = f"{image_name}@{digest}"
+
+          src_raw = (mod_dir / "plugin.toml").read_text(encoding="utf-8")
+          before = tomllib.loads(src_raw)
+
+          # Rewrite only the top-level `image = ...` line (before any [table] header).
+          lines = src_raw.splitlines(keepends=True)
+          in_preamble = True
+          replaced = 0
+          out_lines = []
+          img_line_re = re.compile(r'^(\s*image\s*=\s*)("[^"\n]*"|\'[^\'\n]*\')(\s*(?:#.*)?)$')
+          for line in lines:
+              stripped = line.lstrip()
+              if in_preamble and stripped.startswith("["):
+                  in_preamble = False
+              if in_preamble:
+                  m = img_line_re.match(line.rstrip("\r\n"))
+                  if m:
+                      nl = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+                      line = f'{m.group(1)}"{pinned_image}"{m.group(3)}{nl}'
+                      replaced += 1
+              out_lines.append(line)
+
+          if replaced != 1:
+              sys.exit(f"ERROR: expected exactly 1 top-level image assignment in plugin.toml, replaced {replaced}")
+
+          stamped_raw = "".join(out_lines)
+          after = tomllib.loads(stamped_raw)
+          if after.get("image") != pinned_image:
+              sys.exit(f"ERROR: stamped plugin.toml image mismatch: {after.get('image')!r} != {pinned_image!r}")
+          before_rest = {k: v for k, v in before.items() if k != "image"}
+          after_rest = {k: v for k, v in after.items() if k != "image"}
+          if before_rest != after_rest:
+              sys.exit("ERROR: stamping plugin.toml unexpectedly altered non-image fields")
+
+          dist_dir = pathlib.Path("dist")
+          dist_dir.mkdir(parents=True, exist_ok=True)
+          stamped_path = dist_dir / "plugin.toml"
+          stamped_path.write_text(stamped_raw, encoding="utf-8")
+          plugin_toml_sha256 = hashlib.sha256(stamped_raw.encode("utf-8")).hexdigest()
+
+          pkg_manifest = {
+              "schema": "biocompass.module-package-manifest.v1",
+              "id": after["id"],
+              "version": after["version"],
+              "image": pinned_image,
+              "image_digest": digest,
+              "platforms": [p.strip() for p in os.environ["PLATFORMS"].split(",") if p.strip()],
+              "source_repo": os.environ["SOURCE_REPO"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "plugin_toml_sha256": plugin_toml_sha256,
+          }
+          (dist_dir / "package-manifest.json").write_text(
+              json.dumps(pkg_manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          artifact_name = f"module-package-{os.environ['SLUG']}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"pinned_image={pinned_image}\n")
+              out.write(f"artifact_name={artifact_name}\n")
+          print(f"Stamped published manifest: {after['id']} v{after['version']} -> {pinned_image}")
+          PY
+      - name: Install Cosign
+        if: ${{ inputs.publish }}
+        uses: sigstore/cosign-installer@v4.1.3
+      - name: Keyless Sigstore Cosign sign multi-arch image & child manifests
+        if: ${{ inputs.publish }}
+        env:
+          PINNED_IMAGE: ${{ steps.manifest.outputs.pinned_image }}
+        run: |
+          cosign sign --yes --recursive "$PINNED_IMAGE"
+      - name: Attach keyless-signed CycloneDX SBOM & package manifest attestations
+        if: ${{ inputs.publish }}
+        env:
+          PINNED_IMAGE: ${{ steps.manifest.outputs.pinned_image }}
+        run: |
+          cosign attest --yes --predicate dist/sbom.cdx.json --type cyclonedx "$PINNED_IMAGE"
+          cosign attest --yes --predicate dist/package-manifest.json --type https://biocompass.alitheabio.com/module-package-manifest/v1 "$PINNED_IMAGE"
+      - name: Upload published package manifest & SBOM artifact
+        if: ${{ inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.manifest.outputs.artifact_name }}
+          path: |
+            dist/plugin.toml
+            dist/package-manifest.json
+            dist/sbom.cdx.json
+          if-no-files-found: error
+
+  verify:
+    name: Verify Multi-Arch Digest, Manifest & Signatures
+    needs:
+      - build-and-publish
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository (for optional .trivyignore waiver)
+        uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download published package manifest & SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-and-publish.outputs.manifest_artifact }}
+          path: dist
+      - name: Verify published package manifest equals pushed pinned digest
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ needs.build-and-publish.outputs.image_digest }}
+          PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, sys, tomllib
+
+          expected_digest = os.environ["IMAGE_DIGEST"].strip()
+          expected_pinned = f"{os.environ['IMAGE_NAME'].strip()}@{expected_digest}"
+          if os.environ["PINNED_IMAGE"].strip() != expected_pinned:
+              sys.exit(f"ERROR: pinned_image output mismatch: {os.environ['PINNED_IMAGE']!r} != {expected_pinned!r}")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest):
+              sys.exit(f"ERROR: invalid pushed digest '{expected_digest}'")
+
+          stamped_bytes = pathlib.Path("dist/plugin.toml").read_bytes()
+          stamped_toml = tomllib.loads(stamped_bytes.decode("utf-8"))
+          if stamped_toml.get("image") != expected_pinned:
+              sys.exit(f"ERROR: published plugin.toml image '{stamped_toml.get('image')}' != pushed '{expected_pinned}'")
+
+          pkg = json.loads(pathlib.Path("dist/package-manifest.json").read_text(encoding="utf-8"))
+          if pkg.get("image") != expected_pinned or pkg.get("image_digest") != expected_digest:
+              sys.exit(f"ERROR: package-manifest.json digest mismatch: {pkg}")
+          actual_toml_sha = hashlib.sha256(stamped_bytes).hexdigest()
+          if pkg.get("plugin_toml_sha256") != actual_toml_sha:
+              sys.exit(f"ERROR: plugin_toml_sha256 mismatch: {pkg.get('plugin_toml_sha256')} != {actual_toml_sha}")
+
+          sbom = json.loads(pathlib.Path("dist/sbom.cdx.json").read_text(encoding="utf-8"))
+          if sbom.get("bomFormat") != "CycloneDX":
+              sys.exit(f"ERROR: dist/sbom.cdx.json is not CycloneDX: {sbom.get('bomFormat')!r}")
+
+          print(f"VERIFIED published manifest: {stamped_toml['id']} v{stamped_toml['version']} == {expected_pinned}")
+          PY
+      - name: Verify multi-arch manifest list in GHCR contains linux/amd64 and linux/arm64
+        id: multiarch
+        env:
+          PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+          IMAGE_DIGEST: ${{ needs.build-and-publish.outputs.image_digest }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          docker buildx imagetools inspect --raw "$PINNED_IMAGE" > /tmp/index.json
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, sys
+
+          raw = pathlib.Path("/tmp/index.json").read_bytes()
+          expected_hex = os.environ["IMAGE_DIGEST"].removeprefix("sha256:")
+          actual_hex = hashlib.sha256(raw).hexdigest()
+          if actual_hex != expected_hex:
+              sys.exit(f"ERROR: GHCR manifest index SHA-256 mismatch: expected {expected_hex}, got {actual_hex}")
+
+          index = json.loads(raw.decode("utf-8"))
+          manifests = index.get("manifests")
+          if not isinstance(manifests, list) or not manifests:
+              sys.exit(f"ERROR: expected multi-arch manifest list / OCI index, got mediaType={index.get('mediaType')!r}")
+
+          found: dict[str, str] = {}
+          for m in manifests:
+              plat = m.get("platform") or {}
+              os_name = plat.get("os")
+              arch = plat.get("architecture")
+              digest = m.get("digest", "")
+              if os_name and arch and os_name != "unknown" and arch != "unknown":
+                  if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                      sys.exit(f"ERROR: invalid child manifest digest '{digest}' for {os_name}/{arch}")
+                  found[f"{os_name}/{arch}"] = digest
+
+          required = [p.strip() for p in os.environ["PLATFORMS"].split(",") if p.strip()]
+          missing = [p for p in required if p not in found]
+          if missing:
+              sys.exit(f"ERROR: missing required platforms {missing}; found {found}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for plat, dig in sorted(found.items()):
+                  key = plat.replace("/", "_")
+                  out.write(f"{key}={dig}\n")
+          print(f"VERIFIED multi-arch OCI index ({actual_hex}): {found}")
+          PY
+      - name: Verify both linux/amd64 and linux/arm64 are pullable by @sha256 digest
+        env:
+          PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+        run: |
+          for plat in linux/amd64 linux/arm64; do
+            docker pull --platform "$plat" "$PINNED_IMAGE"
+            actual="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$PINNED_IMAGE")"
+            if [ "$actual" != "$plat" ]; then
+              echo "::error::Expected pulled platform $plat for $PINNED_IMAGE, got $actual" >&2
+              exit 1
+            fi
+            echo "VERIFIED pullable by digest: $PINNED_IMAGE ($actual)"
+            if [ "$plat" = "linux/amd64" ]; then
+              docker rmi -f "$PINNED_IMAGE" >/dev/null
+            fi
+          done
+      - name: Vulnerability gate on pushed linux/arm64 image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ needs.build-and-publish.outputs.pinned_image }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: ${{ inputs.trivy_ignore_unfixed }}
+          vuln-type: os,library
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          trivyignores: ${{ needs.build-and-publish.outputs.trivy_ignore }}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.3
+      - name: Verify keyless Sigstore Cosign signature & attestations
+        env:
+          PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+          IMAGE_DIGEST: ${{ needs.build-and-publish.outputs.image_digest }}
+          CALLER_REPO: ${{ github.repository }}
+        run: |
+          IDENTITY_REGEX='^https://github\.com/AlitheaBio/BioCompass-harness/\.github/workflows/module\.yml@'
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-github-workflow-repository "$CALLER_REPO" \
+            "$PINNED_IMAGE" >/dev/null
+          echo "VERIFIED Cosign keyless signature on $PINNED_IMAGE"
+
+          cosign verify-attestation \
+            --type cyclonedx \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-github-workflow-repository "$CALLER_REPO" \
+            "$PINNED_IMAGE" >/dev/null
+          echo "VERIFIED Cosign CycloneDX SBOM attestation on $PINNED_IMAGE"
+
+          cosign verify-attestation \
+            --type https://biocompass.alitheabio.com/module-package-manifest/v1 \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-github-workflow-repository "$CALLER_REPO" \
+            "$PINNED_IMAGE" > /tmp/manifest-attestation.jsonl
+
+          python3 - <<'PY'
+          import base64, json, os, pathlib, sys
+
+          expected_digest = os.environ["IMAGE_DIGEST"].strip()
+          lines = [l for l in pathlib.Path("/tmp/manifest-attestation.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+          if not lines:
+              sys.exit("ERROR: empty package manifest attestation output")
+          matched = False
+          for line in lines:
+              envelope = json.loads(line)
+              payload = json.loads(base64.b64decode(envelope["payload"]).decode("utf-8"))
+              pred = payload.get("predicate", {})
+              if pred.get("image_digest") == expected_digest:
+                  matched = True
+                  break
+          if not matched:
+              sys.exit(f"ERROR: attested package manifest did not match pushed digest '{expected_digest}'")
+          print(f"VERIFIED Cosign package manifest attestation matches {expected_digest}")
+          PY
+      - name: Write verification summary
+        env:
+          PINNED_IMAGE: ${{ needs.build-and-publish.outputs.pinned_image }}
+          AMD64_DIGEST: ${{ steps.multiarch.outputs.linux_amd64 }}
+          ARM64_DIGEST: ${{ steps.multiarch.outputs.linux_arm64 }}
+        run: |
+          {
+            echo "### Verified BioCompass Module Release"
+            echo "- **Pinned multi-arch image:** \`$PINNED_IMAGE\`"
+            echo "- **linux/amd64:** \`$AMD64_DIGEST\`"
+            echo "- **linux/arm64:** \`$ARM64_DIGEST\`"
+            echo "- **Published manifest digest:** matches pushed digest"
+            echo "- **Supply chain:** keyless Sigstore Cosign signed + CycloneDX SBOM attested + Trivy CRITICAL/HIGH gate passed"
+          } >> "$GITHUB_STEP_SUMMARY"
